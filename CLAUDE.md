@@ -89,6 +89,8 @@ manifest `split` column. No GPU.
 
 ## Results so far (held-out chromosomes, logistic head)
 
+Full tables + interpretation + caveats in [`FINDINGS.md`](FINDINGS.md). Summary:
+
 - AlphaGenome 16k 0.844 · Evo2 blk28 0.881 · **AG+Evo2 0.901** AUROC (linear).
 - Non-canonical / alternative TIS hold up: 0.886 (uORF 0.95, extension 0.94, dTIS 0.84).
 - Near-neighbour (true base-resolution) win-rate @64bp: AG 0.70 · Evo2 0.75 · combined 0.82
