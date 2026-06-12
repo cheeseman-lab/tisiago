@@ -1,0 +1,12 @@
+# TIS per-candidate extraction — AlphaGenome 1bp decoder, 16 kb centered windows.
+# Env: alphagenome
+model: alphagenome_jax
+input_fasta: ""          # unused: extract_candidates.py fetches windows from the genome
+output_dir: ./data/tis/parts
+output_format: h5
+batch_size: 4            # tiles per forward pass (A6000); A100 can go higher
+device: cuda
+dtype: bfloat16
+embedding_resolution: 1bp
+extract_tracks: false
+alphagenome_weights_path: /lab/barcheese01/mdiberna/gruyerenome/weights/alphagenome-all-folds

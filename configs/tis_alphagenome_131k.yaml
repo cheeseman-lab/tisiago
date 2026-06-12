@@ -1,0 +1,12 @@
+# TIS per-candidate extraction — AlphaGenome 1bp decoder, 131 kb centered windows.
+# Env: alphagenome.  131 kb holds the full (B, S, 1536) on-GPU, so keep batch small.
+model: alphagenome_jax
+input_fasta: ""
+output_dir: ./data/tis/parts
+output_format: h5
+batch_size: 2
+device: cuda
+dtype: bfloat16
+embedding_resolution: 1bp
+extract_tracks: false
+alphagenome_weights_path: /lab/barcheese01/mdiberna/gruyerenome/weights/alphagenome-all-folds
