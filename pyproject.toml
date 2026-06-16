@@ -45,6 +45,7 @@ pydocstyle = { convention = "google" }
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*.py" = ["D100", "D103"]
+"autoresearch/*.py" = ["D103"]  # runnable experiment scripts, not library code
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

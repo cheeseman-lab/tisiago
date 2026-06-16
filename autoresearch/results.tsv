@@ -1,0 +1,4 @@
+commit	objective	auprc_val	auroc_val	recall1fp_val	winrate64_val	auprc_test	auroc_test	recall1fp_test	winrate64_test	status	description
+baseline	-	0.2667	0.5035	0.1256	0.4795	0.2433	0.4902	0.1122	0.4499	baseline	onehot codon (control — codon identity ~chance, embeddings are contextual)
+baseline	-	0.5641	0.7700	0.4785	0.7608	0.5304	0.7532	0.4454	0.7279	baseline	onehot kozak +/-20bp (sequence floor — embeddings must beat this)
+baseline	-	0.7785	0.9077	0.7682	0.8030	0.7595	0.9052	0.7506	0.8162	baseline	AG16k + Evo2 blk28 off0, logistic (FINDINGS headline reference)
