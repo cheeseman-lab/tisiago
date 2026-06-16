@@ -14,6 +14,8 @@ codon)`` to equal the curated manifest for every existing candidate.
 
 from __future__ import annotations
 
+import numpy as np
+
 # The 9 single-substitution neighbours of ATG (matches the curated negatives).
 NEAR_COGNATES = {"CTG", "GTG", "TTG", "AAG", "ACG", "AGG", "ATA", "ATC", "ATT"}
 
@@ -33,3 +35,19 @@ def classify_codon(codon: str) -> str:
     if c in NEAR_COGNATES:
         return "near_cognate"
     return "non_cognate"
+
+
+def spliced_positions(exons, strand: str) -> np.ndarray:
+    """Plus-strand genomic coordinate of each base in mRNA 5'->3' order.
+
+    Args:
+        exons: list of (start, end) 0-based half-open genomic intervals (any order).
+        strand: ``"+"`` or ``"-"``.
+
+    Returns:
+        int array of length = total exon length; element ``i`` is the 0-based
+        genomic position of mRNA base ``i`` (reading 5'->3').
+    """
+    intervals = sorted(exons)  # ascending genomic
+    coords = np.concatenate([np.arange(s, e, dtype=np.int64) for s, e in intervals])
+    return coords if strand == "+" else coords[::-1].copy()
