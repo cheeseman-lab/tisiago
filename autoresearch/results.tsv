@@ -18,3 +18,4 @@ recall1fp-13	recall1fp	-	-	-	-	-	-	-	-	crash	Swap logistic for an MLP head (hidd
 recall1fp-14	recall1fp	-	-	-	-	-	-	-	-	crash	Swap logistic for a single-hidden-layer MLP (hidden=(128,), alpha=3.0) on the ~19k AG16k+AG131k+blk28-4offset+kozakW20 s
 recall1fp-15	recall1fp	0.8193	0.9243	0.8152	0.8335	0.7916	0.9186	0.7925	0.8242	discard	Switch L2 shrinkage for L1 sparse regularization (penalty=l1, solver=liblinear, C=0.05) on the ~19k AG16k+AG131k+blk28-4
 recall1fp-16	recall1fp	-	-	-	-	-	-	-	-	crash	Blend L1+L2 via elasticnet (penalty=elasticnet, solver=saga, l1_ratio=0.3, C=0.02) on the ~19k AG16k+AG131k+blk28-4offse
+recall1fp-17	recall1fp	0.8191	0.9226	0.7987	0.8347	0.7908	0.9186	0.7980	0.8242	discard	Push L1 sparsity stronger than the tied i15 (penalty=l1, solver=liblinear, C=0.05→0.02) on the ~19k AG16k+AG131k+blk28
