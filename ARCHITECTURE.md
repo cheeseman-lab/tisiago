@@ -43,7 +43,9 @@ src/tisiago/
 ├── store.py       assembler          .npz parts ──▶ row-aligned [N, D] .npy feature arrays
 ├── eval.py        head (CPU)         .npy ──▶ logistic/MLP ──▶ AUROC/AUPRC, stratified by start type
 ├── resolution.py  head (CPU)         .npy ──▶ logistic ──▶ near-neighbour win-rate (base resolution)
-└── caller.py      head (CPU)         .npy ──▶ calibrated p ──▶ reliability · recall @ FP/transcript budget
+├── caller.py      head (CPU)         .npy ──▶ calibrated p ──▶ reliability · recall @ FP/transcript budget
+├── enumerate_codons.py  scan setup (CPU)   GTF + genome ──▶ dense scan manifest (every codon)
+└── scan_eval.py         global caller (CPU) scan store ──▶ recall @ true imbalance · non-cognate≈0
 ```
 
 | Module | Purpose | Depends on | Testable as |
@@ -54,6 +56,8 @@ src/tisiago/
 | `eval.py` | Which embeddings carry signal; is it the *interesting* (non-canonical) kind | numpy/pandas/sklearn | runs on store, no GPU |
 | `resolution.py` | Is the signal at true single-nucleotide resolution | numpy/pandas/sklearn | runs on store, no GPU |
 | `caller.py` | Calibrated probability + caller-shaped metrics (deliverable track) | numpy/pandas/sklearn | runs on store, no GPU |
+| `enumerate_codons.py` | GTF→dense scan manifest of every codon (Phase 2) | numpy/pandas/pyfaidx | pure fns unit-tested; coords checked vs manifest |
+| `scan_eval.py` | Apply calibrated head to the dense scan store (Phase 2) | numpy/pandas, `caller` | logic unit-tested; numbers need scan store |
 
 The cut that matters: **`tiling` is pure and `extract` is a thin driver around it.** All the
 subtle coordinate logic (strand, revcomp orientation, grid snap, edge safety) lives in the
