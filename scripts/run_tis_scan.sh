@@ -22,6 +22,12 @@
 #   ENV       : conda env (alphagenome for ag*, evo2 for evo2_8k)
 #   N_SHARDS  : must equal the array size
 #
+# MEMORY: the dense scan slices ~300k positions/shard. extract.py accumulates all
+# sliced vectors in RAM before writing, so evo2_8k (3 layers x 4 offsets = 12 keys,
+# 4096-dim) needs ~85 GB/shard — OVERRIDE the 64G default with `sbatch --mem=384G`
+# for evo2 (the A100 partition allows up to 1920G). ag16k (1 key) fits in 64G. A
+# cleaner long-term fix is to stream parts to disk or use more shards (see ROADMAP).
+#
 # Scope / size: the scan store is large — ~89 GB at 5632 dims (fp16) for test+val,
 # ~57 GB for test only. Calibration uses the CURATED val, so the scan only needs
 # TEST transcripts; regenerate test-only with

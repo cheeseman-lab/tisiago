@@ -52,9 +52,15 @@ The deliverable. Reuses the pipeline almost wholesale (window/position decouplin
 - `run_tis_scan.sh` — SLURM wrapper (reuses `extract.py`).
 
 **In flight (GPU):** scan extraction over the test-only manifest, headline keys.
-- ag16k → A6000 array `10177015` (~30–40 min)
-- evo2_8k → A100 array `10177016` (~2.5–3.5 hr; bottleneck — 2-GPU cap, 12 keys)
-- assemble → `10177022` (pending `afterok` both) → `data/scan_store/`
+- ag16k → A6000 array `10177015` (healthy, ~15/20 done)
+- evo2_8k → A100 array `10177404` (**resubmitted at 384G after OOM**; ~2.5–3.5 hr)
+- assemble → `10177405` (pending `afterok` ag16k + evo2) → `data/scan_store/`
+
+**⚠️ OOM lesson (logged):** the first evo2 array (`10177016`, 64G) OOM-killed —
+`extract.py` accumulates all sliced vectors in RAM, and the dense scan slices ~300k
+positions/shard × 12 evo2 keys ≈ 85 GB. Fixed by `--mem=384G` (A100 allows 1920G).
+**Architectural debt:** `extract.py` should stream parts to disk (or dense scans should
+use more shards) so dense extraction isn't memory-bound — worth a small follow-up.
 
 **Remaining to close P2:**
 - [ ] (early) when ag16k clears: `python -m tisiago.store --manifest data/scan_manifest.parquet --parts-dir data/scan_parts --store-dir data/scan_store_ag` → `scan_eval --scan-store data/scan_store_ag --keys alphagenome_jax/L16k/decoder_1bp/off0.npy` for AG-only numbers.
