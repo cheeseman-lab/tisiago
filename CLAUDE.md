@@ -136,6 +136,12 @@ data/store/
 A head experiment = load a few `.npy`, `np.concatenate(axis=1)`, filter rows by the
 manifest `split` column. No GPU.
 
+The Phase-2 dense scan produces a parallel `data/scan_store/` (same layout) row-aligned to
+`data/scan_manifest.parquet` — *every* codon in held-out transcripts (from
+`tisiago.enumerate_codons`, ~7.9M positions test+val), scored by `tisiago.scan_eval` for
+recall at true imbalance + the non-cognate≈0 grounding. It is large (~57 GB test-only at
+the AG16k+Evo2 headline keys); scan test-only since calibration uses the curated `val`.
+
 ## Results so far (PoC — candidate ranking, held-out chromosomes, logistic head)
 
 Full tables + interpretation + caveats in [`FINDINGS.md`](FINDINGS.md). Summary:
