@@ -5,3 +5,4 @@ baseline	-	0.7785	0.9077	0.7682	0.8030	0.7595	0.9052	0.7506	0.8162	baseline	AG16
 recall1fp-1	recall1fp	0.7974	0.9147	0.7780	0.8206	0.7726	0.9074	0.7575	0.8336	keep	Stack all four Evo2 blk28 offsets (off0,3,6,9) + AG16k — richer base-resolution context for the recall1fp operating po
 recall1fp-2	recall1fp	0.8081	0.9186	0.7906	0.8265	0.7780	0.9105	0.7722	0.8429	keep	Add onehot/kozakW20 explicit local-sequence to AG16k+Evo2 blk28 4-offset stack — explicit Kozak context to sharpen nea
 recall1fp-3	recall1fp	0.7984	0.9158	0.7915	0.8265	0.7725	0.9107	0.7736	0.8389	keep	Add AG131k long-range decoder channel to AG16k+Evo2 blk28 4-offset+kozakW20 stack — orthogonal broad regional context 
+recall1fp-4	recall1fp	0.6719	0.8591	0.6507	0.7280	0.6552	0.8587	0.6540	0.7393	discard	Add Evo2 blk26 4-offset stack to AG16k+AG131k+blk28-4offset+kozakW20 — complementary mid-layer representation alongsid
