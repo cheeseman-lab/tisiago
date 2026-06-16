@@ -8,3 +8,4 @@ winrate64-3	winrate64	0.6451	0.8483	0.6372	0.7116	0.6289	0.8500	0.6288	0.7186	di
 winrate64-4	winrate64	0.8110	0.9200	0.7996	0.8277	0.7844	0.9131	0.7815	0.8456	keep	Tighten logistic L2 (C=1.0 -> 0.1) on best feature set (AG16k + 4 Evo2 blk28 offsets + Kozak) — counter overfitting th
 winrate64-5	winrate64	0.7829	0.9051	0.7614	0.8113	0.7578	0.9021	0.7408	0.8215	discard	Switch head from logistic to a regularized MLP (hidden=256, alpha=1e-3) on best feature set (AG16k + 4 Evo2 blk28 offset
 winrate64-6	winrate64	0.8060	0.9194	0.8009	0.8312	0.7816	0.9143	0.7832	0.8322	keep	Add AG131k decoder offsets to best (AG16k + 4 Evo2 blk28 offsets + Kozak, C=0.1) — longer-range regional context the 1
+winrate64-7	winrate64	0.8118	0.9217	0.8040	0.8253	0.7884	0.9167	0.7889	0.8309	discard	Tighten logistic L2 further (C=0.1 -> 0.03) on best feature set (AG16k + AG131k + 4 Evo2 blk28 offsets + Kozak) — cont
