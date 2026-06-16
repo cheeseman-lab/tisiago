@@ -25,6 +25,9 @@ from sklearn.preprocessing import StandardScaler
 FEATURE_KEYS = [
     "alphagenome_jax/L16k/decoder_1bp/off0.npy",
     "evo2/W8k/blocks.28.mlp.l3/off0.npy",
+    "evo2/W8k/blocks.28.mlp.l3/off3.npy",
+    "evo2/W8k/blocks.28.mlp.l3/off6.npy",
+    "evo2/W8k/blocks.28.mlp.l3/off9.npy",
 ]
 HEAD = "logistic"  # "logistic" | "mlp"
 HEAD_PARAMS = {"C": 1.0}  # logistic: C ; mlp: hidden_layer_sizes, alpha, ...
