@@ -12,3 +12,4 @@ recall1fp-7	recall1fp	0.8160	0.9235	0.8090	0.8218	0.7930	0.9184	0.7914	0.8329	ke
 recall1fp-8	recall1fp	0.8146	0.9236	0.8143	0.8242	0.7890	0.9176	0.7936	0.8289	keep	Set CLASS_WEIGHT="balanced" on the ~19k-dim AG16k+AG131k+blk28-4offset+kozakW20 C=0.01 stack — upweight positives to p
 recall1fp-9	recall1fp	0.8185	0.9248	0.8152	0.8253	0.7926	0.9190	0.7969	0.8322	keep	Push L2 further (logistic C 0.01→0.003) on the ~19k-dim AG16k+AG131k+blk28-4offset+kozakW20 balanced stack — continu
 recall1fp-10	recall1fp	0.8144	0.9238	0.8135	0.8230	0.7868	0.9173	0.7941	0.8316	discard	Upweight positives beyond balanced (CLASS_WEIGHT={0:1,1:6}, ~2x balanced's 3:1) on the C=0.003 ~19k stack — push the d
+recall1fp-11	recall1fp	0.8206	0.9248	0.8130	0.8312	0.7937	0.9195	0.7999	0.8309	discard	Push L2 further (logistic C 0.003→0.001) on the ~19k-dim AG16k+AG131k+blk28-4offset+kozakW20 balanced stack — extend
