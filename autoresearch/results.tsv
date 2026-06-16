@@ -8,3 +8,4 @@ recall1fp-3	recall1fp	0.7984	0.9158	0.7915	0.8265	0.7725	0.9107	0.7736	0.8389	ke
 recall1fp-4	recall1fp	0.6719	0.8591	0.6507	0.7280	0.6552	0.8587	0.6540	0.7393	discard	Add Evo2 blk26 4-offset stack to AG16k+AG131k+blk28-4offset+kozakW20 — complementary mid-layer representation alongsid
 recall1fp-5	recall1fp	0.8060	0.9194	0.8009	0.8312	0.7816	0.9143	0.7832	0.8322	keep	Tighten logistic regularization (C 1.0→0.1) on the ~19k-dim AG16k+AG131k+blk28-4offset+kozakW20 stack — stronger L2 
 recall1fp-6	recall1fp	0.8118	0.9217	0.8040	0.8253	0.7884	0.9167	0.7889	0.8309	keep	Push L2 further (logistic C 0.1→0.03) on the ~19k-dim AG16k+AG131k+blk28-4offset+kozakW20 stack — extend the regular
+recall1fp-7	recall1fp	0.8160	0.9235	0.8090	0.8218	0.7930	0.9184	0.7914	0.8329	keep	Push L2 further (logistic C 0.03→0.01) on the ~19k-dim AG16k+AG131k+blk28-4offset+kozakW20 stack — continue the mono
