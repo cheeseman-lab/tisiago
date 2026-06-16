@@ -11,3 +11,4 @@ auroc-6	auroc	0.8110	0.9200	0.7996	0.8277	0.7844	0.9131	0.7815	0.8456	keep	Conca
 auroc-7	auroc	0.8121	0.9205	0.8027	0.8300	0.7869	0.9141	0.7840	0.8422	keep	Tighten logistic L2 further (C 0.1->0.05) on AG16k+4xEvo2-blk28+Kozak — Kozak added dims, retune regularization
 auroc-8	auroc	0.8100	0.9207	0.8027	0.8288	0.7856	0.9158	0.7881	0.8309	keep	Re-add AG L131k long-range context to AG16k+4xEvo2-blk28+Kozak now under strong C=0.05 reg (orig L131k discard was confo
 auroc-9	auroc	0.8118	0.9217	0.8040	0.8253	0.7884	0.9167	0.7889	0.8309	keep	Tighten logistic L2 further (C 0.05->0.03) on AG16k+L131k+4xEvo2-blk28+Kozak — C curve (1.0->0.1->0.05) still monotoni
+auroc-10	auroc	0.8137	0.9225	0.8076	0.8218	0.7903	0.9174	0.7892	0.8275	keep	Tighten logistic L2 further (C 0.03->0.02) on AG16k+L131k+4xEvo2-blk28+Kozak — C curve (1.0->0.1->0.05->0.03) still st
