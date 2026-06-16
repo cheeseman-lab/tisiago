@@ -42,7 +42,8 @@ src/tisiago/
 ├── extract.py     GPU driver         tiles ──▶ genome fetch ──▶ embed_positions ──▶ .npz shard parts
 ├── store.py       assembler          .npz parts ──▶ row-aligned [N, D] .npy feature arrays
 ├── eval.py        head (CPU)         .npy ──▶ logistic/MLP ──▶ AUROC/AUPRC, stratified by start type
-└── resolution.py  head (CPU)         .npy ──▶ logistic ──▶ near-neighbour win-rate (base resolution)
+├── resolution.py  head (CPU)         .npy ──▶ logistic ──▶ near-neighbour win-rate (base resolution)
+└── caller.py      head (CPU)         .npy ──▶ calibrated p ──▶ reliability · recall @ FP/transcript budget
 ```
 
 | Module | Purpose | Depends on | Testable as |
@@ -52,10 +53,16 @@ src/tisiago/
 | `store.py` | Scatter shard parts into row-aligned arrays + provenance | numpy/pandas/yaml | integration (needs parts) |
 | `eval.py` | Which embeddings carry signal; is it the *interesting* (non-canonical) kind | numpy/pandas/sklearn | runs on store, no GPU |
 | `resolution.py` | Is the signal at true single-nucleotide resolution | numpy/pandas/sklearn | runs on store, no GPU |
+| `caller.py` | Calibrated probability + caller-shaped metrics (deliverable track) | numpy/pandas/sklearn | runs on store, no GPU |
 
 The cut that matters: **`tiling` is pure and `extract` is a thin driver around it.** All the
 subtle coordinate logic (strand, revcomp orientation, grid snap, edge safety) lives in the
 pure module that can be tested without a GPU; `extract` only does I/O and batching.
+
+**Two evaluation tracks:** `eval.py` / `resolution.py` measure *ranking* (AUROC,
+win-rate) — the PoC sanity check; `caller.py` measures the *deliverable* — a calibrated
+probability and recall at a false-positives-per-transcript budget. Phase 2's dense scan
+reuses `caller.py`'s metric functions unchanged.
 
 ---
 
