@@ -14,3 +14,4 @@ winrate64-9	winrate64	0.7940	0.9151	0.7906	0.8335	0.7647	0.9083	0.7673	0.8329	di
 winrate64-10	winrate64	0.7977	0.9163	0.7870	0.8335	0.7698	0.9102	0.7684	0.8349	discard	Loosen logistic L2 (C=0.1 -> 0.3) on best (AG16k + AG131k + 4 Evo2 blk28 offsets + Kozak, balanced) — re-optimize C lo
 winrate64-11	winrate64	0.7783	0.9111	0.7659	0.8030	0.7536	0.9031	0.7482	0.7975	discard	Break the logistic plateau with a compact regularized MLP (hidden=128, alpha=1e-2) on the best rich feature set, physica
 winrate64-12	winrate64	0.8161	0.9238	0.8139	0.8277	0.7899	0.9179	0.7911	0.8342	discard	Switch logistic penalty L2 -> L1 (liblinear, C=0.1) on best (AG16k + AG131k + 4 Evo2 blk28 offsets + Kozak, balanced) �
+winrate64-13	winrate64	0.6682	0.8599	0.6578	0.7315	0.6567	0.8604	0.6573	0.7426	discard	Re-add Evo2 blk26 offsets {0,3,6,9} to best (AG16k+AG131k+blk28x4+Kozak) but loosen L2 (C=0.1->1.0) — i3 collapsed add
