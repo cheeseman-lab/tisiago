@@ -49,3 +49,23 @@ predicts on `val`+`test`, and `evaluate.py` scores it.
 
 The one-hot keys are also usable *as features* — concatenate them with embeddings to test
 whether explicit local sequence complements the learned representation.
+
+## The experiment loop (how the fleet runs)
+The loop is driven by `launch_loop.sh` (one process per objective, in its own git worktree).
+Each iteration is a **fresh `claude -p` with no memory of prior iterations** — all state lives
+in git + `results.tsv`. Per iteration the shell does the deterministic work; the agent does
+exactly one thing:
+
+1. **Agent step (you, when invoked):** read this file, `results.tsv` (everything tried so
+   far), and the current `CONFIG` block of `train_experiment.py` (this is the current *best*
+   config — build on it). Propose ONE new, **untried** CONFIG change likely to raise
+   `${OBJECTIVE}_val`. Edit ONLY the CONFIG block. Write a one-line summary to
+   `autoresearch/.desc`. Do **not** run anything, commit, or touch `evaluate.py`.
+2. **Shell step (automatic):** runs `run.sh` (train→evaluate on a CPU node), parses the
+   metrics, compares `${OBJECTIVE}_val` to the running best (over `keep`/`baseline` rows),
+   **keeps** (commit, CONFIG advances) if strictly better else **discards**
+   (`git checkout -- train_experiment.py`, reverting to best). Every attempt — keep, discard,
+   or crash — is appended to `results.tsv` and committed. Then it loops.
+
+So you never see your own past failures as code, only as `results.tsv` rows: **read the
+descriptions to avoid repeating a config**. The loop never stops on its own.
