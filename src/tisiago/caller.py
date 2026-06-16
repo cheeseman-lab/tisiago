@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss
+from sklearn.metrics import average_precision_score, brier_score_loss
 from sklearn.preprocessing import StandardScaler
 
 
@@ -27,8 +27,8 @@ def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
     """Recall at the threshold whose mean false-positives-per-transcript ≤ budget.
 
     A false positive is a negative codon scored ≥ threshold. The budget is the mean,
-    over distinct transcripts, of such false positives. We pick the *lowest* threshold
-    (highest recall) that still satisfies the budget.
+    over distinct transcripts, of such false positives. We pick the *tightest* (highest)
+    threshold that reaches the maximum recall still satisfying the budget.
 
     Args:
         p: calibrated probabilities, shape [N].
@@ -191,6 +191,10 @@ def main() -> None:
     print(
         f"train={len(tr)} (of {len(tr_all)})  cal/val={len(cal)}  test={len(te)}  "
         f"test transcripts={len(np.unique(tx_te))}  test pos-rate={yte.mean():.3f}"
+    )
+    print(
+        f"\nAUPRC (ranking, calibration-invariant)={average_precision_score(yte, p_cal):.3f}  "
+        f"(baseline = test pos-rate = {yte.mean():.3f})"
     )
     print("\n-- calibration (held-out test) --")
     for name, p in [("raw logistic", p_raw), ("isotonic-calibrated", p_cal)]:
