@@ -15,8 +15,12 @@ codon)`` to equal the curated manifest for every existing candidate.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 # The 9 single-substitution neighbours of ATG (matches the curated negatives).
 NEAR_COGNATES = {"CTG", "GTG", "TTG", "AAG", "ACG", "AGG", "ATA", "ATC", "ATT"}
@@ -93,3 +97,106 @@ def parse_gtf_exons(gtf_path: str, keep: set[str] | None = None) -> dict:
     for rec in models.values():
         rec["exons"].sort()
     return models
+
+
+_COMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def _revcomp(s: str) -> str:
+    return s.translate(_COMP)[::-1]
+
+
+def enumerate_transcript(tx: str, model: dict, fa) -> "pd.DataFrame":
+    """Enumerate every codon of one transcript into a DataFrame.
+
+    Args:
+        tx: transcript id.
+        model: ``{"chrom", "strand", "exons"}`` from ``parse_gtf_exons``.
+        fa: an open ``pyfaidx.Fasta`` over the genome.
+
+    Returns:
+        DataFrame with ``transcript_id, chrom, strand, mrna_index, gstart, codon,
+        codon_class`` — one row per reading position ``0..L-3`` (codons with N skipped).
+    """
+    import pandas as pd
+
+    chrom, strand, exons = model["chrom"], model["strand"], model["exons"]
+    coords = spliced_positions(exons, strand)
+    seq = "".join(str(fa[chrom][s:e]) for s, e in exons)
+    mrna = seq if strand == "+" else _revcomp(seq)
+    # gstart convention (confirmed against the curated manifest):
+    #   + : gstart = coords[i]      ;  - : gstart = coords[i] + 1
+    # (so tiling.a_plus_of(gstart, '-') = gstart - 1 = coords[i], the plus-strand A.)
+    g_off = 0 if strand == "+" else 1
+    recs = []
+    L = len(mrna)
+    for i in range(L - 2):
+        codon = mrna[i : i + 3]
+        if "N" in codon:
+            continue
+        recs.append((tx, chrom, strand, i, int(coords[i]) + g_off, codon, classify_codon(codon)))
+    cols = ["transcript_id", "chrom", "strand", "mrna_index", "gstart", "codon", "codon_class"]
+    return pd.DataFrame(recs, columns=cols)
+
+
+def main() -> None:
+    """Enumerate every codon of held-out transcripts into a dense scan manifest."""
+    import argparse
+    from pathlib import Path
+
+    import pandas as pd
+    from pyfaidx import Fasta
+
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--manifest", default="data/store/manifest.parquet")
+    ap.add_argument(
+        "--gtf",
+        default="/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf",
+    )
+    ap.add_argument(
+        "--genome",
+        default="/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa",
+    )
+    ap.add_argument("--splits", nargs="+", default=["val", "test"])
+    ap.add_argument("--out", default="data/scan_manifest.parquet")
+    args = ap.parse_args()
+
+    man = pd.read_parquet(args.manifest)
+    sub = man[man.split.isin(args.splits)]
+    tx_split = sub.drop_duplicates("transcript_id").set_index("transcript_id").split.to_dict()
+    keep = set(tx_split)
+    print(f"enumerating {len(keep)} transcripts from splits {args.splits}", flush=True)
+
+    models = parse_gtf_exons(args.gtf, keep=keep)
+    fa = Fasta(args.genome, sequence_always_upper=True, rebuild=False)
+    pos_keys = set(
+        zip(
+            man.loc[man.label_tis == 1, "transcript_id"],
+            man.loc[man.label_tis == 1, "mrna_index"],
+        )
+    )
+
+    frames = []
+    for n, tx in enumerate(keep):
+        if tx not in models:
+            continue
+        df = enumerate_transcript(tx, models[tx], fa)
+        df["split"] = tx_split[tx]
+        df["label_tis"] = [int((tx, i) in pos_keys) for i in df.mrna_index]
+        frames.append(df)
+        if n % 200 == 0:
+            print(f"  {n}/{len(keep)}", flush=True)
+
+    out = pd.concat(frames, ignore_index=True)
+    out.insert(0, "row_idx", np.arange(len(out), dtype=np.int64))
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    out.to_parquet(args.out, index=False)
+    cls = out.codon_class.value_counts().to_dict()
+    print(f"wrote {args.out}: {len(out)} positions, {out.transcript_id.nunique()} transcripts")
+    print(f"  positives={int(out.label_tis.sum())}  codon_class={cls}")
+
+
+if __name__ == "__main__":
+    main()

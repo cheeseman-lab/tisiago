@@ -1,9 +1,17 @@
+import pandas as pd
+import pytest
+
 from tisiago.enumerate_codons import (
     NEAR_COGNATES,
     classify_codon,
+    enumerate_transcript,
     parse_gtf_exons,
     spliced_positions,
 )
+
+_REF = "/lab/barcheese01/mdiberna/swissisoform-v2/data/reference"
+GENOME = f"{_REF}/Gencode_v49_GRCh38.primary_assembly.genome.fa"
+GTF = f"{_REF}/gencode.v49.primary_assembly.annotation.gtf"
 
 
 def test_classify_aug():
@@ -71,3 +79,38 @@ def test_parse_gtf_exons_filters_by_keep(tmp_path):
     )
     models = parse_gtf_exons(str(gtf), keep={"KEEP.1"})
     assert set(models) == {"KEEP.1"}
+
+
+@pytest.mark.skipif(not pd.io.common.file_exists(GENOME), reason="genome not present")
+def test_enumerated_coords_match_curated_manifest():
+    from pyfaidx import Fasta
+
+    man = pd.read_parquet("data/store/manifest.parquet")
+    sample_tx = (
+        man[man.split == "test"]
+        .drop_duplicates("transcript_id")
+        .groupby("strand")
+        .head(5)
+        .transcript_id.tolist()
+    )
+    models = parse_gtf_exons(GTF, keep=set(sample_tx))
+    fa = Fasta(GENOME, sequence_always_upper=True, rebuild=False)
+
+    n_checked = 0
+    for tx in sample_tx:
+        if tx not in models:
+            continue
+        rows = enumerate_transcript(tx, models[tx], fa)
+        by_idx = rows.set_index("mrna_index")
+        cur = man[(man.transcript_id == tx)]
+        for _, c in cur.iterrows():
+            if c.mrna_index not in by_idx.index:
+                continue
+            e = by_idx.loc[c.mrna_index]
+            e = e.iloc[0] if hasattr(e, "iloc") and e.ndim > 1 else e
+            assert int(e.gstart) == int(c.gstart), (
+                f"{tx} idx {c.mrna_index}: gstart {e.gstart} != {c.gstart}"
+            )
+            assert e.codon == c.codon, f"{tx} idx {c.mrna_index}: codon {e.codon} != {c.codon}"
+            n_checked += 1
+    assert n_checked >= 20, f"only checked {n_checked} candidates"
