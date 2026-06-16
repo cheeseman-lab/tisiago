@@ -68,7 +68,31 @@ genuine base-resolution discrimination.
   upsampled "1bp" decoder) carries regional context.** Evo2's edge over AlphaGenome is
   largest exactly at 64 bp (+0.056 vs +0.029 at 2 kb), as expected from the architectures.
 
-## 4. At true imbalance — the honest caller number (Phase 2, **preliminary, AG-only**)
+## 4. One-hot grounding — the floor the embeddings actually beat
+
+The headline AUROC was being read against an implicit chance baseline (0.5). Two one-hot
+controls (logistic head, same splits) reset that baseline — the real question is what the
+foundation embeddings beat:
+
+| Features | dim | AUROC | AUPRC | win@64bp |
+|---|---|---|---|---|
+| one-hot **codon** (control) | 12 | **0.490** | 0.243 | 0.450 |
+| one-hot **±20 bp sequence** (floor) | 164 | **0.753** | 0.530 | 0.728 |
+| AlphaGenome 16k + Evo2 blk28 | 5632 | 0.905 | 0.760 | 0.816 |
+
+- **The codon control is ≈ chance (0.49).** Codon identity alone carries no signal — because
+  negatives are codon-frequency-matched to positives. This is hard proof the embeddings'
+  signal is **contextual, not "is it an AUG."**
+- **The sequence floor is high (0.75 / 0.73).** A trivial one-hot logistic on ±20 bp of raw
+  sequence (Kozak context) already reaches 0.75 AUROC. So the foundation models' honest lift
+  is **0.75 → 0.90 AUROC and 0.73 → 0.82 win@64bp**, not 0.5 → 0.90. The embeddings clearly
+  win — most at base resolution — but the marginal value over raw local sequence is the
+  number to quote, not the raw 0.90.
+
+(Baselines live in `autoresearch/results.tsv`; one-hot arrays at
+`data/store/embeddings/onehot/{codon12,kozakW20}.npy`.)
+
+## 5. At true imbalance — the honest caller number (Phase 2, **parked, AG-only**)
 
 Sections 1–3 are on the curated 3:1 decoy set. Phase 2 scores *every codon* in the
 held-out transcripts (dense scan, GENCODE v49) and applies the calibrated head at the
