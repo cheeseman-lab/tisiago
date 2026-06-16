@@ -8,3 +8,4 @@ auprc-3	auprc	0.8000	0.9160	0.7857	0.8195	0.7771	0.9095	0.7618	0.8295	keep	Tight
 auprc-4	auprc	0.8003	0.9160	0.7789	0.8171	0.7765	0.9092	0.7624	0.8329	keep	Push L2 further on the ~17.9k-dim AG16k+four-Evo2-offset stack: logistic C 0.25 -> 0.1 (tightening helped last keep; add
 auprc-5	auprc	-	-	-	-	-	-	-	-	crash	Add Evo2 blk26 four offsets {0,3,6,9} to the AG16k+blk28 stack (untried second Evo2 depth, logistic C=0.1)
 auprc-6	auprc	0.7511	0.8947	0.7224	0.7890	0.7360	0.8938	0.7139	0.7948	discard	Add a single second-depth Evo2 feature (blk26 off0) to the AG16k+four-blk28-offset stack, logistic C=0.1 — probes a ne
+auprc-7	auprc	0.8110	0.9200	0.7996	0.8277	0.7844	0.9131	0.7815	0.8456	keep	Concatenate explicit Kozak one-hot (±20bp) onto the AG16k+four-Evo2-offset stack (logistic C=0.1) — tests whether exa
