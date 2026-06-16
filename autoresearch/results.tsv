@@ -13,3 +13,4 @@ auprc-8	auprc	0.8121	0.9205	0.8027	0.8300	0.7869	0.9141	0.7840	0.8422	keep	Tight
 auprc-9	auprc	0.8124	0.9205	0.7969	0.8312	0.7881	0.9146	0.7857	0.8416	keep	Tighten L2 once more on the AG16k+four-Evo2-offset+Kozak stack: logistic C 0.05 -> 0.025 (regularization has been the co
 auprc-10	auprc	0.8068	0.9157	0.7870	0.8370	0.7827	0.9122	0.7747	0.8316	discard	Switch logistic penalty L2 -> L1 (liblinear, C=0.025) on the AG16k+four-Evo2-offset+Kozak stack — sparse feature selec
 auprc-11	auprc	0.8096	0.9206	0.8013	0.8347	0.7848	0.9142	0.7826	0.8443	discard	Set CLASS_WEIGHT="balanced" on the AG16k+four-Evo2-offset+Kozak stack (logistic C=0.025) — first try of class weightin
+auprc-12	auprc	0.8127	0.9204	0.7942	0.8347	0.7891	0.9150	0.7835	0.8449	keep	Tighten L2 once more on the AG16k+four-Evo2-offset+Kozak stack: logistic C 0.025 -> 0.0125 (regularization has been the 
