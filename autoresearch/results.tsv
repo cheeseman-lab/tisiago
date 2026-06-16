@@ -6,3 +6,4 @@ winrate64-1	winrate64	0.7974	0.9147	0.7780	0.8206	0.7726	0.9074	0.7575	0.8336	ke
 winrate64-2	winrate64	0.8081	0.9186	0.7906	0.8265	0.7780	0.9105	0.7722	0.8429	keep	Add explicit one-hot Kozak +/-20bp local sequence to best (AG16k + 4 Evo2 blk28 offsets) — base-resolution complement 
 winrate64-3	winrate64	0.6451	0.8483	0.6372	0.7116	0.6289	0.8500	0.6288	0.7186	discard	Add Evo2 blk26 offsets {0,3,6,9} to best (AG16k + blk28x4 + Kozak) — second base-resolution Evo2 layer for winrate64
 winrate64-4	winrate64	0.8110	0.9200	0.7996	0.8277	0.7844	0.9131	0.7815	0.8456	keep	Tighten logistic L2 (C=1.0 -> 0.1) on best feature set (AG16k + 4 Evo2 blk28 offsets + Kozak) — counter overfitting th
+winrate64-5	winrate64	0.7829	0.9051	0.7614	0.8113	0.7578	0.9021	0.7408	0.8215	discard	Switch head from logistic to a regularized MLP (hidden=256, alpha=1e-3) on best feature set (AG16k + 4 Evo2 blk28 offset
