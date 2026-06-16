@@ -16,3 +16,4 @@ recall1fp-11	recall1fp	0.8206	0.9248	0.8130	0.8312	0.7937	0.9195	0.7999	0.8309	d
 recall1fp-12	recall1fp	0.8162	0.9243	0.8143	0.8230	0.7898	0.9182	0.7963	0.8336	discard	Interpolate positive upweighting between balanced (~3:1, kept i8) and {0:1,1:6} (overshot, discarded i10): CLASS_WEIGHT=
 recall1fp-13	recall1fp	-	-	-	-	-	-	-	-	crash	Swap logistic for an MLP head (hidden=(256,), alpha=1.0, early_stopping) on the ~19k AG16k+AG131k+blk28-4offset+kozakW20
 recall1fp-14	recall1fp	-	-	-	-	-	-	-	-	crash	Swap logistic for a single-hidden-layer MLP (hidden=(128,), alpha=3.0) on the ~19k AG16k+AG131k+blk28-4offset+kozakW20 s
+recall1fp-15	recall1fp	0.8193	0.9243	0.8152	0.8335	0.7916	0.9186	0.7925	0.8242	discard	Switch L2 shrinkage for L1 sparse regularization (penalty=l1, solver=liblinear, C=0.05) on the ~19k AG16k+AG131k+blk28-4
