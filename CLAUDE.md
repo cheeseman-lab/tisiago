@@ -26,6 +26,43 @@ persisted** — embed over a generous genomic window, store only the vector at e
 candidate codon. Every candidate (positive and negative) is centred identically, so
 position carries no signal; the head discriminates on context.
 
+## Direction — a general codon→TIS predictor
+
+The end goal is a **general codon → P(initiation) predictor**: given **any codon**
+(all 64, not just AUG/near-cognate) in any expressed transcript, emit a calibrated
+probability it is a translation-initiation site — including confidently **rejecting
+non-starts**, not merely ranking a real start above a few curated decoys. Build it
+**from the ground up — broad first, then narrow.**
+
+1. **Where we are (PoC).** A frozen-embedding + linear head *ranks curated candidates*
+   (called TIS vs 3:1 matched in-transcript near-cognate decoys) at 0.90 AUROC / 0.82
+   near-neighbour win-rate ([`FINDINGS.md`](FINDINGS.md)). Proved the signal exists and
+   is linearly decodable. A stepping stone, **not** the deliverable.
+2. **The gap to "general".** (a) the *negative* side is untested — ranking metrics never
+   demand a confident "no"; (b) it scores curated candidates, not *every* codon; (c) no
+   calibration or specificity at the true genome-wide imbalance.
+3. **The grounding.** Score **all 64 codons**, but keep **non-cognate codons
+   evaluation-only (never trained on)**. Non-cognate initiation is biologically ≈0, so a
+   trustworthy predictor must drive them to ≈0 — an abundant, certain-negative,
+   out-of-distribution control. "Non-cognate ≈ 0" is the sanity check that the model
+   learned initiation biology, not codon identity.
+4. **The build (staged).**
+   - **Phase 1 — calibrate.** On the existing store, calibrate the head and report
+     **recall at a false-positives-per-transcript budget** at true imbalance — not the
+     inflated 3:1 AUROC. Pure CPU.
+   - **Phase 2 — scan.** tisiago grows a **scan capability**: enumerate codons across
+     expressed transcripts, tile, embed (gruyerenome), score densely with the calibrated
+     head. Evaluate as a caller (recall @ ≤1 FP/transcript on near-cognate decoys) **and**
+     as a grounding check (mean P on held-out non-cognate codons → expect ≈0).
+     swissisoform still owns *positives*; tisiago generates the background.
+5. **Then narrow.** Once the dense scan works end-to-end, make the statistics decisions —
+   cross-validation, seeds, true negative frequency, which codon strata to firm up — and
+   settle the modeling that holds.
+
+**Headline metrics going forward:** (1) recall at a fixed false-positives-per-transcript
+budget on near-cognate decoys, at true imbalance; (2) non-cognate negative-control score
+≈0. Caller-shaped, not the curated-set AUROC.
+
 ## Pipeline & commands
 
 ```bash
@@ -87,7 +124,7 @@ data/store/
 A head experiment = load a few `.npy`, `np.concatenate(axis=1)`, filter rows by the
 manifest `split` column. No GPU.
 
-## Results so far (held-out chromosomes, logistic head)
+## Results so far (PoC — candidate ranking, held-out chromosomes, logistic head)
 
 Full tables + interpretation + caveats in [`FINDINGS.md`](FINDINGS.md). Summary:
 
