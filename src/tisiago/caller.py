@@ -13,7 +13,10 @@ evaluate on ``test`` (chr8/chr9). Pure CPU over an assembled store.
 from __future__ import annotations
 
 import numpy as np
+from sklearn.isotonic import IsotonicRegression
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss
+from sklearn.preprocessing import StandardScaler
 
 
 def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
@@ -101,3 +104,29 @@ def reliability(p, y, n_bins: int = 10) -> dict:
         "bin_confidence": conf.tolist(),
         "bin_accuracy": acc.tolist(),
     }
+
+
+def fit_calibrated_head(X_train, y_train, X_cal, y_cal) -> dict:
+    """Train a standardized logistic head, then isotonic-calibrate on a held-out set.
+
+    Args:
+        X_train: training features, shape [N_train, D].
+        y_train: training labels, shape [N_train].
+        X_cal: held-out calibration features (a different chromosome split), shape [N_cal, D].
+        y_cal: held-out calibration labels, shape [N_cal].
+
+    Returns:
+        dict with ``predict`` (X -> calibrated p) and ``predict_raw`` (X -> uncalibrated p).
+    """
+    scaler = StandardScaler().fit(X_train)
+    clf = LogisticRegression(max_iter=300, C=1.0).fit(scaler.transform(X_train), y_train)
+
+    def predict_raw(X):
+        return clf.predict_proba(scaler.transform(X))[:, 1]
+
+    iso = IsotonicRegression(out_of_bounds="clip").fit(predict_raw(X_cal), y_cal)
+
+    def predict(X):
+        return iso.predict(predict_raw(X))
+
+    return {"predict": predict, "predict_raw": predict_raw}

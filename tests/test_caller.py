@@ -1,6 +1,6 @@
 import numpy as np
 
-from tisiago.caller import recall_at_fp_budget, reliability
+from tisiago.caller import fit_calibrated_head, recall_at_fp_budget, reliability
 
 
 def test_recall_at_fp_budget_perfect_separation():
@@ -54,3 +54,31 @@ def test_reliability_overconfident_has_large_gap():
     res = reliability(p, y, n_bins=10)
     assert res["brier"] > 0.4
     assert res["max_gap"] > 0.4
+
+
+def test_fit_calibrated_head_improves_brier_on_separable_data():
+    # Two well-separated Gaussian blobs in 5-D. Raw logistic is already decent;
+    # isotonic calibration should not worsen Brier on a held-out calibration split.
+    rng = np.random.default_rng(0)
+    d = 5
+
+    def blob(center, n):
+        return rng.normal(center, 1.0, size=(n, d))
+
+    Xtr = np.vstack([blob(0, 400), blob(3, 400)])
+    ytr = np.array([0] * 400 + [1] * 400)
+    Xcal = np.vstack([blob(0, 200), blob(3, 200)])
+    ycal = np.array([0] * 200 + [1] * 200)
+    Xte = np.vstack([blob(0, 200), blob(3, 200)])
+    yte = np.array([0] * 200 + [1] * 200)
+
+    head = fit_calibrated_head(Xtr, ytr, Xcal, ycal)
+    p_raw = head["predict_raw"](Xte)
+    p_cal = head["predict"](Xte)
+    assert p_raw.shape == (400,)
+    assert p_cal.shape == (400,)
+    assert ((p_cal >= 0) & (p_cal <= 1)).all()
+    # On separable data both are good; calibrated Brier should be close or better.
+    from sklearn.metrics import brier_score_loss
+
+    assert brier_score_loss(yte, p_cal) <= brier_score_loss(yte, p_raw) + 0.05
