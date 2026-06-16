@@ -17,3 +17,4 @@ auprc-12	auprc	0.8127	0.9204	0.7942	0.8347	0.7891	0.9150	0.7835	0.8449	keep	Tigh
 auprc-13	auprc	-	-	-	-	-	-	-	-	crash	Switch head logistic -> small regularized MLP (hidden=(64,), alpha=1.0) on the AG16k+four-Evo2-offset+Kozak stack â€” fi
 auprc-14	auprc	0.8128	0.9203	0.7928	0.8335	0.7894	0.9151	0.7848	0.8463	keep	Tighten L2 once more on the AG16k+four-Evo2-offset+Kozak stack: logistic C 0.0125 -> 0.00625 (the only monotonically-imp
 auprc-15	auprc	0.8179	0.9241	0.8117	0.8242	0.7948	0.9190	0.7944	0.8356	keep	Re-add AG L131k long-range context to the AG16k+four-Evo2-offset+Kozak stack, now under tight L2 (logistic C=0.00625) â€
+auprc-16	auprc	0.8201	0.9245	0.8085	0.8218	0.7965	0.9196	0.8013	0.8342	keep	Tighten L2 once more on the AG16k+AG131k+four-Evo2-offset+Kozak stack: logistic C 0.00625 -> 0.003 (re-tune regularizati
