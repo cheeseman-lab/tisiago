@@ -30,6 +30,7 @@ FEATURE_KEYS = [
     "evo2/W8k/blocks.28.mlp.l3/off6.npy",
     "evo2/W8k/blocks.28.mlp.l3/off9.npy",
     "onehot/kozakW20.npy",
+    "onehot/codon12.npy",
 ]
 HEAD = "logistic"  # "logistic" | "mlp"
 HEAD_PARAMS = {"C": 0.1}  # logistic: C ; mlp: hidden_layer_sizes, alpha, ...
