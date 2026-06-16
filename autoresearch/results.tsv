@@ -9,3 +9,4 @@ auroc-4	auroc	-	-	-	-	-	-	-	-	crash	Stack a second Evo2 layer: add blk26 offsets
 auroc-5	auroc	0.7511	0.8947	0.7224	0.7890	0.7360	0.8938	0.7139	0.7948	discard	Add complementary blk26 off0 (single mid-depth Evo2 read) to AG16k+4xEvo2-blk28, C=0.1 — salvages crashed auroc-4 in a
 auroc-6	auroc	0.8110	0.9200	0.7996	0.8277	0.7844	0.9131	0.7815	0.8456	keep	Concatenate Kozak +/-20bp one-hot onto AG16k+4xEvo2-blk28 (C=0.1) — explicit local sequence to complement contextual e
 auroc-7	auroc	0.8121	0.9205	0.8027	0.8300	0.7869	0.9141	0.7840	0.8422	keep	Tighten logistic L2 further (C 0.1->0.05) on AG16k+4xEvo2-blk28+Kozak — Kozak added dims, retune regularization
+auroc-8	auroc	0.8100	0.9207	0.8027	0.8288	0.7856	0.9158	0.7881	0.8309	keep	Re-add AG L131k long-range context to AG16k+4xEvo2-blk28+Kozak now under strong C=0.05 reg (orig L131k discard was confo
