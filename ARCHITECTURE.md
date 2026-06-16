@@ -156,6 +156,15 @@ Key grammar: `backend :: length_tag :: layer :: offset`. A head experiment is th
 *"load these few `.npy`, `np.concatenate(axis=1)`, filter rows by `manifest.split`"* — no GPU,
 no model, no coordinate logic. That is the payoff of persisting only the per-candidate vector.
 
+**Phase 2 dense scan store.** The global caller reuses this exact layout for a parallel
+`data/scan_store/` (+ `data/scan_manifest.parquet`, `data/scan_parts/`), row-aligned to the
+scan manifest instead of the curated one — *every* codon in held-out transcripts rather than
+curated candidates. Same key grammar, same `.npy` arrays, so `scan_eval` loads it identically.
+It is large (~57 GB test-only at the AG16k+Evo2 headline keys); because the dense scan slices
+~300k positions/shard, the **evo2 extraction is RAM-bound** — `extract.py` accumulates all
+sliced vectors before writing, so evo2's 12 keys need ~85 GB/shard (`run_tis_scan.sh` overrides
+to `--mem=384G`; ag16k's single key fits in 64 GB). Streaming parts to disk is logged debt.
+
 ---
 
 ## 6. Execution & environments
@@ -169,14 +178,26 @@ scripts/run_tis_pipeline.sh  N
         └─ run_tis_assemble.sh  (CPU)  ── store.py ──▶ data/store/
                  env: tisiago
 
-eval / resolution  (CPU, tisiago env)  ── read-only over data/store/
+eval / resolution / caller  (CPU, tisiago env)  ── read-only over data/store/
+
+# Phase 2 — global all-codon dense scan (parallel to the curated path):
+enumerate_codons.py  (CPU)  ── GENCODE GTF + genome ──▶ data/scan_manifest.parquet
+        │
+        ├─ run_tis_scan.sh  (SLURM array, GPU)  ── extract.py on the scan manifest ──▶ data/scan_parts/*.npz
+        │        env: alphagenome / evo2   ·   evo2 needs --mem=384G (dense, RAM-bound)
+        │
+        └─ run_tis_assemble.sh  (CPU)  ── store.py ──▶ data/scan_store/
+
+scan_eval  (CPU, tisiago env)  ── curated-trained calibrated head applied to data/scan_store/
 ```
 
 | Stage | Conda env | Needs | Entry point |
 |---|---|---|---|
 | Extraction | `alphagenome` / `evo2` | tisiago + gruyerenome (editable) + pyfaidx, GPU | `extract.py` via SLURM array |
 | Assembly | any (`tisiago`) | numpy/pandas/pyyaml | `store.py` |
-| Eval / training | `tisiago` | numpy/pandas/sklearn, no GPU | `eval.py`, `resolution.py` |
+| Eval / training | `tisiago` | numpy/pandas/sklearn, no GPU | `eval.py`, `resolution.py`, `caller.py` |
+| Scan enumeration | `tisiago` (+pyfaidx) | GTF + genome, no GPU | `enumerate_codons.py` |
+| Global caller | `tisiago` | numpy/pandas, `caller` | `scan_eval.py` |
 
 `configs/*.yaml` are **gruyerenome** backend configs (model, batch size); `extract.py` asserts
 `config.model == spec.backend` so a mismatched config/spec pair fails fast.
