@@ -24,6 +24,7 @@ from sklearn.preprocessing import StandardScaler
 # Feature .npy keys to concatenate (subset of the 14 in data/store/config.yaml).
 FEATURE_KEYS = [
     "alphagenome_jax/L16k/decoder_1bp/off0.npy",
+    "alphagenome_jax/L131k/decoder_1bp/off0.npy",
     "evo2/W8k/blocks.28.mlp.l3/off0.npy",
     "evo2/W8k/blocks.28.mlp.l3/off3.npy",
     "evo2/W8k/blocks.28.mlp.l3/off6.npy",
