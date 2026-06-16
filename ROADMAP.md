@@ -25,7 +25,7 @@ _Last updated: 2026-06-16._
 |---|---|---|---|
 | **PoC** | Frozen embeddings rank curated candidates | ✅ done | `eval.py`, `resolution.py`, `FINDINGS.md` |
 | **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
-| **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | 🟢 **harness built + baselines; run paused for go** | `autoresearch/` |
+| **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | 🟢 **LAUNCHED 2026-06-16** — 4 loops live in tmux/worktrees | `autoresearch/` |
 | **P2** | Global all-codon dense caller | ⏸️ **parked** (code merged, deferred) | `enumerate_codons.py`, `scan_eval.py` |
 | **P4** | TIS efficiency regression (HeLa first) | ⬜ not specced | — |
 
@@ -70,8 +70,17 @@ Fixed metric harness in `evaluate.py`; results logged per-worktree in `results.t
 **Harness verified:** reproduces FINDINGS (AG16k+Evo2 → 0.90/0.76/0.82). Baselines seeded in
 `autoresearch/results.tsv`.
 
-**Next (paused for go):** create 4 git worktrees (one per objective, shared abs `--store`),
-launch the `autoresearch` skill in each → overnight keep/discard loops.
+**LAUNCHED 2026-06-16.** Four git worktrees (`../tisiago-ar-{auprc,auroc,recall1fp,winrate64}`,
+branches `ar/<obj>`, shared abs `STORE`), each running `autoresearch/launch_loop.sh` in a
+detached tmux session (`ar-<obj>`). Each iteration: a fresh `claude -p` proposes ONE CONFIG
+edit → the shell runs it on a CPU node (`srun --partition=20`) → keeps (commit) if
+`<obj>_val` strictly beats the running best, else discards (`git checkout`). Per-objective
+history lands in each worktree's `results.tsv` + git log; loop stdout in `autoresearch/loop.log`,
+agent edits in `agent.log`.
+
+**Monitor:** `tmux attach -t ar-<obj>` · `column -t -s$'\t' ../tisiago-ar-<obj>/autoresearch/results.tsv`
+· `git -C ../tisiago-ar-<obj> log --oneline -10` · `squeue -u $USER`.
+**Stop:** `tmux kill-session -t ar-<obj>` (finishes the in-flight iteration first).
 
 ---
 
@@ -100,7 +109,9 @@ curated store or the dense scan; how the multi-line labels (K562/RPE1/U2OS) fact
 
 ## Immediate next action
 
-**Paused before launch.** The autoresearch harness is built, verified, and baseline-seeded.
-On go: create the 4 worktrees and start the `autoresearch` skill in each (CPU, overnight).
-No GPU. Then read `results.tsv` across the fleet to see which features/heads each metric
-favors — especially whether Evo2 dominates `winrate64` and what beats the 0.75 sequence floor.
+**Fleet launched (2026-06-16) — now monitoring.** The 4 loops run unattended on CPU. Next
+human step is to **read `results.tsv` across the fleet** once experiments accumulate: which
+features/heads each metric favors — especially whether Evo2 dominates `winrate64`, whether
+anything beats the 0.75 one-hot sequence floor, and whether the per-objective winners diverge
+(they should). Promising configs get folded back into `FINDINGS.md`; the eventual best per
+metric is the autoresearch deliverable.
