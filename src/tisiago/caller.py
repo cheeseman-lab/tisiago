@@ -12,7 +12,11 @@ evaluate on ``test`` (chr8/chr9). Pure CPU over an assembled store.
 
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss
@@ -130,3 +134,78 @@ def fit_calibrated_head(X_train, y_train, X_cal, y_cal) -> dict:
         return iso.predict(predict_raw(X))
 
     return {"predict": predict, "predict_raw": predict_raw}
+
+
+# default feature set = the FINDINGS headline (AlphaGenome 16k + Evo2 blk28).
+DEFAULT_KEYS = [
+    "alphagenome_jax/L16k/decoder_1bp/off0.npy",
+    "evo2/W8k/blocks.28.mlp.l3/off0.npy",
+]
+TRAIN_SUBSAMPLE = 60000
+
+
+def load(keys, emb):
+    """Concatenate the given .npy feature arrays along the feature axis."""
+    return np.concatenate([np.load(emb / k).astype(np.float32) for k in keys], axis=1)
+
+
+def main() -> None:
+    """Run calibration + caller-metric report on the assembled store."""
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--store", default="data/store", help="Path to the assembled store.")
+    ap.add_argument(
+        "--keys",
+        nargs="+",
+        default=DEFAULT_KEYS,
+        help="Feature .npy keys to concatenate (default: AG16k + Evo2 blk28).",
+    )
+    ap.add_argument(
+        "--budget",
+        type=float,
+        default=1.0,
+        help="Max mean false positives per transcript for the headline metric.",
+    )
+    args = ap.parse_args()
+
+    store = Path(args.store)
+    emb = store / "embeddings"
+    m = pd.read_parquet(store / "manifest.parquet")
+    y = m.label_tis.values
+    rng = np.random.default_rng(0)
+
+    tr_all = np.where(m.split.values == "train")[0]
+    cal = np.where(m.split.values == "val")[0]
+    te = np.where(m.split.values == "test")[0]
+    tr = rng.choice(tr_all, min(TRAIN_SUBSAMPLE, len(tr_all)), replace=False)
+
+    X = load(args.keys, emb)
+    head = fit_calibrated_head(X[tr], y[tr], X[cal], y[cal])
+    p_raw = head["predict_raw"](X[te])
+    p_cal = head["predict"](X[te])
+    yte = y[te]
+    tx_te = m.transcript_id.values[te]
+
+    print(f"features: {'+'.join(args.keys)}  dim={X.shape[1]}")
+    print(
+        f"train={len(tr)} (of {len(tr_all)})  cal/val={len(cal)}  test={len(te)}  "
+        f"test transcripts={len(np.unique(tx_te))}  test pos-rate={yte.mean():.3f}"
+    )
+    print("\n-- calibration (held-out test) --")
+    for name, p in [("raw logistic", p_raw), ("isotonic-calibrated", p_cal)]:
+        r = reliability(p, yte, n_bins=10)
+        print(f"  {name:22s} Brier={r['brier']:.4f}  max_gap={r['max_gap']:.3f}")
+
+    print(f"\n-- caller metric (calibrated, budget ≤ {args.budget} FP/transcript) --")
+    res = recall_at_fp_budget(p_cal, yte, tx_te, budget=args.budget)
+    print(
+        f"  recall={res['recall']:.3f}  at threshold p≥{res['threshold']:.3f}  "
+        f"(actual {res['fp_per_transcript']:.3f} FP/transcript)"
+    )
+    print("\n  NOTE: on the curated 3:1 decoy set, NOT true genome-wide imbalance.")
+    print("  The true-imbalance number requires the Phase 2 dense codon scan.")
+
+
+if __name__ == "__main__":
+    main()
