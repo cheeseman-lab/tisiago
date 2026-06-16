@@ -46,18 +46,30 @@ non-starts**, not merely ranking a real start above a few curated decoys. Build 
    trustworthy predictor must drive them to ≈0 — an abundant, certain-negative,
    out-of-distribution control. "Non-cognate ≈ 0" is the sanity check that the model
    learned initiation biology, not codon identity.
-4. **The build (staged).**
-   - **Phase 1 — calibrate.** On the existing store, calibrate the head and report
-     **recall at a false-positives-per-transcript budget** at true imbalance — not the
-     inflated 3:1 AUROC. Pure CPU.
-   - **Phase 2 — scan.** tisiago grows a **scan capability**: enumerate codons across
-     expressed transcripts, tile, embed (gruyerenome), score densely with the calibrated
-     head. Evaluate as a caller (recall @ ≤1 FP/transcript on near-cognate decoys) **and**
-     as a grounding check (mean P on held-out non-cognate codons → expect ≈0).
+4. **The build (the comprehensive plan).**
+   - **Phase 1 — calibration machinery. ✅ DONE** (`src/tisiago/caller.py`). Train on
+     `train`, isotonic-calibrate on held-out `val` (chr7), report reliability + Brier +
+     **recall at a false-positives-per-transcript budget** on `test`. Pure CPU on the
+     curated 3:1 store. Result: AUPRC 0.741; head is *already well-calibrated* (isotonic
+     barely moves Brier); recall **0.733 @ ≤1 FP/transcript**. The reusable metric
+     functions that Phase 2 plugs into.
+   - **Phase 2 — global all-codon calibrated caller.** The deliverable. tisiago grows a
+     **scan capability**: read the GENCODE v49 GTF
+     (`swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf`),
+     walk each expressed transcript's exons, enumerate **every codon** (in `mrna_index`
+     coordinates — same system the manifest already uses), tile + embed (one forward
+     pass per tile slices *all* positions in it — dense scan ≈ same GPU cost as the
+     curated run), score with the calibrated head. Evaluate as a caller (recall @ ≤1
+     FP/transcript on near-cognate decoys, **at true genome-wide imbalance**) **and** as a
+     grounding check (mean P on held-out **non-cognate** codons → expect ≈0).
      swissisoform still owns *positives*; tisiago generates the background.
-5. **Then narrow.** Once the dense scan works end-to-end, make the statistics decisions —
-   cross-validation, seeds, true negative frequency, which codon strata to firm up — and
-   settle the modeling that holds.
+   - **Phase 3 — autoresearch the head.** Use the `autoresearch` skill to autonomously
+     sweep head architectures (logistic → MLP depth/width, regularization, feature-set &
+     offset combinations) with proper cross-validation across seeds/splits — make the
+     predictor robust, not just a single-seed point estimate.
+   - **Phase 4 — TIS efficiency regression (HeLa first).** Move beyond yes/no into
+     quantitative initiation: regress the unused per-condition translational-efficiency
+     label (`max_norm_HeLa`), restricted to HeLa, on the frozen embeddings.
 
 **Headline metrics going forward:** (1) recall at a fixed false-positives-per-transcript
 budget on near-cognate decoys, at true imbalance; (2) non-cognate negative-control score
