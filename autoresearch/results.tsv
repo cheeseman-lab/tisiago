@@ -11,3 +11,4 @@ auprc-6	auprc	0.7511	0.8947	0.7224	0.7890	0.7360	0.8938	0.7139	0.7948	discard	Ad
 auprc-7	auprc	0.8110	0.9200	0.7996	0.8277	0.7844	0.9131	0.7815	0.8456	keep	Concatenate explicit Kozak one-hot (±20bp) onto the AG16k+four-Evo2-offset stack (logistic C=0.1) — tests whether exa
 auprc-8	auprc	0.8121	0.9205	0.8027	0.8300	0.7869	0.9141	0.7840	0.8422	keep	Tighten L2 further on the AG16k+four-Evo2-offset+Kozak stack: logistic C 0.1 -> 0.05 (regularization has been the consis
 auprc-9	auprc	0.8124	0.9205	0.7969	0.8312	0.7881	0.9146	0.7857	0.8416	keep	Tighten L2 once more on the AG16k+four-Evo2-offset+Kozak stack: logistic C 0.05 -> 0.025 (regularization has been the co
+auprc-10	auprc	0.8068	0.9157	0.7870	0.8370	0.7827	0.9122	0.7747	0.8316	discard	Switch logistic penalty L2 -> L1 (liblinear, C=0.025) on the AG16k+four-Evo2-offset+Kozak stack — sparse feature selec
