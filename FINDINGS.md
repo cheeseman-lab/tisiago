@@ -94,10 +94,10 @@ foundation embeddings beat:
 
 ## 5. At true imbalance — the honest caller number (Phase 2, **parked, AG-only**)
 
-Sections 1–3 are on the curated 3:1 decoy set. Phase 2 scores *every codon* in the
-held-out transcripts (dense scan, GENCODE v49) and applies the calibrated head at the
-**realistic** imbalance. First result is **AlphaGenome-only** (Evo2 extraction still
-running — combined number pending):
+Sections 1–3 are on the curated 3:1 decoy set. Phase 2 scored *every codon* in the
+held-out transcripts (dense scan, GENCODE v49) and applied the calibrated head at the
+**realistic** imbalance. This direction is now **parked** (it conflated the model with its
+train/eval negative distribution — see ROADMAP); the one AG-only result below stands:
 
 | Metric | curated 3:1 | **true imbalance (230:1)** |
 |---|---|---|
@@ -120,15 +120,21 @@ easy one. This is exactly the calibrated-imbalance number the §Caveats called f
 called (FPR 0.0016 at the operating threshold) but are *not* crushed to ≈0 either (mean p
 0.12, p95 0.48) — AlphaGenome's 128 bp-upsampled embedding leaks regional probability onto
 non-cognate positions. Evo2 (1 token/bp, true codon identity) is expected to lift both the
-recall and the grounding; the combined AG+Evo2 number is the real Phase-2 headline.
+recall and the grounding — but the dense direction is parked pending the autoresearch pass.
 
 ## Takeaways for downstream modeling
 
-1. **Concatenate AlphaGenome + Evo2** — complementary at every scale.
-2. **Report the near-neighbour win-rate, not the global AUROC, as the headline metric** —
-   it reflects actually calling a start codon and isn't inflated by regional priors.
-3. **A linear head is enough** — spend effort on labels (per-condition translational
-   efficiency from `max_norm_*`) and the hard stratum (dTIS), not on architecture.
+1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest
+   foundation-model lift is 0.75→0.90 AUROC / 0.73→0.82 win@64bp. One-hot codon ≈ chance
+   confirms the signal is contextual.
+2. **Concatenate AlphaGenome + Evo2** — complementary at every scale; Evo2 carries the base
+   resolution (the win@64 edge), AlphaGenome the regional context.
+3. **Report the near-neighbour win-rate, not the global AUROC, as the headline** — it
+   reflects actually calling a start codon and isn't inflated by regional priors.
+4. **A linear head is a strong baseline** — the active autoresearch fleet sweeps feature
+   subsets × head × class-weighting against all four metrics to find where (and whether)
+   anything beats it. Next: spend effort on the hard stratum (dTIS) and the per-condition
+   efficiency labels (`max_norm_*`).
 
 ## Caveats
 

@@ -149,8 +149,13 @@ data/store/
 └── embeddings/
     ├── alphagenome_jax/L16k/decoder_1bp/off0.npy      # [N, 1536] fp16
     ├── alphagenome_jax/L131k/decoder_1bp/off0.npy     # [N, 1536] fp16
-    └── evo2/W8k/blocks.{24,26,28}.mlp.l3/off{0,3,6,9}.npy   # [N, 4096] fp16
+    ├── evo2/W8k/blocks.{24,26,28}.mlp.l3/off{0,3,6,9}.npy   # [N, 4096] fp16
+    └── onehot/{codon12,kozakW20}.npy                  # [N,12] / [N,164] fp16  (grounding floors)
 ```
+
+The `onehot/` arrays are raw one-hot sequence (codon, and ±20 bp window) written by
+`autoresearch/make_onehot.py` — *not* model embeddings, but loaded through the same key
+mechanism so a head can use them as baselines or concatenate them with embeddings.
 
 Key grammar: `backend :: length_tag :: layer :: offset`. A head experiment is therefore just
 *"load these few `.npy`, `np.concatenate(axis=1)`, filter rows by `manifest.split`"* — no GPU,
@@ -212,4 +217,28 @@ scan_eval  (CPU, tisiago env)  ── curated-trained calibrated head applied to
   only names keys and asks for positions.
 - **tisiago owns the join**: candidate ↔ window geometry ↔ stored vector ↔ row alignment. Everything
   it adds is in service of making a head experiment a GPU-free `np.load` + `concatenate` + `split` filter.
+
+---
+
+## 8. Autoresearch harness (`autoresearch/`)
+
+A self-contained experiment loop that exploits the GPU-free head substrate: pick a feature
+subset, train a light head, score it — in <2 min CPU. Run as a **4-way parallel fleet**, one
+loop per objective metric.
+
+```
+autoresearch/
+├── make_onehot.py        CPU prep   manifest + genome ──▶ onehot/{codon12,kozakW20}.npy (grounding floors)
+├── train_experiment.py   MUTABLE    CONFIG (features·head·class_weight·neg_subsample) ──▶ preds.npz
+├── evaluate.py           FIXED      preds.npz ──▶ auprc·auroc·recall1fp·winrate64 (val+test); echoes OBJECTIVE
+├── run.sh                srun CPU   train ──▶ evaluate, one iteration
+├── program.md            the agent's brief (levers, floors, climb-val-report-test rule)
+└── results.tsv           per-worktree keep/discard log
+```
+
+The cut mirrors the rest of the repo: **`train_experiment.py` is the only mutable surface**
+(the autoresearch agent edits its `CONFIG`), `evaluate.py` is the fixed metric (reuses
+`caller.recall_at_fp_budget` + `resolution.py`'s win-rate pairing). Four loops run in
+isolated **git worktrees** (one objective each), all reading one shared absolute `--store`.
+Guardrail: every loop **climbs a val metric, reports test** — no test-set selection.
 ```

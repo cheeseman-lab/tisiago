@@ -5,10 +5,17 @@ a **general codon → P(initiation) predictor** — any codon in any expressed t
 a calibrated probability of being a translation-initiation site, including confidently
 **rejecting non-starts**. Build broad first, then narrow.
 
-Headline metrics: (1) recall @ ≤1 false-positive-per-transcript at true imbalance;
-(2) non-cognate negative-control score ≈ 0. *Not* the curated-set AUROC.
+Headline metrics: (1) curated-set discrimination judged **against the one-hot sequence
+floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution). Deferred:
+true-imbalance recall + non-cognate≈0 (the dense scan, parked).
 
 _Last updated: 2026-06-16._
+
+> **Reframe (current):** the full-genome dense scan (P2) is **parked** — it tangled the
+> model with its train/eval negative distribution. We refocused on the **balanced 1:3
+> curated set**, whose codon-matched negatives are already the rigorous control we want, and
+> stood up a **4-way parallel autoresearch fleet** over the existing AG+Evo2 (+one-hot)
+> features. See `docs/superpowers/specs/` and the plan `modular-splashing-sunset`.
 
 ---
 
@@ -17,10 +24,10 @@ _Last updated: 2026-06-16._
 | Phase | What | Status | Artifacts |
 |---|---|---|---|
 | **PoC** | Frozen embeddings rank curated candidates | ✅ done | `eval.py`, `resolution.py`, `FINDINGS.md` |
-| **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py`; [plan](docs/superpowers/plans/2026-06-16-phase1-caller-calibration.md) |
-| **P2** | Global all-codon calibrated caller | 🟡 **code done; GPU scan running** | `enumerate_codons.py`, `scan_eval.py`, `run_tis_scan.sh`; [spec](docs/superpowers/specs/2026-06-16-phase2-global-allcodon-caller-design.md) · [plan](docs/superpowers/plans/2026-06-16-phase2-global-caller.md) |
-| **P3** | Autoresearch the head (robustness + CV) | ⬜ **not specced** | — |
-| **P4** | TIS efficiency regression (HeLa first) | ⬜ **not specced** | — |
+| **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
+| **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | 🟢 **harness built + baselines; run paused for go** | `autoresearch/` |
+| **P2** | Global all-codon dense caller | ⏸️ **parked** (code merged, deferred) | `enumerate_codons.py`, `scan_eval.py` |
+| **P4** | TIS efficiency regression (HeLa first) | ⬜ not specced | — |
 
 ---
 
@@ -37,64 +44,45 @@ monotonic the recall is calibration-invariant. Honest caveat baked into the outp
 
 ---
 
-## P2 — global all-codon calibrated caller 🟡
+## AR — autoresearch fleet 🟢 (active, run paused)
 
-The deliverable. Reuses the pipeline almost wholesale (window/position decoupling).
+Stood up `autoresearch/` — a **4-way parallel fleet**, each loop climbing a different
+objective on **val**, reporting **test** (never selecting on test):
 
-**Done (CPU, merged):**
-- `enumerate_codons.py` — GENCODE v49 GTF → dense scan manifest of *every codon* in
-  held-out transcripts (`mrna_index` coords). Coordinate convention pinned by a test against
-  the curated manifest (`+`: `coords[i]`; `-`: `coords[i]+1`).
-- Real scan manifest produced (test-only): **5.02M positions, 1,443 transcripts, 3,555
-  positives** (non-cognate 4.20M / near-cognate 737k / AUG 87k).
-- `scan_eval.py` — apply the curated-trained calibrated head to the dense scan store;
-  recall @ true imbalance over AUG+near-cognate + non-cognate≈0 grounding.
-- `run_tis_scan.sh` — SLURM wrapper (reuses `extract.py`).
+| objective | what | baseline (test) |
+|---|---|---|
+| `auprc` | precision-aware ranking | 0.76 |
+| `auroc` | overall ranking | 0.90 |
+| `recall1fp` | caller operating point | 0.75 |
+| `winrate64` | hard base-resolution discrimination | 0.82 |
 
-**In flight (GPU):** scan extraction over the test-only manifest, headline keys.
-- ag16k → A6000 array `10177015` (healthy, ~15/20 done)
-- evo2_8k → A100 array `10177404` (**resubmitted at 384G after OOM**; ~2.5–3.5 hr)
-- assemble → `10177405` (pending `afterok` ag16k + evo2) → `data/scan_store/`
+**Levers swept** (edit `train_experiment.py` CONFIG): feature subset (14 embedding keys +
+2 one-hot), head (logistic/MLP), regularization, `class_weight`, train-negative subsample.
+Fixed metric harness in `evaluate.py`; results logged per-worktree in `results.tsv`.
 
-**⚠️ OOM lesson (logged):** the first evo2 array (`10177016`, 64G) OOM-killed —
-`extract.py` accumulates all sliced vectors in RAM, and the dense scan slices ~300k
-positions/shard × 12 evo2 keys ≈ 85 GB. Fixed by `--mem=384G` (A100 allows 1920G).
-**Architectural debt:** `extract.py` should stream parts to disk (or dense scans should
-use more shards) so dense extraction isn't memory-bound — worth a small follow-up.
+**One-hot grounding (your call — added & paid off):** `make_onehot.py` →
+`onehot/{codon12,kozakW20}.npy`. Establishes the floors every config is judged against:
+- one-hot **codon** → AUROC **0.49** (≈chance): control passes — signal is contextual, not
+  codon identity.
+- one-hot **±20bp sequence** → AUROC **0.75**, win@64 **0.73**: the real floor. Foundation
+  lift is **0.75→0.90**, not 0.5→0.90.
 
-**First real result — AG-only global caller (test, true imbalance):**
-- True imbalance = **230.6:1** (vs curated 3:1).
-- Recall **0.094** @ ≤1 FP/transcript (p≥0.885) — the curated 0.733 was inflated by the
-  3:1 cap; at realistic imbalance AlphaGenome-alone is a weak caller.
-- Non-cognate grounding **partial**: mean p 0.119, p95 0.483, FPR@threshold 0.0016. AG
-  doesn't *call* non-cognate (low FPR) but doesn't crush them to ≈0 either — consistent
-  with AG = regional context, not base resolution. Evo2 expected to ground far better.
+**Harness verified:** reproduces FINDINGS (AG16k+Evo2 → 0.90/0.76/0.82). Baselines seeded in
+`autoresearch/results.tsv`.
 
-**Remaining to close P2:**
-- [x] AG-only assemble + eval (`scan_store_ag`) — done (numbers above).
-- [ ] when evo2 (`10177404`) clears: combined `scan_store/` assembles (`10177405`) →
-  `python -m tisiago.scan_eval --scan-store data/scan_store` for the AG+Evo2 headline.
-- [ ] record the true-imbalance recall + grounding result in `FINDINGS.md`.
-
-**Scope decision (logged):** scanning the *whole mature transcript* (5′UTR+CDS+3′UTR),
-every frame. Open option to restrict to 5′UTR+CDS (drop 3′UTR, where initiation ≈0) — kept
-whole-transcript for the first run for maximal grounding.
-
-**Known size note:** ~57 GB (test-only, AG16k+Evo2). Scan test-only since calibration uses
-the curated `val`.
+**Next (paused for go):** create 4 git worktrees (one per objective, shared abs `--store`),
+launch the `autoresearch` skill in each → overnight keep/discard loops.
 
 ---
 
-## P3 — autoresearch the head ⬜ (not specced)
+## P2 — global all-codon dense caller ⏸️ parked
 
-Use the `autoresearch` skill to autonomously sweep head architectures (logistic → MLP
-depth/width, regularization, feature-set & offset combinations) with proper
-cross-validation across seeds/splits. Goal: robustness, not a single-seed point estimate.
-Subsumes the old "narrow the stats" step.
-
-**Open questions before a spec:** search space bounds; CV scheme (chromosome-fold);
-compute budget / autoresearch loop config; what "robust enough" threshold gates success;
-whether the evo2 layer/offset sweep (the 12 keys P2 is computing) feeds this directly.
+Code merged and working (`enumerate_codons.py`, `scan_eval.py`, `run_tis_scan.sh`), GPU jobs
+cancelled. Parked because it conflated the model with its train/eval negative distribution
+(see Reframe). The one real result stands as FINDINGS §5: **AG-only recall 0.094 @ ≤1
+FP/transcript at true 230:1 imbalance**, non-cognate grounding only partial (mean p 0.12).
+**Architectural debt if revived:** `extract.py` accumulates sliced vectors in RAM → dense
+evo2 needs `--mem=384G` (OOM-killed at 64G); should stream parts to disk.
 
 ---
 
@@ -112,5 +100,7 @@ curated store or the dense scan; how the multi-line labels (K562/RPE1/U2OS) fact
 
 ## Immediate next action
 
-Waiting on the GPU scan (~3–4 hr, evo2-bound). First real P2 numbers come from the AG-only
-early eval (~30–40 min). Then combined AG+Evo2 when evo2 lands. After P2 closes: spec P3.
+**Paused before launch.** The autoresearch harness is built, verified, and baseline-seeded.
+On go: create the 4 worktrees and start the `autoresearch` skill in each (CPU, overnight).
+No GPU. Then read `results.tsv` across the fleet to see which features/heads each metric
+favors — especially whether Evo2 dominates `winrate64` and what beats the 0.75 sequence floor.
