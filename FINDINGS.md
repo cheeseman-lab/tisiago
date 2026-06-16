@@ -68,6 +68,36 @@ genuine base-resolution discrimination.
   upsampled "1bp" decoder) carries regional context.** Evo2's edge over AlphaGenome is
   largest exactly at 64 bp (+0.056 vs +0.029 at 2 kb), as expected from the architectures.
 
+## 4. At true imbalance — the honest caller number (Phase 2, **preliminary, AG-only**)
+
+Sections 1–3 are on the curated 3:1 decoy set. Phase 2 scores *every codon* in the
+held-out transcripts (dense scan, GENCODE v49) and applies the calibrated head at the
+**realistic** imbalance. First result is **AlphaGenome-only** (Evo2 extraction still
+running — combined number pending):
+
+| Metric | curated 3:1 | **true imbalance (230:1)** |
+|---|---|---|
+| neg:pos per transcript | 3:1 | **230.6:1** (~570 candidate codons/transcript) |
+| recall @ ≤1 FP/transcript (AG-only) | — | **0.094** (p≥0.885) |
+| non-cognate mean p / p95 / FPR@thr | — | 0.119 / 0.483 / 0.0016 |
+
+**Why the headline collapses from the 0.9 you remember.** Those are *different metrics*,
+increasingly honest about the actual task — not the same metric degrading:
+
+- **AUROC 0.90** (§1) — ranking, *imbalance-blind*: "tell a TIS from a decoy". Flattering.
+- **AUPRC 0.75** (§1) / **recall@budget 0.73** — precision-aware, still on the 3:1 set.
+- **recall@budget 0.094** — the *same* operating-point metric once negatives are realistic
+  (230:1). "Call the start among ~570 candidate codons."
+
+Each step measures a harder, realer question; AUROC was never wrong, it just answers the
+easy one. This is exactly the calibrated-imbalance number the §Caveats called for.
+
+**Grounding is only partial for AG alone.** Non-cognate codons (never trained on) are *not*
+called (FPR 0.0016 at the operating threshold) but are *not* crushed to ≈0 either (mean p
+0.12, p95 0.48) — AlphaGenome's 128 bp-upsampled embedding leaks regional probability onto
+non-cognate positions. Evo2 (1 token/bp, true codon identity) is expected to lift both the
+recall and the grounding; the combined AG+Evo2 number is the real Phase-2 headline.
+
 ## Takeaways for downstream modeling
 
 1. **Concatenate AlphaGenome + Evo2** — complementary at every scale.
