@@ -31,7 +31,7 @@ FEATURE_KEYS = [
     "onehot/kozakW20.npy",
 ]
 HEAD = "logistic"  # "logistic" | "mlp"
-HEAD_PARAMS = {"C": 0.0125}  # logistic: C ; mlp: hidden_layer_sizes, alpha, ...
+HEAD_PARAMS = {"C": 0.00625}  # logistic: C ; mlp: hidden_layer_sizes, alpha, ...
 CLASS_WEIGHT = None  # None | "balanced" | {0: w0, 1: w1}  (logistic only)
 NEG_SUBSAMPLE = None  # None = all train negatives ; else float neg:pos ratio
 SEED = 0
