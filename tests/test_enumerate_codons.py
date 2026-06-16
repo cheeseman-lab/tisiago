@@ -1,4 +1,9 @@
-from tisiago.enumerate_codons import NEAR_COGNATES, classify_codon, spliced_positions
+from tisiago.enumerate_codons import (
+    NEAR_COGNATES,
+    classify_codon,
+    parse_gtf_exons,
+    spliced_positions,
+)
 
 
 def test_classify_aug():
@@ -41,3 +46,28 @@ def test_spliced_positions_minus_strand_reverses_and_descends():
 def test_spliced_positions_length_matches_total_exon_length():
     exons = [(0, 10), (50, 60), (100, 130)]
     assert len(spliced_positions(exons, "+")) == 10 + 10 + 30
+
+
+def test_parse_gtf_exons(tmp_path):
+    gtf = tmp_path / "mini.gtf"
+    gtf.write_text(
+        "#comment line\n"
+        'chr1\tHAVANA\ttranscript\t101\t300\t.\t+\t.\tgene_id "G1"; transcript_id "ENST1.1";\n'
+        'chr1\tHAVANA\texon\t101\t105\t.\t+\t.\tgene_id "G1"; transcript_id "ENST1.1";\n'
+        'chr1\tHAVANA\texon\t201\t203\t.\t+\t.\tgene_id "G1"; transcript_id "ENST1.1";\n'
+        'chr2\tHAVANA\texon\t51\t60\t.\t-\t.\tgene_id "G2"; transcript_id "ENST2.2";\n'
+    )
+    models = parse_gtf_exons(str(gtf), keep={"ENST1.1", "ENST2.2"})
+    # GTF 1-based inclusive -> 0-based half-open: 101..105 -> [100,105)
+    assert models["ENST1.1"] == {"chrom": "chr1", "strand": "+", "exons": [(100, 105), (200, 203)]}
+    assert models["ENST2.2"] == {"chrom": "chr2", "strand": "-", "exons": [(50, 60)]}
+
+
+def test_parse_gtf_exons_filters_by_keep(tmp_path):
+    gtf = tmp_path / "mini.gtf"
+    gtf.write_text(
+        'chr1\tHAVANA\texon\t1\t5\t.\t+\t.\ttranscript_id "KEEP.1";\n'
+        'chr1\tHAVANA\texon\t1\t5\t.\t+\t.\ttranscript_id "DROP.1";\n'
+    )
+    models = parse_gtf_exons(str(gtf), keep={"KEEP.1"})
+    assert set(models) == {"KEEP.1"}

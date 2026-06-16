@@ -14,6 +14,8 @@ codon)`` to equal the curated manifest for every existing candidate.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 # The 9 single-substitution neighbours of ATG (matches the curated negatives).
@@ -51,3 +53,43 @@ def spliced_positions(exons, strand: str) -> np.ndarray:
     intervals = sorted(exons)  # ascending genomic
     coords = np.concatenate([np.arange(s, e, dtype=np.int64) for s, e in intervals])
     return coords if strand == "+" else coords[::-1].copy()
+
+
+_TX_RE = re.compile(r'transcript_id "([^"]+)"')
+
+
+def parse_gtf_exons(gtf_path: str, keep: set[str] | None = None) -> dict:
+    """Parse exon features from a GTF into per-transcript models.
+
+    Args:
+        gtf_path: path to a GENCODE/Ensembl GTF.
+        keep: if given, only transcripts whose id is in this set are returned.
+
+    Returns:
+        dict ``transcript_id -> {"chrom", "strand", "exons"}`` where ``exons`` is a
+        genomic-ascending list of 0-based half-open ``(start, end)`` intervals.
+    """
+    models: dict[str, dict] = {}
+    with open(gtf_path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.rstrip("\n").split("\t")
+            if len(f) < 9 or f[2] != "exon":
+                continue
+            mt = _TX_RE.search(f[8])
+            if mt is None:
+                continue
+            tx = mt.group(1)
+            if keep is not None and tx not in keep:
+                continue
+            start = int(f[3]) - 1  # 1-based inclusive -> 0-based
+            end = int(f[4])  # inclusive end -> half-open
+            rec = models.get(tx)
+            if rec is None:
+                models[tx] = {"chrom": f[0], "strand": f[6], "exons": [(start, end)]}
+            else:
+                rec["exons"].append((start, end))
+    for rec in models.values():
+        rec["exons"].sort()
+    return models
