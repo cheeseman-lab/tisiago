@@ -62,10 +62,19 @@ positions/shard × 12 evo2 keys ≈ 85 GB. Fixed by `--mem=384G` (A100 allows 19
 **Architectural debt:** `extract.py` should stream parts to disk (or dense scans should
 use more shards) so dense extraction isn't memory-bound — worth a small follow-up.
 
+**First real result — AG-only global caller (test, true imbalance):**
+- True imbalance = **230.6:1** (vs curated 3:1).
+- Recall **0.094** @ ≤1 FP/transcript (p≥0.885) — the curated 0.733 was inflated by the
+  3:1 cap; at realistic imbalance AlphaGenome-alone is a weak caller.
+- Non-cognate grounding **partial**: mean p 0.119, p95 0.483, FPR@threshold 0.0016. AG
+  doesn't *call* non-cognate (low FPR) but doesn't crush them to ≈0 either — consistent
+  with AG = regional context, not base resolution. Evo2 expected to ground far better.
+
 **Remaining to close P2:**
-- [ ] (early) when ag16k clears: `python -m tisiago.store --manifest data/scan_manifest.parquet --parts-dir data/scan_parts --store-dir data/scan_store_ag` → `scan_eval --scan-store data/scan_store_ag --keys alphagenome_jax/L16k/decoder_1bp/off0.npy` for AG-only numbers.
-- [ ] when both clear: combined `scan_store/` assembles → `python -m tisiago.scan_eval --scan-store data/scan_store` for the AG+Evo2 headline.
-- [ ] record the true-imbalance recall + non-cognate≈0 result in `FINDINGS.md`.
+- [x] AG-only assemble + eval (`scan_store_ag`) — done (numbers above).
+- [ ] when evo2 (`10177404`) clears: combined `scan_store/` assembles (`10177405`) →
+  `python -m tisiago.scan_eval --scan-store data/scan_store` for the AG+Evo2 headline.
+- [ ] record the true-imbalance recall + grounding result in `FINDINGS.md`.
 
 **Scope decision (logged):** scanning the *whole mature transcript* (5′UTR+CDS+3′UTR),
 every frame. Open option to restrict to 5′UTR+CDS (drop 3′UTR, where initiation ≈0) — kept
