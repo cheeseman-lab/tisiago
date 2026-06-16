@@ -1,6 +1,6 @@
 import numpy as np
 
-from tisiago.caller import recall_at_fp_budget
+from tisiago.caller import recall_at_fp_budget, reliability
 
 
 def test_recall_at_fp_budget_perfect_separation():
@@ -34,3 +34,23 @@ def test_recall_at_fp_budget_returns_keys():
     tx = np.array(["A", "A"])
     res = recall_at_fp_budget(p, y, tx, budget=1.0)
     assert set(res) == {"recall", "threshold", "fp_per_transcript", "budget"}
+
+
+def test_reliability_perfectly_calibrated():
+    # p exactly equals empirical frequency in each bin -> low Brier, small gap.
+    rng = np.random.default_rng(0)
+    p = rng.uniform(0, 1, size=20000)
+    y = (rng.uniform(0, 1, size=20000) < p).astype(int)  # P(y=1) = p by construction
+    res = reliability(p, y, n_bins=10)
+    assert res["brier"] < 0.20
+    assert res["max_gap"] < 0.05  # |confidence - accuracy| per bin
+    assert len(res["bin_confidence"]) == len(res["bin_accuracy"]) == 10
+
+
+def test_reliability_overconfident_has_large_gap():
+    # Always predict 0.99 but only half are positive -> big calibration gap.
+    p = np.full(1000, 0.99)
+    y = np.array([1, 0] * 500)
+    res = reliability(p, y, n_bins=10)
+    assert res["brier"] > 0.4
+    assert res["max_gap"] > 0.4

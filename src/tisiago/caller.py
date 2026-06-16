@@ -13,6 +13,7 @@ evaluate on ``test`` (chr8/chr9). Pure CPU over an assembled store.
 from __future__ import annotations
 
 import numpy as np
+from sklearn.metrics import brier_score_loss
 
 
 def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
@@ -67,3 +68,36 @@ def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
         else:
             break  # thresholds only get looser -> FP only grows
     return best
+
+
+def reliability(p, y, n_bins: int = 10) -> dict:
+    """Binned calibration curve + Brier score.
+
+    Args:
+        p: probabilities, shape [N].
+        y: binary labels, shape [N].
+        n_bins: number of equal-width bins over [0, 1].
+
+    Returns:
+        dict with ``brier``, ``max_gap`` (max |mean_p - mean_y| over non-empty bins),
+        ``bin_confidence`` (mean p per bin), ``bin_accuracy`` (mean y per bin); empty
+        bins report NaN.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.clip(np.digitize(p, edges[1:-1]), 0, n_bins - 1)
+    conf = np.full(n_bins, np.nan)
+    acc = np.full(n_bins, np.nan)
+    for b in range(n_bins):
+        m = idx == b
+        if m.any():
+            conf[b] = p[m].mean()
+            acc[b] = y[m].mean()
+    gaps = np.abs(conf - acc)
+    return {
+        "brier": float(brier_score_loss(y, p)),
+        "max_gap": float(np.nanmax(gaps)) if np.isfinite(gaps).any() else float("nan"),
+        "bin_confidence": conf.tolist(),
+        "bin_accuracy": acc.tolist(),
+    }
