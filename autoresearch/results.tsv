@@ -19,3 +19,4 @@ winrate64-14	winrate64	-	-	-	-	-	-	-	-	crash	Switch logistic penalty L2 -> elast
 winrate64-15	winrate64	0.6863	0.8542	0.6596	0.7515	0.6522	0.8480	0.6293	0.7320	discard	Swap Evo2 base layer blk28 -> blk24 (4 offsets) on best (AG16k + AG131k + Evo2x4 + Kozak, C=0.1, balanced) — test whet
 winrate64-16	winrate64	0.8033	0.9189	0.7955	0.8394	0.7765	0.9127	0.7774	0.8336	keep	Add explicit one-hot codon identity (onehot/codon12) to best (AG16k + AG131k + 4 Evo2 blk28 offsets + Kozak, C=0.1, bala
 winrate64-17	winrate64	0.7751	0.9117	0.7776	0.8335	0.7424	0.9035	0.7572	0.8382	discard	Test data-level balancing: NEG_SUBSAMPLE=1.0 (thin train negs 3:1->1:1) on best (AG16k+AG131k+blk28x4+Kozak+codon12, C=0
+winrate64-18	winrate64	0.7534	0.8985	0.7386	0.7948	0.7383	0.8970	0.7369	0.8001	discard	Add a SINGLE Evo2 blk26 off0 (only +4096 dims) to best (AG16k+AG131k+blk28x4+Kozak+codon12, C=0.1, balanced) — a secon
