@@ -23,3 +23,4 @@ auprc-18	auprc	0.8218	0.9241	0.8072	0.8312	0.7965	0.9197	0.8013	0.8229	keep	Tigh
 auprc-19	auprc	0.8207	0.9232	0.8063	0.8359	0.7949	0.9191	0.7958	0.8215	discard	Tighten L2 once more on the AG16k+AG131k+four-Evo2-offset+Kozak stack: logistic C 0.00075 -> 0.000375 (every prior C tig
 auprc-20	auprc	0.8132	0.9224	0.8117	0.8265	0.7928	0.9198	0.7909	0.8249	discard	Add Evo2 blk26 off0 (second depth) to the AG16k+AG131k+four-blk28-offset+Kozak stack under tight L2 (logistic C=0.00075)
 auprc-21	auprc	-	-	-	-	-	-	-	-	crash	Switch L2 -> elasticnet (saga, l1_ratio=0.1) at C=0.00075 on the AG16k+AG131k+four-Evo2-offset+Kozak stack — mostly-L2
+auprc-22	auprc	0.8218	0.9240	0.8067	0.8335	0.7967	0.9198	0.8029	0.8242	discard	Add explicit codon-identity one-hot (codon12) to the AG16k+AG131k+four-Evo2-offset+Kozak stack (logistic C=0.00075) — 
