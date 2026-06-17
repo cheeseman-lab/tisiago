@@ -22,3 +22,4 @@ recall1fp-17	recall1fp	0.8191	0.9226	0.7987	0.8347	0.7908	0.9186	0.7980	0.8242	d
 recall1fp-18	recall1fp	0.8197	0.9249	0.8117	0.8242	0.7933	0.9193	0.8002	0.8295	discard	Refine L2 strength to C=0.002 (between kept i9 C=0.003 and discarded i11 C=0.001) on the ~19k AG16k+AG131k+blk28-4offset
 recall1fp-19	recall1fp	0.7664	0.8988	0.7372	0.8007	0.7549	0.8996	0.7273	0.8102	discard	Re-add Evo2 blk26 4-offset stack (off0,3,6,9) on top of AG16k+AG131k+blk28-4offset+kozakW20 — i4 only crashed because 
 recall1fp-20	recall1fp	0.7920	0.9150	0.7897	0.8159	0.7734	0.9123	0.7728	0.8162	discard	Add only Evo2 blk26 off0 (+4096 dims) to the i9 AG16k+AG131k+blk28-4offset+kozakW20 C=0.003 balanced stack — test one 
+recall1fp-21	recall1fp	0.8138	0.9227	0.8063	0.8300	0.7867	0.9169	0.7922	0.8222	discard	Thin train negatives to 1.5:1 (NEG_SUBSAMPLE=1.5, untouched lever) on the i9 AG16k+AG131k+blk28-4offset+kozakW20 C=0.003
