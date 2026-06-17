@@ -21,3 +21,4 @@ winrate64-16	winrate64	0.8033	0.9189	0.7955	0.8394	0.7765	0.9127	0.7774	0.8336	k
 winrate64-17	winrate64	0.7751	0.9117	0.7776	0.8335	0.7424	0.9035	0.7572	0.8382	discard	Test data-level balancing: NEG_SUBSAMPLE=1.0 (thin train negs 3:1->1:1) on best (AG16k+AG131k+blk28x4+Kozak+codon12, C=0
 winrate64-18	winrate64	0.7534	0.8985	0.7386	0.7948	0.7383	0.8970	0.7369	0.8001	discard	Add a SINGLE Evo2 blk26 off0 (only +4096 dims) to best (AG16k+AG131k+blk28x4+Kozak+codon12, C=0.1, balanced) — a secon
 winrate64-19	winrate64	0.8003	0.9178	0.7933	0.8359	0.7731	0.9115	0.7725	0.8349	discard	Loosen logistic L2 (C=0.1 -> 0.2) on best (AG16k+AG131k+blk28x4+Kozak+codon12, balanced) — give the head more capacity
+winrate64-20	winrate64	0.8081	0.9201	0.8013	0.8300	0.7817	0.9127	0.7769	0.8449	discard	Drop AG131k (long-range regional embedding) from best (AG16k+AG131k+blk28x4+Kozak+codon12, C=0.1, balanced) — 131kb co
