@@ -20,3 +20,4 @@ recall1fp-15	recall1fp	0.8193	0.9243	0.8152	0.8335	0.7916	0.9186	0.7925	0.8242	d
 recall1fp-16	recall1fp	-	-	-	-	-	-	-	-	crash	Blend L1+L2 via elasticnet (penalty=elasticnet, solver=saga, l1_ratio=0.3, C=0.02) on the ~19k AG16k+AG131k+blk28-4offse
 recall1fp-17	recall1fp	0.8191	0.9226	0.7987	0.8347	0.7908	0.9186	0.7980	0.8242	discard	Push L1 sparsity stronger than the tied i15 (penalty=l1, solver=liblinear, C=0.05→0.02) on the ~19k AG16k+AG131k+blk28
 recall1fp-18	recall1fp	0.8197	0.9249	0.8117	0.8242	0.7933	0.9193	0.8002	0.8295	discard	Refine L2 strength to C=0.002 (between kept i9 C=0.003 and discarded i11 C=0.001) on the ~19k AG16k+AG131k+blk28-4offset
+recall1fp-19	recall1fp	0.7664	0.8988	0.7372	0.8007	0.7549	0.8996	0.7273	0.8102	discard	Re-add Evo2 blk26 4-offset stack (off0,3,6,9) on top of AG16k+AG131k+blk28-4offset+kozakW20 — i4 only crashed because 
