@@ -26,7 +26,9 @@ See `CLAUDE.md` for the full pipeline, environment setup, and store layout.
 
 ## Result
 
-A linear head on frozen AlphaGenome+Evo2 embeddings reaches **0.90 AUROC** on held-out
+A linear head on frozen AlphaGenome+Evo2 embeddings reaches **0.92 AUROC** on held-out
 chromosomes, and discriminates real alternative TIS from adjacent decoy codons at a
-**0.82 near-neighbour win-rate** (true single-base resolution) — Evo2 carries the
-nucleotide resolution, AlphaGenome the regional context.
+**0.83 near-neighbour win-rate** (true single-base resolution) — Evo2 carries the
+nucleotide resolution, AlphaGenome the regional context. Both numbers are the autoresearch
+best over a 19.6k-dim feature stack (`autoresearch/winners.md`); a 2-key baseline already
+reaches 0.90 / 0.82. See [`FINDINGS.md`](FINDINGS.md).

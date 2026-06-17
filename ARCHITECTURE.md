@@ -223,22 +223,27 @@ scan_eval  (CPU, tisiago env)  ── curated-trained calibrated head applied to
 ## 8. Autoresearch harness (`autoresearch/`)
 
 A self-contained experiment loop that exploits the GPU-free head substrate: pick a feature
-subset, train a light head, score it — in <2 min CPU. Run as a **4-way parallel fleet**, one
-loop per objective metric.
+subset, train a light head, score it — in <2 min CPU. Ran as a **4-way parallel fleet**, one
+loop per objective metric (**done & harvested 2026-06-16** — see `winners.md`).
 
 ```
 autoresearch/
 ├── make_onehot.py        CPU prep   manifest + genome ──▶ onehot/{codon12,kozakW20}.npy (grounding floors)
 ├── train_experiment.py   MUTABLE    CONFIG (features·head·class_weight·neg_subsample) ──▶ preds.npz
 ├── evaluate.py           FIXED      preds.npz ──▶ auprc·auroc·recall1fp·winrate64 (val+test); echoes OBJECTIVE
-├── run.sh                srun CPU   train ──▶ evaluate, one iteration
+├── run.sh                srun CPU   one iteration: train ──▶ evaluate
+├── launch_loop.sh        DRIVER     outer loop: fresh `claude -p` proposes ONE CONFIG ──▶ run ──▶ keep/discard via git
 ├── program.md            the agent's brief (levers, floors, climb-val-report-test rule)
-└── results.tsv           per-worktree keep/discard log
+├── results.tsv           per-worktree keep/discard log
+└── winners.md            harvested best config per objective (the deliverable)
 ```
 
 The cut mirrors the rest of the repo: **`train_experiment.py` is the only mutable surface**
 (the autoresearch agent edits its `CONFIG`), `evaluate.py` is the fixed metric (reuses
-`caller.recall_at_fp_budget` + `resolution.py`'s win-rate pairing). Four loops run in
-isolated **git worktrees** (one objective each), all reading one shared absolute `--store`.
-Guardrail: every loop **climbs a val metric, reports test** — no test-set selection.
+`caller.recall_at_fp_budget` + `resolution.py`'s win-rate pairing). `launch_loop.sh` drives
+the deterministic outer loop so each `claude -p` starts fresh-context and only proposes a
+CONFIG edit. Four loops ran in isolated **git worktrees** (`../tisiago-ar-<obj>`, one objective
+each), all reading one shared absolute `--store`. Guardrail: every loop **climbs a val metric,
+reports test** — no test-set selection. Outcome: logistic on a 19.6k-dim AG+Evo2+Kozak stack
+beat the 2-key baseline on every metric (`winners.md`).
 ```

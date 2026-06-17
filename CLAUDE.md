@@ -46,14 +46,20 @@ non-starts**, not merely ranking a real start above a few curated decoys. Build 
    trustworthy predictor must drive them to ≈0 — an abundant, certain-negative,
    out-of-distribution control. "Non-cognate ≈ 0" is the sanity check that the model
    learned initiation biology, not codon identity.
-4. **The build (the comprehensive plan).**
+4. **The build (the comprehensive plan).** *(Reframe 2026-06-16: the dense Phase 2 was
+   parked — it tangled the model with its train/eval negative distribution — and the head
+   autoresearch was pulled forward onto the rigorous 1:3 curated set. Order below reflects
+   that; live status is in [`ROADMAP.md`](ROADMAP.md).)*
    - **Phase 1 — calibration machinery. ✅ DONE** (`src/tisiago/caller.py`). Train on
      `train`, isotonic-calibrate on held-out `val` (chr7), report reliability + Brier +
      **recall at a false-positives-per-transcript budget** on `test`. Pure CPU on the
      curated 3:1 store. Result: AUPRC 0.741; head is *already well-calibrated* (isotonic
      barely moves Brier); recall **0.733 @ ≤1 FP/transcript**. The reusable metric
      functions that Phase 2 plugs into.
-   - **Phase 2 — global all-codon calibrated caller.** The deliverable. tisiago grows a
+   - **Phase 2 — global all-codon calibrated caller. ⏸️ PARKED.** Was framed as the
+     deliverable; deferred because it conflated the model with its train/eval negative
+     distribution (one AG-only result stands: recall 0.094 @ true 230:1 — `FINDINGS.md §5`).
+     Code merged and kept. tisiago grows a
      **scan capability**: read the GENCODE v49 GTF
      (`swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf`),
      walk each expressed transcript's exons, enumerate **every codon** (in `mrna_index`
@@ -63,10 +69,12 @@ non-starts**, not merely ranking a real start above a few curated decoys. Build 
      FP/transcript on near-cognate decoys, **at true genome-wide imbalance**) **and** as a
      grounding check (mean P on held-out **non-cognate** codons → expect ≈0).
      swissisoform still owns *positives*; tisiago generates the background.
-   - **Phase 3 — autoresearch the head.** Use the `autoresearch` skill to autonomously
-     sweep head architectures (logistic → MLP depth/width, regularization, feature-set &
-     offset combinations) with proper cross-validation across seeds/splits — make the
-     predictor robust, not just a single-seed point estimate.
+   - **Phase 3 — autoresearch the head. ✅ DONE (harvested 2026-06-16).** A 4-way parallel
+     fleet (one loop per metric) swept feature subsets × head × regularization × class-weight
+     on the 1:3 set; winners in [`autoresearch/winners.md`](autoresearch/winners.md) +
+     `FINDINGS.md §6` (logistic on a 19.6k-dim AG+Evo2+Kozak stack beat the 2-key baseline on
+     every metric, on test). **Remaining:** confirm the winners across seeds/splits — they are
+     single-seed point estimates, not yet a robust cross-validated claim.
    - **Phase 4 — TIS efficiency regression (HeLa first).** Move beyond yes/no into
      quantitative initiation: regress the unused per-condition translational-efficiency
      label (`max_norm_HeLa`), restricted to HeLa, on the frozen embeddings.
