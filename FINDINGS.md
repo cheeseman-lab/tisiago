@@ -122,6 +122,37 @@ called (FPR 0.0016 at the operating threshold) but are *not* crushed to ≈0 eit
 non-cognate positions. Evo2 (1 token/bp, true codon identity) is expected to lift both the
 recall and the grounding — but the dense direction is parked pending the autoresearch pass.
 
+## 6. Autoresearch — best head per objective (2026-06-16)
+
+Four parallel autoresearch loops, each climbing one metric on **val** and reporting **test**
+(never selecting on test), swept feature subsets × head × regularization × class-weighting on
+the curated 1:3 set (~20 experiments/loop to plateau). Every objective beat the 2-key baseline
+**on test**, in lockstep with val — the gains are real, not val hill-climbing:
+
+| metric | baseline (test) | **best (test)** | winning config |
+|---|---|---|---|
+| AUPRC | 0.760 | **0.797** | 7-key stack, C=0.00075, no weight |
+| AUROC | 0.905 | **0.920** | 7-key stack, C=0.002, balanced |
+| recall@≤1FP | 0.751 | **0.801** | 7-key stack, C=0.003, balanced |
+| win@64bp | 0.816 | **0.834** | 7-key stack + codon one-hot, C=0.1, balanced |
+
+The **7-key stack** all four converged on: `AG16k + AG131k + Evo2 blk28 off{0,3,6,9} +
+Kozak one-hot` (19.6k-dim). Key results (full detail + cross-metric matrix in
+[`autoresearch/winners.md`](autoresearch/winners.md)):
+
+- **A richer feature stack helps every metric.** Stacking AG131k (regional) + 3 extra Evo2
+  offsets (resolution) + explicit Kozak each added signal over the 2-key headline — embeddings
+  and explicit local sequence are complementary.
+- **One config is the best all-rounder**: 7-key, heavy L2 (C=0.00075), *no* class weight —
+  tops auprc, auroc **and** recall@1FP on test at once. `balanced` helped val but slightly
+  val-overfits relative to test.
+- **Precision ↔ resolution tension.** Maxing win@64 needed explicit codon identity + loose L2,
+  which *costs* the precision metrics. The resolution-optimal head ≠ the precision-optimal head.
+- **Linear still suffices** — every MLP lost or crashed; all four winners are logistic.
+
+These are **single-seed point estimates** (best-of-search). Phase 3 is to confirm them across
+seeds/splits before any figure.
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest
@@ -131,10 +162,11 @@ recall and the grounding — but the dense direction is parked pending the autor
    resolution (the win@64 edge), AlphaGenome the regional context.
 3. **Report the near-neighbour win-rate, not the global AUROC, as the headline** — it
    reflects actually calling a start codon and isn't inflated by regional priors.
-4. **A linear head is a strong baseline** — the active autoresearch fleet sweeps feature
-   subsets × head × class-weighting against all four metrics to find where (and whether)
-   anything beats it. Next: spend effort on the hard stratum (dTIS) and the per-condition
-   efficiency labels (`max_norm_*`).
+4. **A linear head is a strong baseline — and stayed best under search.** The autoresearch
+   fleet (§6) swept feature subsets × head × class-weighting against all four metrics; the
+   winners are all logistic on a 19.6k-dim AG+Evo2+Kozak stack, ~0.02–0.05 over the 2-key
+   baseline on every metric. Next: confirm the winners across seeds/splits (Phase 3), then the
+   hard stratum (dTIS) and the per-condition efficiency labels (`max_norm_*`).
 
 ## Caveats
 

@@ -25,7 +25,8 @@ _Last updated: 2026-06-16._
 |---|---|---|---|
 | **PoC** | Frozen embeddings rank curated candidates | ✅ done | `eval.py`, `resolution.py`, `FINDINGS.md` |
 | **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
-| **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | 🟢 **LAUNCHED 2026-06-16** — 4 loops live in tmux/worktrees | `autoresearch/` |
+| **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | ✅ **done + harvested 2026-06-16** | `autoresearch/winners.md`, `FINDINGS.md §6` |
+| **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔜 **next** | — |
 | **P2** | Global all-codon dense caller | ⏸️ **parked** (code merged, deferred) | `enumerate_codons.py`, `scan_eval.py` |
 | **P4** | TIS efficiency regression (HeLa first) | ⬜ not specced | — |
 
@@ -109,9 +110,13 @@ curated store or the dense scan; how the multi-line labels (K562/RPE1/U2OS) fact
 
 ## Immediate next action
 
-**Fleet launched (2026-06-16) — now monitoring.** The 4 loops run unattended on CPU. Next
-human step is to **read `results.tsv` across the fleet** once experiments accumulate: which
-features/heads each metric favors — especially whether Evo2 dominates `winrate64`, whether
-anything beats the 0.75 one-hot sequence floor, and whether the per-objective winners diverge
-(they should). Promising configs get folded back into `FINDINGS.md`; the eventual best per
-metric is the autoresearch deliverable.
+**Fleet done & harvested (2026-06-16).** Loops stopped after ~20 experiments each (plateau);
+winners in `autoresearch/winners.md` + `FINDINGS.md §6`. All four converged on a 19.6k-dim
+`AG16k+AG131k+Evo2 blk28 off{0,3,6,9}+Kozak` stack; best all-rounder is logistic, heavy L2
+(C=0.00075), no class weight → test auprc 0.797 / auroc 0.920 / recall@1FP 0.801; win@64 peaks
+at 0.834 only by adding codon one-hot (which costs the precision metrics). Gains hold on test.
+Branches `ar/<obj>` + worktrees `../tisiago-ar-<obj>` retain full search history.
+
+**Immediate next (P3):** confirm the winners across **seeds + chr splits** (single-seed now).
+A small CV harness reusing `train_experiment.py` CONFIG over SEED∈{0..4} → mean±sd per metric.
+That promotes the best-of-search point estimates to a defensible claim.
