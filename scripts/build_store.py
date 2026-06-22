@@ -30,7 +30,7 @@ def build_store(cfg: DatasetConfig, git_sha: str) -> Path:
     src2cmp = build_src_to_compact(manifest)
     want = [k[:-4].replace("/", "::") for k in cfg.keys]
     arrays, covered = {}, {}
-    for rows, members in iter_shards(Path(cfg.parts_dir), "*.npz"):
+    for i, (rows, members) in enumerate(iter_shards(Path(cfg.parts_dir), cfg.shard_glob)):
         keep, dst = map_rows(rows, src2cmp)
         for w in want:
             if w not in members:
@@ -41,6 +41,7 @@ def build_store(cfg: DatasetConfig, git_sha: str) -> Path:
                 covered[w] = np.zeros(m, dtype=bool)
             arrays[w][dst] = mat[keep]
             covered[w][dst] = True
+        print(f"  shard {i}: {int(keep.sum()):,} wanted rows", flush=True)
     missing = set(want) - set(arrays.keys())
     assert not missing, f"keys missing from shards: {missing}"
     keys_meta = {}
