@@ -23,6 +23,7 @@ from tisiago.caller import (
     fit_calibrated_head,
     recall_at_fp_budget,
 )
+from tisiago.scan_score import score_shards
 
 
 def grounding_stats(p, threshold: float) -> dict:
@@ -55,6 +56,8 @@ def main() -> None:
     )
     ap.add_argument("--curated-store", default="data/store")
     ap.add_argument("--scan-store", default="data/scan_store")
+    ap.add_argument("--parts-dir", default="data/scan_parts_allsplits")
+    ap.add_argument("--glob", default="*.npz")
     ap.add_argument("--keys", nargs="+", default=DEFAULT_KEYS)
     ap.add_argument("--budget", type=float, default=1.0)
     args = ap.parse_args()
@@ -71,8 +74,7 @@ def main() -> None:
 
     scan = Path(args.scan_store)
     sm = pd.read_parquet(scan / "manifest.parquet")
-    Xs = _load(args.keys, scan / "embeddings")
-    p = head["predict"](Xs)
+    p = score_shards(Path(args.parts_dir), args.glob, sm, args.keys, head)
     te = sm.split.values == "test"
 
     cognate = te & np.isin(sm.codon_class.values, ["AUG", "near_cognate"])
