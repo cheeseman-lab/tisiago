@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from tisiago.shard_io import build_src_to_compact, iter_shards, map_rows
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -38,10 +40,7 @@ def main() -> None:
     if "src_row_idx" not in manifest.columns:
         raise SystemExit("manifest has no src_row_idx column — cannot map shards to compact rows")
 
-    # src coordinate (0..N-1 in the dense scan) -> compact row, -1 if not wanted
-    src = manifest.src_row_idx.values
-    src2cmp = np.full(int(src.max()) + 1, -1, dtype=np.int64)
-    src2cmp[src] = manifest.row_idx.values
+    src2cmp = build_src_to_compact(manifest)
 
     parts = sorted(Path(args.parts_dir).glob(args.glob))
     if not parts:
@@ -51,26 +50,15 @@ def main() -> None:
     arrays: dict[str, np.ndarray] = {}
     covered: dict[str, np.ndarray] = {}
 
-    for i, p in enumerate(parts):
-        z = np.load(p)
-        rows = z["row_idx"]
-        # shards cover every scan position; wanted rows are all <= src.max(), so any
-        # shard index beyond the map is definitionally not-wanted — mask before indexing.
-        cmp = np.full(len(rows), -1, dtype=np.int64)
-        in_range = rows < len(src2cmp)
-        cmp[in_range] = src2cmp[rows[in_range]]
-        keep = cmp >= 0
-        dst = cmp[keep]
-        for key in z.files:
-            if key == "row_idx":
-                continue
-            mat = z[key]
+    for i, (rows, members) in enumerate(iter_shards(Path(args.parts_dir), args.glob)):
+        keep, dst = map_rows(rows, src2cmp)
+        for key, mat in members.items():
             if key not in arrays:
                 arrays[key] = np.zeros((m, mat.shape[1]), dtype=np.float16)
                 covered[key] = np.zeros(m, dtype=bool)
             arrays[key][dst] = mat[keep]
             covered[key][dst] = True
-        print(f"  [{i + 1}/{len(parts)}] {p.name}: {int(keep.sum()):,} wanted rows", flush=True)
+        print(f"  shard {i}: {int(keep.sum()):,} wanted rows", flush=True)
 
     emb_root = store / "embeddings"
     cfg_path = store / "config.yaml"
