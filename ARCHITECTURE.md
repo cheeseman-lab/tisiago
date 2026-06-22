@@ -45,7 +45,8 @@ src/tisiago/
 ├── resolution.py  head (CPU)         .npy ──▶ logistic ──▶ near-neighbour win-rate (base resolution)
 ├── caller.py      head (CPU)         .npy ──▶ calibrated p ──▶ reliability · recall @ FP/transcript budget
 ├── enumerate_codons.py  scan setup (CPU)   GTF + genome ──▶ dense scan manifest (every codon)
-└── scan_eval.py         global caller (CPU) scan store ──▶ recall @ true imbalance · non-cognate≈0
+├── scan_eval.py         global caller (CPU) scan store ──▶ recall @ true imbalance · non-cognate≈0
+└── dense_caller.py      Option B (CPU)      curated-trained heads ──▶ chunked score of dense scan @ true imbalance
 ```
 
 | Module | Purpose | Depends on | Testable as |
@@ -57,7 +58,8 @@ src/tisiago/
 | `resolution.py` | Is the signal at true single-nucleotide resolution | numpy/pandas/sklearn | runs on store, no GPU |
 | `caller.py` | Calibrated probability + caller-shaped metrics (deliverable track) | numpy/pandas/sklearn | runs on store, no GPU |
 | `enumerate_codons.py` | GTF→dense scan manifest of every codon (Phase 2) | numpy/pandas/pyfaidx | pure fns unit-tested; coords checked vs manifest |
-| `scan_eval.py` | Apply calibrated head to the dense scan store (Phase 2) | numpy/pandas, `caller` | logic unit-tested; numbers need scan store |
+| `scan_eval.py` | Apply one calibrated head to the dense scan store (Phase 2) | numpy/pandas, `caller` | logic unit-tested; numbers need scan store |
+| `dense_caller.py` | Option B: two curated-trained heads (`None` vs `balanced`), chunked memmap scoring of the dense scan @ true imbalance + 3-gene demo; `--features ag` (AG+Kozak, ready first) vs `ag7` (+Evo2, later) | numpy/pandas, `caller`, `scan_eval` | `train_heads` smoke-validated; eval needs scan store |
 
 The cut that matters: **`tiling` is pure and `extract` is a thin driver around it.** All the
 subtle coordinate logic (strand, revcomp orientation, grid snap, edge safety) lives in the
@@ -162,13 +164,24 @@ Key grammar: `backend :: length_tag :: layer :: offset`. A head experiment is th
 no model, no coordinate logic. That is the payoff of persisting only the per-candidate vector.
 
 **Phase 2 dense scan store.** The global caller reuses this exact layout for a parallel
-`data/scan_store/` (+ `data/scan_manifest.parquet`, `data/scan_parts/`), row-aligned to the
+`data/scan_store*/` (+ `data/scan_manifest*.parquet`, `data/scan_parts*/`), row-aligned to the
 scan manifest instead of the curated one — *every* codon in held-out transcripts rather than
-curated candidates. Same key grammar, same `.npy` arrays, so `scan_eval` loads it identically.
-It is large (~57 GB test-only at the AG16k+Evo2 headline keys); because the dense scan slices
-~300k positions/shard, the **evo2 extraction is RAM-bound** — `extract.py` accumulates all
-sliced vectors before writing, so evo2's 12 keys need ~85 GB/shard (`run_tis_scan.sh` overrides
-to `--mem=384G`; ag16k's single key fits in 64 GB). Streaming parts to disk is logged debt.
+curated candidates. Same key grammar, same `.npy` arrays, so the callers load it identically.
+
+**Option B (2026-06-17) is the live use of this store** (`src/tisiago/dense_caller.py`): it
+trains the autoresearch-winner 7-key head on the **curated** store (two variants —
+`class_weight=None` vs `balanced`), calibrates on curated val, and scores both on the dense
+scan TEST split at true ~230:1 imbalance (recall @ ≤1 FP/tx over cognate codons +
+non-cognate≈0 grounding + a 3-gene out-of-sample demo). At 19.6k-dim × 5 M test rows (~196 GB
+fp16) it never materializes the matrix — it **predicts chunked over a memmap'd store**. The
+dense scan is thus an *evaluation* substrate; the head still trains on curated, so it doesn't
+re-introduce the train/eval-negative-distribution tangle that parked dense *training*.
+
+The all-splits scan (`scan_manifest_allsplits.parquet`, 62.7 M codons → `scan_store_allsplits/`)
+is large (~2.5 TB at the 7-key stack). The earlier **evo2 RAM-bound OOM** (`extract.py`
+accumulates all sliced vectors before writing → 12 keys ≈ 85 GB/shard) is sidestepped by the
+**blk28-only config** (`tis_evo2_8k_blk28.yaml`, 4 keys) at `--mem=192G`. Streaming parts to
+disk remains logged debt for a full 12-key dense run.
 
 ---
 
@@ -185,13 +198,15 @@ scripts/run_tis_pipeline.sh  N
 
 eval / resolution / caller  (CPU, tisiago env)  ── read-only over data/store/
 
-# Phase 2 — global all-codon dense scan (parallel to the curated path):
-enumerate_codons.py  (CPU)  ── GENCODE GTF + genome ──▶ data/scan_manifest.parquet
+# Phase 2 / Option B — dense scan as a true-imbalance evaluation substrate:
+enumerate_codons.py  (CPU)  ── GENCODE GTF + genome ──▶ data/scan_manifest_allsplits.parquet (62.7M codons)
         │
-        ├─ run_tis_scan.sh  (SLURM array, GPU)  ── extract.py on the scan manifest ──▶ data/scan_parts/*.npz
-        │        env: alphagenome / evo2   ·   evo2 needs --mem=384G (dense, RAM-bound)
+        ├─ run_tis_scan.sh  (SLURM array, GPU)  ── extract.py ──▶ data/scan_parts_allsplits/*.npz
+        │        env: alphagenome / evo2   ·   evo2 blk28-only config @ --mem=192G
+        ├─ kozak_onehot_scan.py  (CPU)  ── genome ──▶ kozakW20_allsplits.npy (validated vs curated)
         │
-        └─ run_tis_assemble.sh  (CPU)  ── store.py ──▶ data/scan_store/
+        └─ store.py  (CPU)  ──▶ data/scan_store_allsplits/
+                 └─ dense_caller.py  (CPU)  ── curated-trained heads, chunked memmap scoring ──▶ recall @ ~230:1 · non-cognate≈0 · 3-gene demo
 
 scan_eval  (CPU, tisiago env)  ── curated-trained calibrated head applied to data/scan_store/
 ```

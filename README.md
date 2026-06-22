@@ -32,3 +32,7 @@ chromosomes, and discriminates real alternative TIS from adjacent decoy codons a
 nucleotide resolution, AlphaGenome the regional context. Both numbers are the autoresearch
 best over a 19.6k-dim feature stack (`autoresearch/winners.md`); a 2-key baseline already
 reaches 0.90 / 0.82. See [`FINDINGS.md`](FINDINGS.md).
+
+**In progress (Option B):** evaluating that head at the *true genome-wide imbalance* (~230:1)
+by scoring every codon in held-out transcripts — does an imbalance-aware variant call real
+starts and reject non-cognate codons (≈0)? See [`ROADMAP.md`](ROADMAP.md) and `HANDOFF_OPTION_B.md`.

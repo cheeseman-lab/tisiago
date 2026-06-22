@@ -9,13 +9,18 @@ Headline metrics: (1) curated-set discrimination judged **against the one-hot se
 floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution). Deferred:
 true-imbalance recall + non-cognate≈0 (the dense scan, parked).
 
-_Last updated: 2026-06-16._
+_Last updated: 2026-06-17._
 
-> **Reframe (current):** the full-genome dense scan (P2) is **parked** — it tangled the
-> model with its train/eval negative distribution. We refocused on the **balanced 1:3
-> curated set**, whose codon-matched negatives are already the rigorous control we want, and
-> stood up a **4-way parallel autoresearch fleet** over the existing AG+Evo2 (+one-hot)
-> features. See `docs/superpowers/specs/` and the plan `modular-splashing-sunset`.
+> **Current (Option B, 2026-06-17):** with the autoresearch winners in hand, we now answer the
+> FINDINGS §5 question — *does the head work at true genome-wide imbalance?* The dense scan is
+> revived **as an evaluation substrate only** (the head still trains on the curated set, so the
+> original "model tangled with its negative distribution" objection doesn't apply). Two heads —
+> the AR winner (`class_weight=None`) and an imbalance-aware variant (`balanced`) — are scored on
+> every codon of the held-out transcripts at ~230:1. See `HANDOFF_OPTION_B.md`.
+>
+> **Prior reframe (2026-06-16):** dense *training* was parked (it tangled model with negative
+> distribution); we refocused on the balanced 1:3 set + a 4-way autoresearch fleet (now done,
+> §AR). Option B builds directly on those winners.
 
 ---
 
@@ -26,8 +31,9 @@ _Last updated: 2026-06-16._
 | **PoC** | Frozen embeddings rank curated candidates | ✅ done | `eval.py`, `resolution.py`, `FINDINGS.md` |
 | **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
 | **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | ✅ **done + harvested 2026-06-16** | `autoresearch/winners.md`, `FINDINGS.md §6` |
-| **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔜 **next** | — |
-| **P2** | Global all-codon dense caller | ⏸️ **parked** (code merged, deferred) | `enumerate_codons.py`, `scan_eval.py` |
+| **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔜 queued | — |
+| **P2 / Option B** | Imbalance-aware head @ true imbalance — **AG+one-hot first, Evo2 later** | 🟢 **imbalance-matched training wins: recall@≤1FP/tx 0.036→0.225 (6×), grounding 0.11→0.0004, AG-only single-seed; Evo2 (ag7) pending** | `dense_caller.py` (`--features ag\|ag7`), `scan_store_allsplits/` |
+| ~~P2~~ | ~~Global all-codon dense *training*~~ | ⏸️ still deferred (Option B sidesteps it) | `enumerate_codons.py`, `scan_eval.py` |
 | **P4** | TIS efficiency regression (HeLa first) | ⬜ not specced | — |
 
 ---
@@ -85,14 +91,52 @@ agent edits in `agent.log`.
 
 ---
 
-## P2 — global all-codon dense caller ⏸️ parked
+## P2 / Option B — imbalance-aware head, evaluated at true imbalance 🟢 first result in (2026-06-18)
 
-Code merged and working (`enumerate_codons.py`, `scan_eval.py`, `run_tis_scan.sh`), GPU jobs
-cancelled. Parked because it conflated the model with its train/eval negative distribution
-(see Reframe). The one real result stands as FINDINGS §5: **AG-only recall 0.094 @ ≤1
-FP/transcript at true 230:1 imbalance**, non-cognate grounding only partial (mean p 0.12).
-**Architectural debt if revived:** `extract.py` accumulates sliced vectors in RAM → dense
-evo2 needs `--mem=384G` (OOM-killed at 64G); should stream parts to disk.
+> **Result (2026-06-18, AG-only):** training **at** the true imbalance (49:1 dense) beats the
+> 3:1-trained head decisively on the same TEST substrate — AUPRC 0.085→**0.246**, recall@≤1FP/tx
+> 0.036→**0.225** (6×), non-cognate grounding 0.109→**0.0004**. The gains are rank-based, so this
+> is the negative *distribution*, not just calibration. The §5 0.094 collapse was largely a
+> train-prior artefact. See [`FINDINGS.md §7`](FINDINGS.md). Caveat: single seed, AG-only, Evo2
+> (`ag7`) pending. This reframes the whole question — see the redesign decision doc (in progress).
+
+Revives the dense scan **as an honest evaluation substrate**, not as training data — which is
+what got the original P2 parked (it conflated the model with its train/eval negative
+distribution). Option B keeps the autoresearch winner stack and trains on the **curated** set,
+adding one imbalance-aware variant, then scores both at the real genome-wide imbalance:
+
+- **Two heads** (`src/tisiago/dense_caller.py`), heavy L2 C=0.00075, isotonic-calibrated on
+  curated val: **Config C** (`class_weight=None`, the AR best-all-rounder) vs **Option B**
+  (`class_weight="balanced"`, set for ~230:1).
+- **Evaluated on the dense scan TEST split** at true imbalance: recall @ ≤1 FP/tx over cognate
+  (AUG+near_cognate) codons + non-cognate≈0 grounding + reliability/Brier — answering the
+  FINDINGS §5 question (does imbalance-awareness lift the 0.094 collapse?).
+- **3-gene out-of-sample demo** (SCN1A/GRIN1/TSC1): per-codon P(initiation) under both heads.
+
+**Feature staging — AG first, Evo2 later** (`dense_caller.py --features {ag,ag7}`):
+- **`ag` (near-term deliverable):** AG16k+AG131k+Kozak only — directly comparable to §5's
+  AG-only 0.094, and ready as soon as the (fast) AlphaGenome scan finishes.
+- **`ag7` (full):** adds Evo2 blk28 off{0,3,6,9} — the autoresearch winner stack — once the
+  (slow) genome-wide Evo2 scan completes.
+
+**Status (2026-06-17):**
+- ✅ **AlphaGenome scan done** (AG16k + AG131k, 120/120 shards, A100) → AG store assembled
+  (`scan_store_allsplits/`, both keys 62.7M×1536 fully covered) + Kozak staged.
+- ✅ **First `--features ag` eval run** (AG+Kozak, no Evo2) at true 230.6:1 imbalance.
+  **Sobering preliminary:** recall @ ≤1 FP/tx = **0.036** (Config C) / **0.050** (balanced);
+  non-cognate grounding only partial (mean p ≈0.11, not ≈0); calibration doesn't transfer from
+  3:1 (max_gap 0.77). Lower than §5's AG-only 0.094 — but not apples-to-apples (different
+  feature set + `C`). **Caveat: AG-only, ≤1 FP/tx is the harshest metric, regularization tuned
+  on 3:1.** A diagnostic re-run (recall-vs-budget *curve*, AUPRC, lighter `C`, saved preds) is
+  in flight to separate *ranking-limited* from *brutal-operating-point* — §7 written after it.
+- 🔄 **Evo2 blk28 background** on A6000 (0–59) + L40S (60–79), 4 GPUs, ~1.5 h/shard. The
+  `--features ag7` re-run (adds base resolution — the component this metric most rewards) is the
+  real test. See `HANDOFF_OPTION_B.md` (received plan; GPU/partition choices below supersede it).
+
+**Robustness/throughput:** old evo2 OOM (`--mem=64G`) avoided by the **blk28-only config**
+(`tis_evo2_8k_blk28.yaml`, 4 keys not 12) at `--mem=192G` (verified, no OOM). Evo2 sped up by
+spanning A6000+L40S (both fit the 7B; A4000/t4 too small). Dense *training* stays deferred; the
+all-splits store pre-stages it.
 
 ---
 

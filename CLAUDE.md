@@ -56,11 +56,16 @@ non-starts**, not merely ranking a real start above a few curated decoys. Build 
      curated 3:1 store. Result: AUPRC 0.741; head is *already well-calibrated* (isotonic
      barely moves Brier); recall **0.733 @ ≤1 FP/transcript**. The reusable metric
      functions that Phase 2 plugs into.
-   - **Phase 2 — global all-codon calibrated caller. ⏸️ PARKED.** Was framed as the
-     deliverable; deferred because it conflated the model with its train/eval negative
-     distribution (one AG-only result stands: recall 0.094 @ true 230:1 — `FINDINGS.md §5`).
-     Code merged and kept. tisiago grows a
-     **scan capability**: read the GENCODE v49 GTF
+   - **Phase 2 / Option B — imbalance-aware head @ true imbalance. 🟡 IN PROGRESS (2026-06-17).**
+     Revives the dense scan as an **evaluation substrate** (not training data — so the original
+     "model tangled with its negative distribution" objection doesn't apply): trains the
+     autoresearch-winner 7-key head on the **curated** set plus a `class_weight="balanced"`
+     variant, then scores both on every codon of held-out transcripts at ~230:1 to answer
+     `FINDINGS §5` (does imbalance-awareness lift the AG-only 0.094 recall collapse?). Driver:
+     `src/tisiago/dense_caller.py` (`--features ag` = AG+Kozak deliverable first, `ag7` = adds
+     Evo2 once its slow genome-wide scan finishes). AG extracts on A100 (priority); Evo2 blk28
+     runs background on A6000+L40S. Plan: `HANDOFF_OPTION_B.md`. Dense *training* stays deferred.
+     The underlying scan capability reads the GENCODE v49 GTF
      (`swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf`),
      walk each expressed transcript's exons, enumerate **every codon** (in `mrna_index`
      coordinates — same system the manifest already uses), tile + embed (one forward

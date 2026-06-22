@@ -116,6 +116,10 @@ increasingly honest about the actual task — not the same metric degrading:
 Each step measures a harder, realer question; AUROC was never wrong, it just answers the
 easy one. This is exactly the calibrated-imbalance number the §Caveats called for.
 
+> **Update (2026-06-18): the collapse is largely a *train-prior* artefact, not a ceiling.**
+> §7 below trains the head **at** the true imbalance and recovers most of the recall **and**
+> fixes the grounding — the 0.094 here is the 3:1-trained head testing out-of-distribution.
+
 **Grounding is only partial for AG alone.** Non-cognate codons (never trained on) are *not*
 called (FPR 0.0016 at the operating threshold) but are *not* crushed to ≈0 either (mean p
 0.12, p95 0.48) — AlphaGenome's 128 bp-upsampled embedding leaks regional probability onto
@@ -152,6 +156,95 @@ Kozak one-hot` (19.6k-dim). Key results (full detail + cross-metric matrix in
 
 These are **single-seed point estimates** (best-of-search). Phase 3 is to confirm them across
 seeds/splits before any figure.
+
+## 7. Imbalance-matched training lifts the collapse (2026-06-18, AG-only)
+
+§5 applied a **3:1-trained** head at 230:1 and recall fell to ~0.04–0.09. The obvious
+suspect was train/test prior mismatch. We tested it directly: same AG-only 3-key stack
+(`AG16k + AG131k + Kozak`), same held-out TEST substrate (1.82M codons: 823k cognate +
+1M never-trained non-cognate, 3,555 positives, true 230.6:1), only the **training prior**
+changed — `curated-C` trains on the 3:1 set; `Dense` trains on the dense pool at **49:1**
+(all train positives + 2M capped negatives), `bal` = `class_weight="balanced"`, `none` = no
+reweight. All scored at the same true imbalance:
+
+| metric (TEST @ 230:1) | curated-C (train 3:1) | Dense bal (train 49:1) | **Dense none (train 49:1)** |
+|---|---|---|---|
+| AUPRC (base 0.0043) | 0.0845 | 0.2023 | **0.2456** |
+| recall @ ≤1 FP/tx | 0.036 | 0.193 | **0.225** |
+| recall @ ≤5 FP/tx | 0.259 | 0.437 | **0.473** |
+| recall @ ≤20 FP/tx | 0.533 | 0.682 | **0.688** |
+| non-cognate mean p (→0) | 0.109 | 0.0004 | **0.0003** |
+| non-cognate p95 | 0.476 | 0.0012 | **0.0008** |
+| cognate Brier | 0.039 | 0.0038 | **0.0036** |
+
+**What it proves — the gain is in the *ranking*, not just the threshold.**
+
+- **AUPRC tripled** (0.085 → 0.246) and **recall@≤1FP/tx went 6×** (0.036 → 0.225). AUPRC is
+  rank-based and calibration-invariant — **no recalibration of the 3:1 head could produce
+  this.** Training against the genome's *diverse* negatives (not just matched near-cognate
+  decoys) taught a genuinely better boundary. The negative *distribution* matters.
+- **The grounding check flips from fail to pass.** Non-cognate mean p: 0.109 (p95 0.476 —
+  half of certain-negatives look like plausible starts) → **0.0004**. The imbalance-trained
+  head drives "non-cognate ≈ 0" — but **§8 shows this absolute level is largely a *calibration*
+  property** (recalibrating the 3:1 head alone also reaches ≈0.003), so it is not by itself
+  proof of learned biology; the durable discriminator is the rank-based cognate metric.
+- **At 49:1, no class-weighting wins** — `Dense(none)` ≥ `Dense(bal)` on every metric. Raw
+  imbalance-matched training beats the `balanced` reweight.
+
+**Evo2 lift — matched `ag` vs `ag7` pair (2026-06-21).** Adding the Evo2 blk28 off{0,3,6,9}
+stack to the AG+Kozak features, both trained at a **matched 1M-negative** cap (24:1; the big
+node was occupied so 2M was not schedulable — §7's 2M AG above is the reference), best head
+`Dense(None)`, same TEST @ 230:1:
+
+| metric (TEST @ 230:1) | `ag` (1M) | **`ag7` (1M, +Evo2)** |
+|---|---|---|
+| AUPRC (base 0.0043) | 0.2424 | **0.2959** |
+| recall @ ≤1 FP/tx | 0.247 | **0.309** |
+| recall @ ≤5 FP/tx | 0.419 | **0.500** |
+| recall @ ≤20 FP/tx | 0.692 | **0.753** |
+| non-cognate mean p (→0) | 0.0004 | 0.0004 |
+| cognate Brier | 0.0036 | 0.0035 |
+
+The two levers do **different jobs**: imbalance-matched training already drove non-cognate to
+≈0 (grounding, solved by AG alone), so Evo2's ~25% recall / +22% AUPRC lift is **cognate
+discrimination** — its base resolution helps rank a true start above near-cognate decoys. Best
+caller to date: **`ag7` Dense(None), recall 0.309 @ ≤1FP/tx at true 230:1, AUPRC 0.296 (69×
+base), non-cognate ≈0.0004.** (Even the 3:1-trained `curated-C` improves with Evo2 — recall
+0.036→0.142 — but stays far below imbalance-matched training.)
+
+**Caveats (do not overclaim).** Single seed; the headline AG table is at 2M negatives while
+the Evo2-lift pair is at a matched 1M (node-availability forced, not chosen); and the cleanest
+baseline — *balanced-train + recalibrate-to-true-prior* — is not yet run. But the AUPRC/recall
+gains are rank-based, so recalibration alone could not close most of the gap. This is strong
+**preliminary** evidence for imbalance-matched training **and** a real Evo2 lift on cognate
+discrimination; confirm across seeds and against the recalibrate baseline.
+
+## 8. Negative control — recalibration recovers calibration, not ranking (2026-06-22)
+
+§7 argued the dense-training gain is rank-based and so *cannot* be a calibration artefact. The
+direct test (operon's predicted control): take the curated-trained head's saved test
+predictions and apply the **Saerens prior-correction** (a monotonic map from the curated 3:1
+prior to the true cognate prior 0.0043), then re-measure. Monotonic ⇒ ranking is mathematically
+untouched; only calibration can move (`scripts/saerens_control.py`):
+
+| `ag7`, cognate test @ 230:1 | curated-C raw | curated-C **+Saerens** | Dense(None) |
+|---|---|---|---|
+| AUPRC (ranking) | 0.1405 | **0.1405** | **0.2959** |
+| Brier (calibration) | 0.0437 | **0.0040** | 0.0035 |
+| non-cognate mean p | 0.1138 | **0.0032** | 0.0004 |
+
+(`ag` is the same story: AUPRC 0.0845→0.0845, Brier 0.0387→0.0041, non-cog 0.109→0.003.)
+
+- **Recalibration fully recovers calibration** (Brier 0.044→0.004, ≈ dense) but leaves AUPRC
+  *exactly* unchanged (0.1405 vs dense 0.296). No recalibration of the curated head can reach
+  the dense head's ranking → **the §7 lift is a negative-*distribution* effect, not a prior
+  shift.** D1 settled (Saerens 2002; Dal Pozzolo 2015; see the decision doc).
+- **Refinement — grounding is partly a calibration property.** Non-cognate mean p drops
+  0.114→0.003 under recalibration *alone*. So "non-cognate ≈ 0" is **not by itself** proof of
+  learned initiation biology — a recalibrated curated head also achieves it. The honest
+  discriminator of "learned biology" is the **rank-based cognate metric** (AUPRC / recall@FP),
+  which only the right negative *distribution* improves. Read §7's grounding flip with this
+  caveat: the *absolute* non-cognate level is recoverable post-hoc; the *ranking* is not.
 
 ## Takeaways for downstream modeling
 

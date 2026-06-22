@@ -1,0 +1,13 @@
+# TIS per-candidate extraction — Evo-2 7B, 8 kb left-heavy windows.
+# Blk28-only variant: autoresearch confirmed only blocks.28.mlp.l3 matters.
+# Drops blk24/blk26 to cut RAM from 59GB→20GB per shard (fits 64G).
+model: evo2
+input_fasta: ""
+output_dir: ./data/tis/parts
+output_format: h5
+batch_size: 1
+device: cuda
+dtype: bfloat16
+evo2_layers:
+  - blocks.28.mlp.l3
+embedding_offsets: [0, 3, 6, 9]

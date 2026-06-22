@@ -110,7 +110,9 @@ def reliability(p, y, n_bins: int = 10) -> dict:
     }
 
 
-def fit_calibrated_head(X_train, y_train, X_cal, y_cal) -> dict:
+def fit_calibrated_head(
+    X_train, y_train, X_cal, y_cal, *, C: float = 1.0, max_iter: int = 300, class_weight=None
+) -> dict:
     """Train a standardized logistic head, then isotonic-calibrate on a held-out set.
 
     Args:
@@ -118,12 +120,17 @@ def fit_calibrated_head(X_train, y_train, X_cal, y_cal) -> dict:
         y_train: training labels, shape [N_train].
         X_cal: held-out calibration features (a different chromosome split), shape [N_cal, D].
         y_cal: held-out calibration labels, shape [N_cal].
+        C: inverse L2 strength for the logistic head.
+        max_iter: lbfgs iteration cap.
+        class_weight: ``None`` | ``"balanced"`` | dict — passed to ``LogisticRegression``.
 
     Returns:
         dict with ``predict`` (X -> calibrated p) and ``predict_raw`` (X -> uncalibrated p).
     """
     scaler = StandardScaler().fit(X_train)
-    clf = LogisticRegression(max_iter=300, C=1.0).fit(scaler.transform(X_train), y_train)
+    clf = LogisticRegression(max_iter=max_iter, C=C, class_weight=class_weight).fit(
+        scaler.transform(X_train), y_train
+    )
 
     def predict_raw(X):
         return clf.predict_proba(scaler.transform(X))[:, 1]
