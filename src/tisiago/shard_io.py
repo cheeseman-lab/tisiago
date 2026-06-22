@@ -59,6 +59,7 @@ def iter_shards(
         is a dict of all other arrays (excluding row_idx).
     """
     for p in sorted(Path(parts_dir).glob(glob)):
-        z = np.load(p)
-        members = {k: z[k] for k in z.files if k != "row_idx"}
-        yield z["row_idx"], members
+        with np.load(p) as z:
+            rows = z["row_idx"]
+            members = {k: z[k] for k in z.files if k != "row_idx"}
+        yield rows, members
