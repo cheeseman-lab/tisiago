@@ -1,0 +1,14 @@
+name: dense_ag7
+parts_dir: data/scan_parts_allsplits
+out_store: /lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7
+keys:
+  - alphagenome_jax/L16k/decoder_1bp/off0.npy
+  - alphagenome_jax/L131k/decoder_1bp/off0.npy
+  - evo2/W8k/blocks.28.mlp.l3/off0.npy
+  - evo2/W8k/blocks.28.mlp.l3/off3.npy
+  - evo2/W8k/blocks.28.mlp.l3/off6.npy
+  - evo2/W8k/blocks.28.mlp.l3/off9.npy
+  - onehot/kozakW20.npy
+neg_cap: 1000000
+noncog_sample: 1000000
+seed: 0
