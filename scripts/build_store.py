@@ -41,10 +41,11 @@ def build_store(cfg: DatasetConfig, git_sha: str) -> Path:
                 covered[w] = np.zeros(m, dtype=bool)
             arrays[w][dst] = mat[keep]
             covered[w][dst] = True
+    missing = set(want) - set(arrays.keys())
+    assert not missing, f"keys missing from shards: {missing}"
     keys_meta = {}
     for w, mat in arrays.items():
-        backend, ltag, layer, off = w.split("::")
-        op = out / "embeddings" / backend / ltag / layer / f"{off}.npy"
+        op = out / "embeddings" / (w.replace("::", "/") + ".npy")
         op.parent.mkdir(parents=True, exist_ok=True)
         np.save(op, mat)
         cov = int(covered[w].sum())
