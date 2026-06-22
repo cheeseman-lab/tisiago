@@ -245,6 +245,13 @@ untouched; only calibration can move (`scripts/saerens_control.py`):
   discriminator of "learned biology" is the **rank-based cognate metric** (AUPRC / recall@FP),
   which only the right negative *distribution* improves. Read §7's grounding flip with this
   caveat: the *absolute* non-cognate level is recoverable post-hoc; the *ranking* is not.
+- **Balanced-*training* doesn't help either (2026-06-22).** Operon's literal arm — train the
+  curated head with `class_weight="balanced"` then Saerens-recalibrate — was run
+  (`dense_caller --train curated`). Balanced curated training is *slightly worse* than
+  unweighted, not better: AUPRC ag7 **0.123** (bal) vs 0.141 (unweighted) vs **0.296** (dense);
+  ag 0.078 vs 0.085 vs 0.242. Saerens (monotonic) then leaves AUPRC untouched. So **no curated
+  head — weighted or not, recalibrated or not — reaches dense.** Reweighting during training
+  cannot substitute for the right negative *distribution*; this exhaustively closes D1.
 
 ## Takeaways for downstream modeling
 

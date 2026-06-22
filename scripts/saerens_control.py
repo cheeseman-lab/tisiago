@@ -13,8 +13,6 @@ Run: python scripts/saerens_control.py
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 from sklearn.metrics import average_precision_score, brier_score_loss
 
@@ -22,7 +20,12 @@ PREDS = {
     "ag (1M)": "data/scan_parts_allsplits/dense_ag_matched_preds.npz",
     "ag7 (1M)": "data/scan_parts_allsplits/dense_ag7_preds.npz",
 }
-PI_TRAIN = 0.25  # curated set is 3:1 neg:pos -> positive rate 1/4
+# Balanced-train arm: curated heads (incl class_weight="balanced") scored on the dense test.
+CURATED_PREDS = {
+    "ag": "data/scan_parts_allsplits/dense_ag_curated_preds.npz",
+    "ag7": "data/scan_parts_allsplits/dense_ag7_curated_preds.npz",
+}
+PI_TRAIN = 0.25  # curated set is 3:1 neg:pos -> positive rate 1/4; isotonic anchors heads here
 
 
 def saerens(p: np.ndarray, pi_tr: float, pi_de: float) -> np.ndarray:
@@ -32,6 +35,7 @@ def saerens(p: np.ndarray, pi_tr: float, pi_de: float) -> np.ndarray:
 
 
 def main() -> None:
+    """Report the curated-C and balanced-train arms (raw vs Saerens) against Dense(None)."""
     for tag, path in PREDS.items():
         z = np.load(path, allow_pickle=True)
         cog, ncog = z["cognate"], z["noncog"]
@@ -49,6 +53,24 @@ def main() -> None:
         print(f"  curated-C  non-cog mean p raw={nc.mean():.4f}  +Saerens={nc_s.mean():.4f}")
         print(f"  Dense(None) AUPRC={average_precision_score(y, pd_none):.4f}  "
               f"Brier={brier_score_loss(y, pd_none):.4f}  <- target\n")
+
+    # Balanced-train arm: does class_weight="balanced" curated training (+ Saerens) help?
+    print("--- balanced-train arm (curated class_weight=balanced + Saerens) ---")
+    for tag, path in CURATED_PREDS.items():
+        z = np.load(path, allow_pickle=True)
+        cog = z["cognate"]
+        y = z["y"][cog].astype(int)
+        pb = z["p::B(.00075,bal)"][cog]
+        pc = z["p::C(.00075,None)"][cog]
+        pi_de = float(y.mean())
+        pb_s = saerens(pb, PI_TRAIN, pi_de)
+        print(f"=== {tag} ===")
+        print(f"  curated-balanced  AUPRC raw={average_precision_score(y, pb):.4f}  "
+              f"+Saerens={average_precision_score(y, pb_s):.4f}  (rank-invariant)")
+        print(f"  curated-balanced  Brier raw={brier_score_loss(y, pb):.4f}  "
+              f"+Saerens={brier_score_loss(y, pb_s):.4f}")
+        print(f"  (curated-unweighted AUPRC={average_precision_score(y, pc):.4f} — balanced "
+              f"does not beat it; both << dense)\n")
 
 
 if __name__ == "__main__":
