@@ -168,6 +168,13 @@ no model, no coordinate logic. That is the payoff of persisting only the per-can
 scan manifest instead of the curated one — *every* codon in held-out transcripts rather than
 curated candidates. Same key grammar, same `.npy` arrays, so the callers load it identically.
 
+**Dense genome-wide data is NOT assembled into a row-aligned monolith.** At ~62 M codons the
+full `[N, D]` scatter does not fit in RAM or SSD. Two regimes handle it instead (decision doc
+`docs/superpowers/specs/2026-06-18-embedding-dataset-architecture-decision.md`): Regime A
+(`scripts/build_store.py`) gathers only the candidate rows into a compact SSD store; Regime B
+(`tisiago.scan_score`) streams shards directly to score every codon without materialising the
+matrix. Curated-candidate stores (≪ 10 M rows) continue to use `store.py` unchanged.
+
 **Option B (2026-06-17) is the live use of this store** (`src/tisiago/dense_caller.py`): it
 trains the autoresearch-winner 7-key head on the **curated** store (two variants —
 `class_weight=None` vs `balanced`), calibrates on curated val, and scores both on the dense

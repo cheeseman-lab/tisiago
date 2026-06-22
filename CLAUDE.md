@@ -149,6 +149,12 @@ data/store/
 A head experiment = load a few `.npy`, `np.concatenate(axis=1)`, filter rows by the
 manifest `split` column. No GPU.
 
+Dense genome-wide data is **not** assembled into a row-aligned monolith — at ~62 M codons
+the `[N, D]` scatter does not fit. Two regimes handle it instead (see
+`docs/superpowers/specs/2026-06-18-embedding-dataset-architecture-decision.md`):
+Regime A (`scripts/build_store.py`) gathers candidate rows into a compact SSD store;
+Regime B (`tisiago.scan_score`) streams shards to score every codon without materialising the matrix.
+
 The Phase-2 dense scan produces a parallel `data/scan_store/` (same layout) row-aligned to
 `data/scan_manifest.parquet` — *every* codon in held-out transcripts (from
 `tisiago.enumerate_codons`, ~7.9M positions test+val), scored by `tisiago.scan_eval` for

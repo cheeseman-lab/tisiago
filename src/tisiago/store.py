@@ -25,11 +25,25 @@ Run in any env with numpy + pandas + pyyaml.
 from __future__ import annotations
 
 import argparse
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import yaml
+
+DENSE_MONOLITH_THRESHOLD = 10_000_000  # candidate stores are ≪ this; dense scans are ≫
+
+
+def warn_if_dense_monolith(n_rows: int) -> None:
+    """Steer genome-scale assembly to the streaming/gather paths (decision doc A2)."""
+    if n_rows >= DENSE_MONOLITH_THRESHOLD:
+        warnings.warn(
+            f"Assembling a {n_rows:,}-row monolith is retired for dense scans — use "
+            "scripts/build_store.py (compact gather) or tisiago.scan_score (streaming eval).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
 
 def main() -> None:
@@ -44,6 +58,7 @@ def main() -> None:
 
     manifest = pd.read_parquet(args.manifest)
     n = len(manifest)
+    warn_if_dense_monolith(n)
     assert (manifest.row_idx.values == np.arange(n)).all(), "manifest row_idx must be 0..N-1 contiguous"
 
     parts = sorted(Path(args.parts_dir).glob(args.glob))
