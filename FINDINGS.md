@@ -191,33 +191,34 @@ reweight. All scored at the same true imbalance:
 - **At 49:1, no class-weighting wins** — `Dense(none)` ≥ `Dense(bal)` on every metric. Raw
   imbalance-matched training beats the `balanced` reweight.
 
-**Evo2 lift — matched `ag` vs `ag7` pair (2026-06-21).** Adding the Evo2 blk28 off{0,3,6,9}
-stack to the AG+Kozak features, both trained at a **matched 1M-negative** cap (24:1; the big
-node was occupied so 2M was not schedulable — §7's 2M AG above is the reference), best head
-`Dense(None)`, same TEST @ 230:1:
+**Evo2 lift — matched `ag` vs `ag7` pair at 2M (2026-06-23, clean SSD pipeline).** Adding the
+Evo2 blk28 off{0,3,6,9} stack to AG+Kozak, both at the **matched 2M-negative** cap (49:1, the
+same cap as the headline AG table above), best head `Dense(None)`, same TEST @ 230:1. Run
+through the migrated SSD substrate (`build_store.py`); the `ag` column reproduces §7's original
+2M AG **bit-for-bit** (AUPRC 0.2456, recall 0.225), validating the migration:
 
-| metric (TEST @ 230:1) | `ag` (1M) | **`ag7` (1M, +Evo2)** |
+| metric (TEST @ 230:1) | `ag` (2M) | **`ag7` (2M, +Evo2)** |
 |---|---|---|
-| AUPRC (base 0.0043) | 0.2424 | **0.2959** |
-| recall @ ≤1 FP/tx | 0.247 | **0.309** |
-| recall @ ≤5 FP/tx | 0.419 | **0.500** |
-| recall @ ≤20 FP/tx | 0.692 | **0.753** |
-| non-cognate mean p (→0) | 0.0004 | 0.0004 |
-| cognate Brier | 0.0036 | 0.0035 |
+| AUPRC (base 0.0043) | 0.2456 | **0.3073** |
+| recall @ ≤1 FP/tx | 0.225 | **0.300** |
+| recall @ ≤5 FP/tx | 0.473 | **0.539** |
+| recall @ ≤20 FP/tx | 0.688 | **0.769** |
+| non-cognate mean p (→0) | 0.0003 | 0.0003 |
+| cognate Brier | 0.0036 | 0.0034 |
 
 The two levers do **different jobs**: imbalance-matched training already drove non-cognate to
-≈0 (grounding, solved by AG alone), so Evo2's ~25% recall / +22% AUPRC lift is **cognate
+≈0 (grounding, solved by AG alone), so Evo2's **+33% recall / +25% AUPRC** lift is **cognate
 discrimination** — its base resolution helps rank a true start above near-cognate decoys. Best
-caller to date: **`ag7` Dense(None), recall 0.309 @ ≤1FP/tx at true 230:1, AUPRC 0.296 (69×
-base), non-cognate ≈0.0004.** (Even the 3:1-trained `curated-C` improves with Evo2 — recall
-0.036→0.142 — but stays far below imbalance-matched training.)
+caller to date: **`ag7` Dense(None), recall 0.300 @ ≤1FP/tx at true 230:1, AUPRC 0.307 (71×
+base), non-cognate ≈0.0003.** The lift held at the earlier matched 1M cap too (0.247→0.309
+recall), so it is not a cap artefact. (Even the 3:1-trained `curated-C` improves with Evo2 —
+recall 0.036→0.142 — but stays far below imbalance-matched training.)
 
-**Caveats (do not overclaim).** Single seed; the headline AG table is at 2M negatives while
-the Evo2-lift pair is at a matched 1M (node-availability forced, not chosen); and the cleanest
-baseline — *balanced-train + recalibrate-to-true-prior* — is not yet run. But the AUPRC/recall
-gains are rank-based, so recalibration alone could not close most of the gap. This is strong
-**preliminary** evidence for imbalance-matched training **and** a real Evo2 lift on cognate
-discrimination; confirm across seeds and against the recalibrate baseline.
+**Caveats (do not overclaim).** **Single seed** is the one remaining caveat — the headline AG
+and the Evo2-lift pair are now at the *same* 2M cap (the earlier cap mismatch is resolved), and
+the *balanced-train + recalibrate* baseline has been run (§8: it does not reach dense). The
+AUPRC/recall gains are rank-based, so recalibration alone cannot close them. Confirm across
+seeds before any figure.
 
 ## 8. Negative control — recalibration recovers calibration, not ranking (2026-06-22)
 

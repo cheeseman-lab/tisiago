@@ -32,7 +32,7 @@ _Last updated: 2026-06-17._
 | **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
 | **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | ✅ **done + harvested 2026-06-16** | `autoresearch/winners.md`, `FINDINGS.md §6` |
 | **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔜 queued | — |
-| **P2 / Option B** | Imbalance-aware head @ true imbalance — **AG+one-hot first, Evo2 later** | 🟢 **imbalance-matched training wins: recall@≤1FP/tx 0.036→0.225 (6×), grounding 0.11→0.0004, AG-only single-seed; Evo2 (ag7) pending** | `dense_caller.py` (`--features ag\|ag7`), `scan_store_allsplits/` |
+| **P2 / Option B** | Imbalance-aware head @ true imbalance — **AG + Evo2** | 🟢 **DONE (2M, SSD pipeline): imbalance-matched training wins (recall 0.036→0.225, grounding 0.11→0.0003); +Evo2 lifts to recall 0.300 / AUPRC 0.307 (+33%); D1 closed (§8). Single-seed.** | `dense_caller.py`, `build_store.py`, SSD `dense_ag7` |
 | ~~P2~~ | ~~Global all-codon dense *training*~~ | ⏸️ still deferred (Option B sidesteps it) | `enumerate_codons.py`, `scan_eval.py` |
 | **P4** | TIS efficiency regression (HeLa first) | ⬜ not specced | — |
 
