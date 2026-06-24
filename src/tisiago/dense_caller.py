@@ -28,6 +28,7 @@ import pandas as pd
 from sklearn.metrics import average_precision_score
 
 from tisiago.caller import fit_calibrated_head, recall_at_fp_budget, reliability
+from tisiago.head_xgb import fit_lgb_head, fit_rf_head, fit_xgb_head
 from tisiago.scan_eval import grounding_stats
 
 # The autoresearch winner stack (see autoresearch/winners.md).
@@ -115,7 +116,8 @@ def train_heads(curated_store: Path, keys=KEYS_7, only=None) -> dict:
     }
 
 
-def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, seed: int = 0) -> dict:
+def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, seed: int = 0,
+                      head: str = "logistic", tree_params: dict | None = None) -> dict:
     """Train heads on the dense scan TRAIN split at (near-)true imbalance.
 
     The key experiment: instead of the curated 3:1 set, train on the *genome-scale* negative
@@ -144,11 +146,23 @@ def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, s
 
     Xtr = _load_full(emb, keys, tr_idx)
     Xva = _load_full(emb, keys, va)
-    specs = {
-        "Dense(bal)": dict(C=0.00075, max_iter=1000, class_weight="balanced"),
-        "Dense(None)": dict(C=0.00075, max_iter=1000, class_weight=None),
-    }
-    return {n: fit_calibrated_head(Xtr, y[tr_idx], Xva, y[va], **kw) for n, kw in specs.items()}
+    ytr, yva = y[tr_idx], y[va]
+
+    if head == "logistic":
+        specs = {
+            "Dense(bal)": dict(C=0.00075, max_iter=1000, class_weight="balanced"),
+            "Dense(None)": dict(C=0.00075, max_iter=1000, class_weight=None),
+        }
+        return {n: fit_calibrated_head(Xtr, ytr, Xva, yva, **kw) for n, kw in specs.items()}
+
+    tp = dict(tree_params or {})
+    if head == "xgboost":
+        return {"Dense(xgb)": fit_xgb_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
+    if head == "lightgbm":
+        return {"Dense(lgb)": fit_lgb_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
+    if head == "rf":
+        return {"Dense(rf)": fit_rf_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
+    raise ValueError(f"unknown head: {head!r}")
 
 
 BUDGETS = (1.0, 2.0, 5.0, 10.0, 20.0)
@@ -247,6 +261,13 @@ def main() -> None:
     ap.add_argument("--train", choices=["curated", "dense"], default="curated",
                     help="curated = 3:1 set (old); dense = scan TRAIN split at true imbalance")
     ap.add_argument("--neg-cap", type=int, default=2_000_000, help="dense train negative cap")
+    ap.add_argument("--head", choices=["logistic", "xgboost", "lightgbm", "rf"],
+                    default="logistic", help="dense-train classifier (logistic = §7 baseline)")
+    ap.add_argument("--xgb-depth", type=int, default=6)
+    ap.add_argument("--xgb-lr", type=float, default=0.05)
+    ap.add_argument("--xgb-estimators", type=int, default=500)
+    ap.add_argument("--xgb-colsample", type=float, default=0.5)
+    ap.add_argument("--xgb-spw", type=float, default=None, help="scale_pos_weight; None=auto")
     ap.add_argument("--budget", type=float, default=1.0)
     ap.add_argument("--save-preds", default=None, help="npz path to dump per-head test predictions")
     args = ap.parse_args()
@@ -254,10 +275,18 @@ def main() -> None:
     keys = FEATURE_SETS[args.features]
     print(f"feature set: {args.features} ({len(keys)} keys)  train={args.train}")
     if args.train == "dense":
-        # curated-trained Config C as the head-to-head baseline, plus the dense-trained heads
-        heads = {"curated-C": train_heads(Path(args.curated_store), keys=keys,
-                                          only=["C(.00075,None)"])["C(.00075,None)"]}
-        heads.update(train_heads_dense(Path(args.scan_store), keys=keys, neg_cap=args.neg_cap))
+        tree_params = None
+        if args.head in ("xgboost", "lightgbm"):
+            tree_params = dict(max_depth=args.xgb_depth, learning_rate=args.xgb_lr,
+                               n_estimators=args.xgb_estimators,
+                               colsample_bytree=args.xgb_colsample,
+                               scale_pos_weight=args.xgb_spw)
+        heads = {}
+        if args.head == "logistic":
+            heads["curated-C"] = train_heads(Path(args.curated_store), keys=keys,
+                                             only=["C(.00075,None)"])["C(.00075,None)"]
+        heads.update(train_heads_dense(Path(args.scan_store), keys=keys, neg_cap=args.neg_cap,
+                                       head=args.head, tree_params=tree_params))
     else:
         heads = train_heads(Path(args.curated_store), keys=keys)
     evaluate(Path(args.scan_store), heads, keys=keys, budget=args.budget, save_preds=args.save_preds)
