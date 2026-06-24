@@ -254,6 +254,44 @@ untouched; only calibration can move (`scripts/saerens_control.py`):
   head — weighted or not, recalibrated or not — reaches dense.** Reweighting during training
   cannot substitute for the right negative *distribution*; this exhaustively closes D1.
 
+## 9. Richer heads don't beat logistic — 0.300 is the *feature* ceiling (2026-06-24)
+
+§7 set the dense-trained logistic head at **recall 0.300 @ ≤1 FP/tx, AUPRC 0.307**. The natural
+next question: is the *head* the bottleneck? Phase 3 swaps the classifier while holding everything
+else fixed — same 7-key `ag7` stack (19.6k-dim), same dense TRAIN split at 49:1, same dense TEST
+at 230:1, same metric harness (`scripts/compare_heads.py` recomputes every head through the
+*identical* `recall_at_fp_budget`/`reliability`/`grounding_stats`, so the comparison is
+apples-to-apples). Gradient-boosted trees (`src/tisiago/head_xgb.py`), isotonic-calibrated on
+dense val:
+
+| `ag7`, cognate test @ 230:1 | **Logistic** (§7) | **LightGBM** | **XGBoost** |
+|---|---|---|---|
+| AUPRC (base 0.0043) | **0.307** | 0.304 | 0.303 |
+| recall @ ≤1 FP/tx | 0.300 | **0.312** | 0.309 |
+| recall @ ≤5 FP/tx | **0.539** | 0.507 | 0.504 |
+| recall @ ≤20 FP/tx | **0.769** | 0.738 | 0.762 |
+| non-cognate mean p (→0) | 0.0003 | 0.0017 | 0.0017 |
+| cognate Brier | 0.0034 | 0.0035 | 0.0035 |
+
+- **No head meaningfully beats logistic.** Three distinct model classes — linear logistic,
+  leaf-wise boosting (LightGBM), level-wise boosting (XGBoost) — cluster inside noise (AUPRC
+  0.303–0.307, recall@1FP 0.300–0.312) at matched 2M scale. Trees nudge the *tightest* operating
+  point up ~1 pt (0.31 vs 0.30) but give it back in the mid-range (AUPRC and recall@5FP both
+  lower). Nonlinear interaction-learning extracts nothing extra from these frozen-embedding
+  features that a linear boundary misses. **The bottleneck is the features, not the classifier —
+  0.300 is the feature ceiling.** The next lever is richer features (Phase 5 LoRA / fine-tuning),
+  not a fancier head; attention-pooling over Evo2 offsets (the spec's 3c) is correspondingly not
+  worth pursuing. Grounding holds across heads (non-cognate ≈ 0.002, both ≈ 0).
+- **Phase 4 — continuous efficiency regression (`src/tisiago/efficiency_head.py`).** A Ridge head
+  on `log1p(max_norm_HeLa)` predicts efficiency **in-distribution** on curated val at **R² 0.24,
+  Spearman ρ 0.30** (best at heavy α=100; the 19.6k features are badly collinear — rcond ~5e-9).
+  So efficiency *is* weakly decodable. But scored as a ranker on the dense TEST split it collapses
+  to **AUPRC 0.098 / recall@1FP 0.141** — landing exactly where every *other* curated-trained head
+  lands on dense (curated-C 0.141, §5 AG-only 0.094). That collapse is the **train-curated /
+  eval-dense shift** (§5), not absence of signal: reframing the target as continuous efficiency
+  did **not** rescue the distribution-shift problem. (Brier/grounding are N/A for a raw regressor,
+  so Ridge sits on its own normalized eval surface, not the classifier table above.)
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest
@@ -263,11 +301,16 @@ untouched; only calibration can move (`scripts/saerens_control.py`):
    resolution (the win@64 edge), AlphaGenome the regional context.
 3. **Report the near-neighbour win-rate, not the global AUROC, as the headline** — it
    reflects actually calling a start codon and isn't inflated by regional priors.
-4. **A linear head is a strong baseline — and stayed best under search.** The autoresearch
-   fleet (§6) swept feature subsets × head × class-weighting against all four metrics; the
-   winners are all logistic on a 19.6k-dim AG+Evo2+Kozak stack, ~0.02–0.05 over the 2-key
-   baseline on every metric. Next: confirm the winners across seeds/splits (Phase 3), then the
-   hard stratum (dTIS) and the per-condition efficiency labels (`max_norm_*`).
+4. **A linear head is a strong baseline — and stayed best under search _and_ at dense scale.**
+   The autoresearch fleet (§6) found logistic best across all four metrics; §9 then confirms it
+   against gradient-boosted trees at the true 2M imbalance — XGBoost and LightGBM both land within
+   noise of logistic. **0.300 recall @ ≤1 FP/tx is the feature ceiling, not the head ceiling.**
+5. **The bottleneck is the features — push the encoder next, not the classifier.** Since no head
+   beats logistic on the frozen `ag7` stack (§9), the lift has to come from better representations
+   (Phase 5 LoRA / fine-tuning of the GLM), not richer downstream heads. Efficiency is weakly
+   decodable in-distribution (ρ 0.30, §9) but inherits the same curated→dense shift as every
+   curated-trained head — the per-condition `max_norm_*` labels need a dense-distribution training
+   substrate to be useful as a caller.
 
 ## Caveats
 

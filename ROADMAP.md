@@ -9,7 +9,7 @@ Headline metrics: (1) curated-set discrimination judged **against the one-hot se
 floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution). Deferred:
 true-imbalance recall + non-cognate≈0 (the dense scan, parked).
 
-_Last updated: 2026-06-17._
+_Last updated: 2026-06-24._
 
 > **Current (Option B, 2026-06-17):** with the autoresearch winners in hand, we now answer the
 > FINDINGS §5 question — *does the head work at true genome-wide imbalance?* The dense scan is
@@ -31,10 +31,11 @@ _Last updated: 2026-06-17._
 | **PoC** | Frozen embeddings rank curated candidates | ✅ done | `eval.py`, `resolution.py`, `FINDINGS.md` |
 | **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
 | **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | ✅ **done + harvested 2026-06-16** | `autoresearch/winners.md`, `FINDINGS.md §6` |
-| **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔜 queued | — |
+| **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔜 queued (now the key open item — §9 is single-seed) | — |
 | **P2 / Option B** | Imbalance-aware head @ true imbalance — **AG + Evo2** | 🟢 **DONE (2M, SSD pipeline): imbalance-matched training wins (recall 0.036→0.225, grounding 0.11→0.0003); +Evo2 lifts to recall 0.300 / AUPRC 0.307 (+33%); D1 closed (§8). Single-seed.** | `dense_caller.py`, `build_store.py`, SSD `dense_ag7` |
 | ~~P2~~ | ~~Global all-codon dense *training*~~ | ⏸️ still deferred (Option B sidesteps it) | `enumerate_codons.py`, `scan_eval.py` |
-| **P4** | TIS efficiency regression (HeLa first) | ⬜ not specced | — |
+| **P3.5** | **Head exploration — richer classifiers @ dense 2M** | 🟢 **DONE (2026-06-24): XGBoost 0.303 / LightGBM 0.304 AUPRC both within noise of logistic 0.307 → 0.300 is the _feature_ ceiling, not the head ceiling. Attention-pool (3c) dropped. §9.** | `head_xgb.py`, `compare_heads.py`, `FINDINGS.md §9` |
+| **P4** | TIS efficiency regression (HeLa first) | 🟡 **first result (2026-06-24): Ridge on log1p(max_norm_HeLa) — in-dist ρ 0.30 / R² 0.24, but dense ranking collapses to AUPRC 0.098 (curated→dense shift, not absence of signal). §9.** | `efficiency_head.py`, `FINDINGS.md §9` |
 
 ---
 
@@ -154,13 +155,19 @@ curated store or the dense scan; how the multi-line labels (K562/RPE1/U2OS) fact
 
 ## Immediate next action
 
-**Fleet done & harvested (2026-06-16).** Loops stopped after ~20 experiments each (plateau);
-winners in `autoresearch/winners.md` + `FINDINGS.md §6`. All four converged on a 19.6k-dim
-`AG16k+AG131k+Evo2 blk28 off{0,3,6,9}+Kozak` stack; best all-rounder is logistic, heavy L2
-(C=0.00075), no class weight → test auprc 0.797 / auroc 0.920 / recall@1FP 0.801; win@64 peaks
-at 0.834 only by adding codon one-hot (which costs the precision metrics). Gains hold on test.
-Branches `ar/<obj>` + worktrees `../tisiago-ar-<obj>` retain full search history.
+**Head exploration done (2026-06-24, §9).** Richer classifiers (XGBoost, LightGBM) at the true
+2M imbalance both land within noise of the logistic head (AUPRC 0.303–0.307, recall@1FP
+0.300–0.312). **0.300 is the feature ceiling, not the head ceiling** — the bottleneck is the
+frozen representation, so the strategic lever is now the *encoder* (Phase 5 LoRA / GLM
+fine-tuning), not a richer downstream head. Code on `phase3-4-heads`: `head_xgb.py`,
+`efficiency_head.py`, `compare_heads.py`.
 
-**Immediate next (P3):** confirm the winners across **seeds + chr splits** (single-seed now).
-A small CV harness reusing `train_experiment.py` CONFIG over SEED∈{0..4} → mean±sd per metric.
-That promotes the best-of-search point estimates to a defensible claim.
+**Two open items, in priority order:**
+1. **P3 — multi-seed confirmation (now the key rigor gap).** Every dense number (§7 0.300, §9
+   tree comparison) is single-seed. Re-run the dense head over SEED∈{0..4} (negative subsample +
+   model seed) → mean±sd per metric, before any of these go in a figure. Cheap (CPU, the heads
+   already exist); promotes point estimates to a defensible claim.
+2. **Phase 5 — push the features (the strategic direction §9 points to).** LoRA / fine-tune the
+   GLM on the dense distribution so the *representation* improves, since no head can. Needs a
+   spec — the dense-distribution training substrate is the open design question (cf. the parked
+   dense-training direction + the efficiency labels, which inherit the same curated→dense shift).
