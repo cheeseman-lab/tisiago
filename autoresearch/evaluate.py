@@ -24,7 +24,7 @@ import os
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from tisiago.caller import recall_at_fp_budget
+from tisiago.caller import evaluate_at_threshold, recall_at_fp_budget
 
 OBJECTIVES = ("auprc", "auroc", "recall1fp", "winrate64")
 WIN_DISTANCE = 64
@@ -67,11 +67,19 @@ def main() -> None:
     z = np.load(args.preds, allow_pickle=True)
     mv = metrics(z["p_val"], z["y_val"], z["tx_val"], z["apos_val"])
     mt = metrics(z["p_test"], z["y_test"], z["tx_test"], z["apos_test"])
+    oracle_test_recall = mt["recall1fp"]
+    selected = recall_at_fp_budget(
+        z["p_val"], z["y_val"], z["tx_val"], budget=1.0
+    )
+    mt["recall1fp"] = evaluate_at_threshold(
+        z["p_test"], z["y_test"], z["tx_test"], selected["threshold"]
+    )["recall"]
 
     for k in OBJECTIVES:
         print(f"{k}_val: {mv[k]:.4f}")
     for k in OBJECTIVES:
         print(f"{k}_test: {mt[k]:.4f}")
+    print(f"recall1fp_oracle_test: {oracle_test_recall:.4f}")
 
     objective = os.environ.get("OBJECTIVE", "auprc")
     if objective not in OBJECTIVES:

@@ -1,6 +1,11 @@
 import numpy as np
 
-from tisiago.caller import fit_calibrated_head, recall_at_fp_budget, reliability
+from tisiago.caller import (
+    evaluate_at_threshold,
+    fit_calibrated_head,
+    recall_at_fp_budget,
+    reliability,
+)
 
 
 def test_recall_at_fp_budget_perfect_separation():
@@ -34,6 +39,30 @@ def test_recall_at_fp_budget_returns_keys():
     tx = np.array(["A", "A"])
     res = recall_at_fp_budget(p, y, tx, budget=1.0)
     assert set(res) == {"recall", "threshold", "fp_per_transcript", "budget"}
+
+
+def test_recall_at_fp_budget_handles_ties_and_keeps_tightest_threshold():
+    p = np.array([0.9, 0.8, 0.8, 0.7, 0.6])
+    y = np.array([1, 1, 0, 0, 0])
+    tx = np.array(["A"] * 5)
+    res = recall_at_fp_budget(p, y, tx, budget=1.0)
+    assert res == {
+        "recall": 1.0,
+        "threshold": 0.8,
+        "fp_per_transcript": 1.0,
+        "budget": 1.0,
+    }
+
+
+def test_evaluate_at_threshold_does_not_optimize_on_test():
+    p = np.array([0.9, 0.8, 0.7, 0.1])
+    y = np.array([1, 0, 1, 0])
+    tx = np.array(["A", "A", "B", "B"])
+    res = evaluate_at_threshold(p, y, tx, threshold=0.85)
+    assert res["recall"] == 0.5
+    assert res["fp_per_transcript"] == 0.0
+    assert res["true_positives"] == 1
+    assert res["false_positives"] == 0
 
 
 def test_reliability_perfectly_calibrated():
@@ -78,6 +107,8 @@ def test_fit_calibrated_head_improves_brier_on_separable_data():
     assert p_raw.shape == (400,)
     assert p_cal.shape == (400,)
     assert ((p_cal >= 0) & (p_cal <= 1)).all()
+    sklearn_raw = head["model"].predict_proba(head["scaler"].transform(Xte))[:, 1]
+    np.testing.assert_allclose(p_raw, sklearn_raw, rtol=2e-5, atol=2e-6)
     # On separable data both are good; calibrated Brier should be close or better.
     from sklearn.metrics import brier_score_loss
 

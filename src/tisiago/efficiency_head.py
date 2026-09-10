@@ -23,6 +23,7 @@ from sklearn.preprocessing import StandardScaler
 
 from tisiago.caller import recall_at_fp_budget
 from tisiago.dense_caller import FEATURE_SETS, _load_full, _predict_chunked
+from tisiago.manifest import SITE_KEY, unique_site_indices
 
 
 def fit_efficiency_head(X_train, y_train, X_val, y_val, *, alpha=1.0) -> dict:
@@ -35,11 +36,25 @@ def fit_efficiency_head(X_train, y_train, X_val, y_val, *, alpha=1.0) -> dict:
         "rmse_val": float(mean_squared_error(y_val, pred_val) ** 0.5),
         "spearman_val": float(spearmanr(y_val, pred_val).correlation),
     }
+    linear_coef = (model.coef_ / scaler.scale_).astype(np.float32)
+    linear_intercept = float(model.intercept_ - scaler.mean_ @ linear_coef)
 
     def predict(X):
-        return model.predict(scaler.transform(X))
+        return np.asarray(X) @ linear_coef + linear_intercept
 
-    return {"predict": predict, "model": model, "scaler": scaler, "metrics": metrics}
+    def identity(values):
+        return np.asarray(values)
+
+    return {
+        "predict": predict,
+        "model": model,
+        "scaler": scaler,
+        "metrics": metrics,
+        "linear_coef": linear_coef,
+        "linear_intercept": linear_intercept,
+        "predict_from_logit": identity,
+        "calibrate_raw": identity,
+    }
 
 
 def evaluate_as_classifier(efficiency_preds, y_binary, tx, budgets=(1.0, 5.0, 20.0)) -> dict:
@@ -56,10 +71,28 @@ def evaluate_as_classifier(efficiency_preds, y_binary, tx, budgets=(1.0, 5.0, 20
 
 
 def _build_target(m: pd.DataFrame, col: str) -> np.ndarray:
-    """log1p(efficiency) where measured, else 0 (no measured initiation)."""
-    y = np.zeros(len(m), dtype=np.float64)
-    has = m[col].notna().values
-    y[has] = np.log1p(m.loc[has, col].values)
+    """Build an expression-aware log1p efficiency target.
+
+    A missing Ribo-seq value is treated as zero only when the host gene was assayed
+    and marked expressed. Unexpressed/unmeasured rows remain NaN and are excluded
+    from regression. Duplicate per-cell-line call rows are aggregated by maximum
+    observed efficiency for the same transcript-relative site.
+    """
+    if col not in m:
+        raise ValueError(f"target column not found: {col}")
+    suffix = col.removeprefix("max_norm_")
+    expressed_col = f"expressed_{suffix}"
+    if expressed_col not in m:
+        raise ValueError(f"expression column not found: {expressed_col}")
+
+    groups = m.groupby(list(SITE_KEY), sort=False, dropna=False)
+    measured = groups[col].transform("max").to_numpy(dtype=np.float64)
+    expressed = groups[expressed_col].transform("max").to_numpy(dtype=bool)
+    eligible = np.isfinite(measured) | expressed
+    y = np.full(len(m), np.nan, dtype=np.float64)
+    y[eligible] = 0.0
+    has_value = np.isfinite(measured)
+    y[has_value] = np.log1p(measured[has_value])
     return y
 
 
@@ -69,8 +102,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--curated-store", default="data/store")
-    ap.add_argument("--scan-store",
-                    default="/lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7")
+    ap.add_argument("--scan-store", default="data/dense_ag7")
     ap.add_argument("--features", choices=list(FEATURE_SETS), default="ag7")
     ap.add_argument("--target", default="max_norm_HeLa")
     ap.add_argument("--alphas", default="0.01,0.1,1.0,10.0,100.0,1000.0")
@@ -83,8 +115,11 @@ def main() -> None:
     cur = Path(args.curated_store)
     m = pd.read_parquet(cur / "manifest.parquet")
     y_full = _build_target(m, args.target)
-    tr = m.split.values == "train"
-    va = m.split.values == "val"
+    unique = unique_site_indices(m)
+    eligible = np.zeros(len(m), dtype=bool)
+    eligible[unique] = np.isfinite(y_full[unique])
+    tr = (m.split.values == "train") & eligible
+    va = (m.split.values == "val") & eligible
     X = _load_full(cur / "embeddings", keys)
     print(f"curated: train={int(tr.sum())} val={int(va.sum())} dim={X.shape[1]} "
           f"target={args.target} (nonzero={int((y_full > 0).sum())})", flush=True)
@@ -106,8 +141,9 @@ def main() -> None:
     sm = pd.read_parquet(Path(args.scan_store) / "manifest.parquet")
     te = np.where(sm.split.values == "test")[0]
     cog = np.isin(sm.codon_class.values[te], ["AUG", "near_cognate"])
-    preds = _predict_chunked(Path(args.scan_store) / "embeddings", keys,
-                             {"ridge": {"predict": head["predict"]}}, te)["ridge"]
+    preds = _predict_chunked(
+        Path(args.scan_store) / "embeddings", keys, {"ridge": head}, te
+    )["ridge"]
     yc = sm.label_tis.values[te][cog]
     txc = sm.transcript_id.values[te][cog]
     out = evaluate_as_classifier(preds[cog], yc, txc, budgets=(1.0, 5.0, 20.0))

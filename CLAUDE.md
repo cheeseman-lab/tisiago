@@ -8,23 +8,27 @@ Instructions for Claude Code when working in this repository.
 fry-python-tools translation-initiation pipeline:
 
 ```
-swissisoform  →  manifest.parquet  →  tisiago (tiling)  →  gruyerenome.embed_positions  →  tisiago (store + heads)
-   makes the table      candidates           windows            per-candidate vectors          training/eval
+swissisoform → manifest.parquet → tisiago (input construction) → gruyerenome forward → tisiago (store + heads)
+ makes labels    candidates       genomic or spliced sequence     frozen vectors        training/eval
 ```
 
 - **swissisoform** makes the table: `manifest.parquet`, one row per candidate
   translation-initiation codon (called TIS = positives + matched in-transcript
   negatives, with labels, expression flags, region class, chromosome split).
 - **gruyerenome** generates embeddings: generic `embed_positions(sequences, positions)`
-  over AlphaGenome / Evo2. No TIS knowledge.
-- **tisiago** (this repo) is the orchestrator: reads the table, tiles candidates into
-  genomic windows, calls gruyerenome to slice per-candidate vectors, assembles a
-  row-aligned vector store, and trains/evaluates lightweight downstream heads.
+  over AlphaGenome / Evo2. It is the sole owner of foundation-model loading and forward
+  passes and has no TIS knowledge. Do not duplicate a model implementation here.
+- **tisiago** (this repo) is the biological/task orchestrator: reads the table, constructs
+  genomic windows or exon-spliced transcript inputs, tells gruyerenome which hidden rows to
+  return, assembles a row-aligned vector store, and trains/evaluates lightweight downstream
+  heads.
 
-The central design principle: **decouple the forward-pass window from what's
-persisted** — embed over a generous genomic window, store only the vector at each
-candidate codon. Every candidate (positive and negative) is centred identically, so
-position carries no signal; the head discriminates on context.
+The central design principle: **decouple the forward-pass input from what's persisted** —
+embed a biologically explicit genomic window or complete mature transcript, then store only
+the requested candidate states. Evo2 is autoregressive, but the installed Vortex intermediate
+embeddings are not exactly suffix-invariant; never assume padding or candidate-dependent prefix
+truncation leaves a state unchanged. Run `python -m tisiago.backend_contract` after any
+gruyerenome/model dependency change.
 
 ## Direction — a general codon→TIS predictor
 
@@ -94,6 +98,9 @@ budget on near-cognate decoys, at true imbalance; (2) non-cognate negative-contr
 # 1. table comes from swissisoform (separate repo) -> data/manifest.parquet
 # 2. extract per-candidate embeddings (GPU) + assemble store
 bash scripts/run_tis_pipeline.sh 20        # 3 extraction arrays -> assemble
+# Accuracy-gated exon-spliced Evo2 arm (separate evo2/TXP namespace):
+sbatch --array=0-19%2 scripts/run_tis_extract_transcript.sh \
+    configs/tis_evo2_8k_blk28.yaml 20
 # 3. evaluate downstream heads (CPU)
 python -m tisiago.eval --store data/store --keys alphagenome_jax/L16k/decoder_1bp/off0.npy
 ```
@@ -105,6 +112,8 @@ tisiago/
 ├── src/tisiago/
 │   ├── tiling.py     # grid-snap genomic windowing (nearby candidates share a forward pass)
 │   ├── extract.py    # genome fetch + gruyerenome.load_backend().embed_positions + write per-shard parts
+│   ├── extract_transcript.py # complete exon-spliced Evo2 inputs (evo2/TXP ablation)
+│   ├── backend_contract.py   # sparse/batch/indexing semantic checks against gruyerenome
 │   ├── store.py      # assemble shard parts into row-aligned [N, D] .npy feature arrays
 │   └── eval.py       # logistic / MLP heads, stratified (canonical vs alt-TIS) + near-neighbour resolution test
 ├── configs/          # tis_alphagenome_16k/131k.yaml, tis_evo2_8k.yaml (gruyerenome backend configs)
@@ -114,22 +123,32 @@ tisiago/
 
 ## Environments
 
-tisiago runs across stages in different conda envs:
+tisiago uses uv-managed environments and never installs packages from a batch job:
 
-- **Extraction (GPU)** — runs in the `alphagenome` / `evo2` envs. Needs `tisiago` +
-  `gruyerenome` (both editable) + `pyfaidx`:
+- **Extraction (GPU)** — AlphaGenome uses its dedicated environment. Evo2 uses the locked uv
+  environment validated on A100:
   ```bash
-  conda activate alphagenome   # or evo2
-  uv pip install -e ".[extract]"
-  uv pip install -e /lab/barcheese01/mdiberna/gruyerenome
+  # Evo2 0.6 / Vortex 1.1; submits the FlashAttention source build on a GPU.
+  sbatch --partition="$TISIAGO_EVO_PARTITION" \
+    scripts/run_tis_evo2_env_setup.sh .venv/evo2-next
+
+  # AlphaGenome remains isolated because its JAX stack is backend-specific.
+  uv venv --python 3.11 .venv/alphagenome
+  uv pip install --python .venv/alphagenome/bin/python -e ".[extract]"
+  uv pip install --python .venv/alphagenome/bin/python -e ../gruyerenome
   ```
-  Evo2 needs `export HF_HOME=/lab/barcheese01/mdiberna/gruyerenome/weights/.hf_cache`
-  (the SLURM scripts set this; home dir is over quota).
+  The Evo2 setup installs `requirements-evo2.lock`, then both repositories editable with
+  `--no-deps`. Do not install its upstream FlashAttention wheel on the older cluster glibc.
+  Set `HF_HOME` to shared scratch when the default cache is too small; launchers preserve the
+  caller's setting rather than embedding a site path.
 - **Eval / training (CPU)** — the `tisiago` env (no gruyerenome / no GPU needed):
   ```bash
-  conda create -n tisiago -c conda-forge python=3.11 uv pip -y
-  conda activate tisiago && uv pip install -e ".[dev]"
+  uv venv --python 3.11 .venv/dev
+  uv pip install --python .venv/dev/bin/python -e ".[dev]"
   ```
+
+Copy `.env.example` to `.env` and provide the matching FASTA, GTF, AlphaGenome weights, and
+optional Slurm partition names. Never commit `.env`, gated-model credentials, or local paths.
 
 ## Store layout
 
@@ -142,7 +161,8 @@ data/store/
   embeddings/
     alphagenome_jax/L16k/decoder_1bp/off0.npy   # [N, 1536] fp16
     alphagenome_jax/L131k/decoder_1bp/off0.npy
-    evo2/W8k/blocks.28.mlp.l3/off6.npy          # [N, 4096] fp16  (3 layers x offsets {0,3,6,9})
+    evo2/W8k/blocks.28.mlp.l3/off6.npy          # [N, 4096] fp16; blk28-only uses offsets {0,3,6,9}
+    evo2/TXP/blocks.28.mlp.l3/off6.npy          # exon-spliced transcript ablation
     ...
 ```
 

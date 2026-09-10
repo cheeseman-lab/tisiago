@@ -50,11 +50,10 @@ print(m.groupby('split').size())
 
 If it doesn't exist, generate it:
 ```bash
-conda activate tisiago
-python -m tisiago.enumerate_codons \
+.venv/dev/bin/python -m tisiago.enumerate_codons \
     --manifest data/manifest.parquet \
-    --gtf /lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf \
-    --genome /lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa \
+    --gtf "$TISIAGO_GTF" \
+    --genome "$TISIAGO_GENOME" \
     --splits train val test \
     --out data/scan_manifest_allsplits.parquet
 ```
@@ -67,22 +66,25 @@ Output to `data/scan_parts_allsplits/`.
 **AG16k (60 shards, A6000, 64G, trivial):**
 ```bash
 rm -f data/scan_parts_allsplits/ag16k_shard*.npz  # clean start
-sbatch --array=0-59%5 --partition=nvidia-A6000-20 --gres=gpu:1 --mem=64G --time=2:00:00 \
-    scripts/run_tis_scan.sh ag16k configs/tis_alphagenome_16k.yaml alphagenome 60 \
+PYTHON_BIN="$TISIAGO_AG_PYTHON" \
+sbatch --array=0-59%5 --partition="$TISIAGO_AG_PARTITION" --gres=gpu:1 --mem=64G --time=2:00:00 \
+    scripts/run_tis_scan.sh ag16k configs/tis_alphagenome_16k.yaml 60 \
     ./data/scan_manifest_allsplits.parquet ./data/scan_parts_allsplits
 ```
 
 **AG131k (60 shards, A6000, 64G, trivial):**
 ```bash
-sbatch --array=0-59%5 --partition=nvidia-A6000-20 --gres=gpu:1 --mem=64G --time=2:00:00 \
-    scripts/run_tis_scan.sh ag131k configs/tis_alphagenome_131k.yaml alphagenome 60 \
+PYTHON_BIN="$TISIAGO_AG_PYTHON" \
+sbatch --array=0-59%5 --partition="$TISIAGO_AG_PARTITION" --gres=gpu:1 --mem=64G --time=2:00:00 \
+    scripts/run_tis_scan.sh ag131k configs/tis_alphagenome_131k.yaml 60 \
     ./data/scan_manifest_allsplits.parquet ./data/scan_parts_allsplits
 ```
 
 **Evo2 blk28 (80 shards, A6000, 64G — fits because blk28-only):**
 ```bash
-sbatch --array=0-79%3 --partition=nvidia-A6000-20 --gres=gpu:1 --mem=64G --time=4:00:00 \
-    scripts/run_tis_scan.sh evo2_8k configs/tis_evo2_8k_blk28.yaml evo2 80 \
+PYTHON_BIN="$TISIAGO_EVO_PYTHON" \
+sbatch --array=0-79%3 --partition="$TISIAGO_EVO_PARTITION" --gres=gpu:1 --mem=64G --time=4:00:00 \
+    scripts/run_tis_scan.sh evo2_8k configs/tis_evo2_8k_blk28.yaml 80 \
     ./data/scan_manifest_allsplits.parquet ./data/scan_parts_allsplits
 ```
 
@@ -99,7 +101,7 @@ be the case; the config drives layer selection via the gruyerenome backend.
 
 **Monitor:**
 ```bash
-squeue -u mdiberna
+squeue -u "$USER"
 # Check a completed shard:
 python -c "import numpy as np; d=np.load('data/scan_parts_allsplits/evo2_8k_shard00000.npz'); print(list(d.keys())[:5], len(d.keys()))"
 # Should show 4 keys (blk28 × off{0,3,6,9}), not 12
@@ -117,12 +119,14 @@ If not, write a script:
 
 ```python
 # kozak_onehot_scan.py — generate one-hot Kozak ±20bp for the scan manifest
+import os
+
 import numpy as np
 import pandas as pd
 from pyfaidx import Fasta
 
 m = pd.read_parquet('data/scan_manifest_allsplits.parquet')
-fa = Fasta('/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa')
+fa = Fasta(os.environ['TISIAGO_GENOME'])
 
 COMP = str.maketrans('ACGTNacgtn', 'TGCANtgcan')
 W = 20  # ±20bp around the codon-A position
@@ -278,8 +282,7 @@ Add §7 with:
 
 ## Environments
 
-- **Extraction (GPU):** `alphagenome` env for ag16k/ag131k, `evo2` env for evo2_8k
-  - Both need tisiago + gruyerenome (editable) + pyfaidx installed
-  - Evo2 needs `export HF_HOME=/lab/barcheese01/mdiberna/gruyerenome/weights/.hf_cache`
-- **Eval/training (CPU):** `tisiago` env — numpy/pandas/sklearn, no GPU
-
+- **Extraction (GPU):** separate uv environments for AlphaGenome and Evo2
+  - Both need tisiago + gruyerenome + pyfaidx installed with `uv pip`
+  - Set `HF_HOME` to shared scratch when the default cache is too small
+- **Eval/training (CPU):** `.venv/dev` — numpy/pandas/sklearn, no GPU

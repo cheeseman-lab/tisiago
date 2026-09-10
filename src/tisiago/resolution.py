@@ -12,30 +12,36 @@ point.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
+from tisiago.manifest import unique_site_indices
+
 RNG = np.random.default_rng(0)
 
 MODELS = {
     "AlphaGenome 16k": ["alphagenome_jax/L16k/decoder_1bp/off0.npy"],
     "Evo2 blk28 off0": ["evo2/W8k/blocks.28.mlp.l3/off0.npy"],
-    "AG16k + Evo2 blk28": ["alphagenome_jax/L16k/decoder_1bp/off0.npy", "evo2/W8k/blocks.28.mlp.l3/off0.npy"],
+    "AG16k + Evo2 blk28": [
+        "alphagenome_jax/L16k/decoder_1bp/off0.npy",
+        "evo2/W8k/blocks.28.mlp.l3/off0.npy",
+    ],
 }
 DISTANCES = [64, 128, 512, 2000]
 
 
 def load(keys, emb):
+    """Load and concatenate a feature-key set."""
     return np.concatenate([np.load(emb / k).astype(np.float32) for k in keys], axis=1)
 
 
 def main():
+    """Evaluate within-transcript near-neighbor ranking at several distances."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--store", default="data/store", help="Path to the assembled vector store.")
     args = ap.parse_args()
@@ -43,8 +49,9 @@ def main():
     emb = store / "embeddings"
     m = pd.read_parquet(store / "manifest.parquet")
     y = m.label_tis.values
-    tr_all = np.where(m.split.values == "train")[0]
-    te = np.where(m.split.values == "test")[0]
+    unique = unique_site_indices(m)
+    tr_all = unique[m.split.values[unique] == "train"]
+    te = unique[m.split.values[unique] == "test"]
     tr = RNG.choice(tr_all, min(60000, len(tr_all)), replace=False)
 
     mte = m.iloc[te].reset_index(drop=True)

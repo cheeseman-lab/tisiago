@@ -1,6 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mdiberna_tisiago_assemble
-#SBATCH --partition=20
+#SBATCH --job-name=tisiago_assemble
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -10,18 +9,26 @@
 #SBATCH --error=%x_%j.err
 #
 # Gather per-shard extraction partials into the row-aligned vector store.
-# Usage: sbatch scripts/run_tis_assemble.sh [MANIFEST] [PARTS_DIR] [STORE_DIR]
+# Usage: PYTHON_BIN=/path/to/python sbatch scripts/run_tis_assemble.sh \
+#   [MANIFEST] [PARTS_DIR] [STORE_DIR] [GLOB]
 
 set -euo pipefail
 
-MANIFEST="${1:-./data/manifest.parquet}"
-PARTS_DIR="${2:-./data/parts}"
-STORE_DIR="${3:-./data/store}"
+REPO_ROOT="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+MANIFEST="${1:-$REPO_ROOT/data/manifest.parquet}"
+PARTS_DIR="${2:-$REPO_ROOT/data/parts}"
+STORE_DIR="${3:-$REPO_ROOT/data/store}"
+GLOB="${4:-*.npz}"
 
-eval "$(conda shell.bash hook)"
-conda activate tisiago
+PYTHON="${PYTHON_BIN:-$REPO_ROOT/.venv/evo2-next/bin/python}"
+[[ -x "$PYTHON" ]] || {
+    echo "Python not found at $PYTHON; set PYTHON_BIN to a uv-managed environment" >&2
+    exit 2
+}
 
-python -m tisiago.store \
+cd "$REPO_ROOT"
+"$PYTHON" -m tisiago.store \
     --manifest "$MANIFEST" \
     --parts-dir "$PARTS_DIR" \
-    --store-dir "$STORE_DIR"
+    --store-dir "$STORE_DIR" \
+    --glob "$GLOB"

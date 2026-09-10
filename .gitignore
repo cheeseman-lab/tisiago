@@ -22,7 +22,9 @@ store/
 # SLURM logs
 *.out
 *.err
-mdiberna_*
 
 # autoresearch loop scratch
 autoresearch/.desc
+
+# local experiment outputs
+runs_phase34/

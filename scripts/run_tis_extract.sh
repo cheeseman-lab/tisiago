@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mdiberna_tisiago_extract
+#SBATCH --job-name=tisiago_extract
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -13,38 +13,47 @@
 # Each array task processes one transcript-sharded slice of the manifest.
 #
 # Usage:
-#   sbatch --array=0-19%3 --partition=nvidia-A6000-20 \
-#       scripts/run_tis_extract.sh TILE_SPEC CONFIG ENV N_SHARDS [MANIFEST] [OUT_DIR]
+#   sbatch --array=0-19%3 --partition="$TISIAGO_AG_PARTITION" \
+#       scripts/run_tis_extract.sh TILE_SPEC CONFIG N_SHARDS [MANIFEST] [OUT_DIR]
 #
-#   TILE_SPEC : ag16k | ag131k | evo2_8k
-#   ENV       : conda env (alphagenome for ag*, evo2 for evo2_8k) — must have
-#               tisiago + gruyerenome installed editable (see CLAUDE.md).
+#   TILE_SPEC : ag16k | ag131k | evo2_8k | evo2_8k_s4k | evo2_4k
 #   N_SHARDS  : must equal the array size (e.g. 20 for --array=0-19)
+# Set PYTHON_BIN to the uv-managed backend environment and TISIAGO_GENOME to
+# the indexed reference FASTA.
 
 set -euo pipefail
 
+REPO_ROOT="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 TILE_SPEC="$1"
 CONFIG="$2"
-ENVNAME="$3"
-N_SHARDS="$4"
-MANIFEST="${5:-./data/manifest.parquet}"
-OUT_DIR="${6:-./data/parts}"
+N_SHARDS="$3"
+MANIFEST="${4:-$REPO_ROOT/data/manifest.parquet}"
+OUT_DIR="${5:-$REPO_ROOT/data/parts}"
 
-GEN=/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa
+GENOME="${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 
-# Use the /lab HF cache (evo2_7b lives here; home dir is over quota). AlphaGenome
-# loads from a local weights path and ignores this.
-export HF_HOME=/lab/barcheese01/mdiberna/gruyerenome/weights/.hf_cache
+if [[ "$TILE_SPEC" == ag* ]]; then
+    DEFAULT_PYTHON="$REPO_ROOT/.venv/alphagenome/bin/python"
+else
+    DEFAULT_PYTHON="$REPO_ROOT/.venv/evo2-next/bin/python"
+fi
+PYTHON="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+[[ -x "$PYTHON" ]] || {
+    echo "Python not found at $PYTHON; set PYTHON_BIN to a uv-managed backend environment" >&2
+    exit 2
+}
+"$PYTHON" -c "import gruyerenome, pyfaidx" || {
+    echo "Install extraction dependencies with uv before submitting this job" >&2
+    exit 2
+}
 
-eval "$(conda shell.bash hook)"
-conda activate "$ENVNAME"
-python -c "import pyfaidx" 2>/dev/null || uv pip install -q pyfaidx
-
-python -m tisiago.extract \
+cd "$REPO_ROOT"
+"$PYTHON" -m tisiago.extract \
     --manifest "$MANIFEST" \
     --tile-spec "$TILE_SPEC" \
     --config "$CONFIG" \
-    --genome "$GEN" \
+    --genome "$GENOME" \
     --out-dir "$OUT_DIR" \
     --shard-id "${SLURM_ARRAY_TASK_ID}" \
-    --n-shards "$N_SHARDS"
+    --n-shards "$N_SHARDS" \
+    --resume

@@ -1,6 +1,6 @@
 name: dense_ag7
 parts_dir: data/scan_parts_allsplits
-out_store: /lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7
+out_store: data/dense_ag7
 keys:
   - alphagenome_jax/L16k/decoder_1bp/off0.npy
   - alphagenome_jax/L131k/decoder_1bp/off0.npy

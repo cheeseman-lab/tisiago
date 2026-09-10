@@ -26,8 +26,8 @@ def test_metrics_for_classifier_npz(tmp_path):
     r = rows[0]
     assert r["head"] == "HeadA"
     assert 0.0 <= r["AUPRC"] <= 1.0
-    assert "recall@1FP" in r and "noncog_mean_p" in r
-    assert 0.0 <= r["recall@1FP"] <= 1.0
+    assert "oracle_recall@1FP" in r and "noncog_mean_p_at_oracle" in r
+    assert 0.0 <= r["oracle_recall@1FP"] <= 1.0
 
 
 def test_metrics_for_handles_missing_noncog(tmp_path):
@@ -36,4 +36,4 @@ def test_metrics_for_handles_missing_noncog(tmp_path):
     rows = metrics_for(f)
     assert len(rows) == 1
     # grounding unavailable -> NaN, not a crash
-    assert np.isnan(rows[0]["noncog_mean_p"])
+    assert np.isnan(rows[0]["noncog_mean_p_at_oracle"])

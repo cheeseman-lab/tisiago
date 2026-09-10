@@ -45,7 +45,7 @@ def fit_xgb_head(
     colsample_bytree=0.5,
     seed=0,
 ) -> dict:
-    """Train an XGBoost classifier (hist), early-stop on val, isotonic-calibrate on val."""
+    """Train an XGBoost classifier (hist), then isotonic-calibrate on independent val rows."""
     import xgboost as xgb
 
     if scale_pos_weight is None:
@@ -59,11 +59,13 @@ def fit_xgb_head(
         colsample_bytree=colsample_bytree,
         tree_method="hist",
         eval_metric="aucpr",
-        early_stopping_rounds=50,
         random_state=seed,
         n_jobs=-1,
     )
-    clf.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    # Keep the calibration rows statistically independent from model fitting.
+    # If early stopping is needed, its data must be supplied as a separate
+    # tuning split rather than reusing X_val here.
+    clf.fit(X_train, y_train, verbose=False)
 
     def predict_raw(X):
         return clf.predict_proba(X)[:, 1]
@@ -96,6 +98,7 @@ def fit_lgb_head(
         learning_rate=learning_rate,
         scale_pos_weight=scale_pos_weight,
         subsample=subsample,
+        subsample_freq=1,
         colsample_bytree=colsample_bytree,
         random_state=seed,
         n_jobs=-1,
@@ -104,7 +107,9 @@ def fit_lgb_head(
     clf.fit(X_train, y_train)
 
     def predict_raw(X):
-        return clf.predict_proba(X)[:, 1]
+        # Booster.predict avoids sklearn's synthetic feature-name warning for
+        # ndarray input and returns the same positive-class probabilities.
+        return clf.booster_.predict(X)
 
     return _calibrate(predict_raw, X_val, y_val, clf)
 

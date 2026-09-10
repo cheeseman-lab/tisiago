@@ -27,8 +27,14 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score
 
-from tisiago.caller import fit_calibrated_head, recall_at_fp_budget, reliability
+from tisiago.caller import (
+    evaluate_at_threshold,
+    fit_calibrated_head,
+    recall_at_fp_budget,
+    reliability,
+)
 from tisiago.head_xgb import fit_lgb_head, fit_rf_head, fit_xgb_head
+from tisiago.manifest import split_grouped_indices, unique_site_indices
 from tisiago.scan_eval import grounding_stats
 
 # The autoresearch winner stack (see autoresearch/winners.md).
@@ -47,7 +53,24 @@ KEYS_AG = [
     "alphagenome_jax/L131k/decoder_1bp/off0.npy",
     "onehot/kozakW20.npy",
 ]
-FEATURE_SETS = {"ag7": KEYS_7, "ag": KEYS_AG}
+
+
+def _ag_evo_keys(length_tag: str) -> list[str]:
+    """Build the matched AG + four-offset Evo2 feature stack for an ablation."""
+    return [
+        *KEYS_AG[:2],
+        *(f"evo2/{length_tag}/blocks.28.mlp.l3/off{offset}.npy" for offset in (0, 3, 6, 9)),
+        KEYS_AG[-1],
+    ]
+
+
+FEATURE_SETS = {
+    "ag7": KEYS_7,
+    "ag": KEYS_AG,
+    "ag_evo8k_s4k": _ag_evo_keys("W8kS4k"),
+    "ag_evo4k": _ag_evo_keys("W4k"),
+    "ag_evo_txp": _ag_evo_keys("TXP"),
+}
 TRAIN_SUBSAMPLE = 60000
 
 
@@ -73,15 +96,56 @@ def _load_full(emb: Path, keys, rows=None) -> np.ndarray:
 def _predict_chunked(emb: Path, keys, heads: dict, row_idx: np.ndarray, chunk: int = 100_000):
     """Predict each head over ``row_idx`` of a (large) memmap'd store, in chunks.
 
+    Standardized logistic heads use a fused, feature-block path: scaling is folded
+    into the fitted coefficients and logits are accumulated one stored key at a
+    time. This avoids materializing the full concatenated feature matrix. Other
+    head types retain the generic concatenation path.
+
     Returns ``{head_name: p}`` with ``p`` aligned to the order of ``row_idx``.
     """
     mmaps = [np.load(emb / k, mmap_mode="r") for k in keys]
     out = {name: np.empty(len(row_idx), dtype=np.float64) for name in heads}
+    widths = [a.shape[1] for a in mmaps]
+    total_width = sum(widths)
+    linear = all(
+        np.asarray(head.get("linear_coef", [])).shape == (total_width,)
+        and "linear_intercept" in head
+        and "predict_from_logit" in head
+        and "calibrate_raw" in head
+        for head in heads.values()
+    )
+
+    def read_rows(a, sel):
+        # Basic slicing avoids the extra fp16 fancy-index copy for contiguous splits.
+        if len(sel) and int(sel[-1]) - int(sel[0]) + 1 == len(sel):
+            return np.asarray(a[int(sel[0]) : int(sel[-1]) + 1], dtype=np.float32)
+        return np.asarray(a[sel], dtype=np.float32)
+
     for s in range(0, len(row_idx), chunk):
         sel = row_idx[s : s + chunk]
-        X = np.concatenate([np.asarray(a[sel], dtype=np.float32) for a in mmaps], axis=1)
-        for name, head in heads.items():
-            out[name][s : s + chunk] = head["predict"](X)
+        if linear:
+            logits = {
+                name: np.full(len(sel), head["linear_intercept"], dtype=np.float32)
+                for name, head in heads.items()
+            }
+            c = 0
+            for a, width in zip(mmaps, widths):
+                X_block = read_rows(a, sel)
+                for name, head in heads.items():
+                    coef = head["linear_coef"][c : c + width]
+                    logits[name] += X_block @ coef
+                c += width
+            for name, head in heads.items():
+                raw = head["predict_from_logit"](logits[name])
+                out[name][s : s + chunk] = head["calibrate_raw"](raw)
+        else:
+            X = np.empty((len(sel), total_width), dtype=np.float32)
+            c = 0
+            for a, width in zip(mmaps, widths):
+                X[:, c : c + width] = read_rows(a, sel)
+                c += width
+            for name, head in heads.items():
+                out[name][s : s + chunk] = head["predict"](X)
         print(f"    scored {min(s + chunk, len(row_idx)):,}/{len(row_idx):,}", flush=True)
     return out
 
@@ -96,8 +160,9 @@ def train_heads(curated_store: Path, keys=KEYS_7, only=None) -> dict:
     m = pd.read_parquet(curated_store / "manifest.parquet")
     y = m.label_tis.values
     rng = np.random.default_rng(0)
-    tr_all = np.where(m.split.values == "train")[0]
-    cal = np.where(m.split.values == "val")[0]
+    unique = unique_site_indices(m)
+    tr_all = unique[m.split.values[unique] == "train"]
+    cal = unique[m.split.values[unique] == "val"]
     tr = rng.choice(tr_all, min(TRAIN_SUBSAMPLE, len(tr_all)), replace=False)
 
     X = _load_full(emb, keys)
@@ -141,28 +206,38 @@ def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, s
     va = np.where((sm.split.values == "val") & cog)[0]
     if len(va) > 300_000:
         va = np.sort(rng.choice(va, 300_000, replace=False))
+    cal_idx, operating_idx = split_grouped_indices(
+        va, sm.transcript_id.values[va], fraction=0.5, seed=seed
+    )
     print(f"dense train: pos={len(pos):,} neg={len(neg):,} ({len(neg) / len(pos):.0f}:1)  "
-          f"cal(val)={len(va):,}", flush=True)
+          f"cal(val)={len(cal_idx):,} operating(val)={len(operating_idx):,}", flush=True)
 
     Xtr = _load_full(emb, keys, tr_idx)
-    Xva = _load_full(emb, keys, va)
-    ytr, yva = y[tr_idx], y[va]
+    Xva = _load_full(emb, keys, cal_idx)
+    ytr, yva = y[tr_idx], y[cal_idx]
 
     if head == "logistic":
         specs = {
             "Dense(bal)": dict(C=0.00075, max_iter=1000, class_weight="balanced"),
             "Dense(None)": dict(C=0.00075, max_iter=1000, class_weight=None),
         }
-        return {n: fit_calibrated_head(Xtr, ytr, Xva, yva, **kw) for n, kw in specs.items()}
+        heads = {n: fit_calibrated_head(Xtr, ytr, Xva, yva, **kw) for n, kw in specs.items()}
+        for fitted in heads.values():
+            fitted["operating_rows"] = operating_idx
+        return heads
 
     tp = dict(tree_params or {})
     if head == "xgboost":
-        return {"Dense(xgb)": fit_xgb_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
-    if head == "lightgbm":
-        return {"Dense(lgb)": fit_lgb_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
-    if head == "rf":
-        return {"Dense(rf)": fit_rf_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
-    raise ValueError(f"unknown head: {head!r}")
+        heads = {"Dense(xgb)": fit_xgb_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
+    elif head == "lightgbm":
+        heads = {"Dense(lgb)": fit_lgb_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
+    elif head == "rf":
+        heads = {"Dense(rf)": fit_rf_head(Xtr, ytr, Xva, yva, seed=seed, **tp)}
+    elif head != "xgboost":
+        raise ValueError(f"unknown head: {head!r}")
+    for fitted in heads.values():
+        fitted["operating_rows"] = operating_idx
+    return heads
 
 
 BUDGETS = (1.0, 2.0, 5.0, 10.0, 20.0)
@@ -178,7 +253,10 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
     """
     emb = scan_store / "embeddings"
     sm = pd.read_parquet(scan_store / "manifest.parquet")
+    va = np.where(sm.split.values == "val")[0]
     te = np.where(sm.split.values == "test")[0]
+    if len(va) == 0:
+        raise ValueError("scan store needs a val split to select a deployable threshold")
     cls = sm.codon_class.values[te]
     y = sm.label_tis.values[te]
     tx = sm.transcript_id.values[te]
@@ -191,7 +269,12 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
           f"non-cognate={int(noncog.sum()):,}  positives={npos:,}")
     print(f"true imbalance (neg:pos over cognate) = {ratio:.1f}:1   (curated was 3:1)\n")
 
-    preds = _predict_chunked(emb, keys, heads, te)
+    # Score validation and test together. Thresholds are selected on validation and
+    # then frozen for test; optimizing a threshold on test would be an oracle metric.
+    eval_idx = np.concatenate([va, te])
+    eval_preds = _predict_chunked(emb, keys, heads, eval_idx)
+    val_preds = {name: p[: len(va)] for name, p in eval_preds.items()}
+    preds = {name: p[len(va) :] for name, p in eval_preds.items()}
 
     if save_preds:
         np.savez(save_preds, y=y, cognate=cognate, noncog=noncog,
@@ -199,25 +282,73 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
         print(f"saved predictions -> {save_preds}\n")
 
     yc, txc = y[cognate], tx[cognate]
+    val_cls = sm.codon_class.values[va]
+    val_cognate = np.isin(val_cls, ["AUG", "near_cognate"])
     base_ap = yc.mean()
     hdr = f"{'metric':<30}" + "".join(f"{n:>18}" for n in heads)
-    print(hdr); print("-" * len(hdr))
+    print(hdr)
+    print("-" * len(hdr))
 
     def line(label, vals, fmt="{:.3f}"):
         print(f"{label:<30}" + "".join(f"{fmt.format(v):>18}" for v in vals))
 
     # AUPRC — pure ranking quality at true imbalance (baseline = positive rate)
-    line(f"AUPRC (base {base_ap:.4f})", [average_precision_score(yc, preds[n][cognate]) for n in heads], "{:.4f}")
-    # recall-vs-budget curve — is ≤1 FP/tx just brutal, or is recall flat everywhere?
+    line(
+        f"AUPRC (base {base_ap:.4f})",
+        [average_precision_score(yc, preds[n][cognate]) for n in heads],
+        "{:.4f}",
+    )
+    # Oracle recall-vs-budget curve: a useful ranking diagnostic, but thresholds are
+    # optimized on TEST and therefore must not be presented as deployable performance.
     for b in BUDGETS:
-        line(f"recall @ ≤{b:g} FP/tx",
+        line(f"oracle recall @ ≤{b:g} FP/tx",
              [recall_at_fp_budget(preds[n][cognate], yc, txc, budget=b)["recall"] for n in heads])
-    # grounding + calibration at the ≤1 operating threshold
-    thr = {n: recall_at_fp_budget(preds[n][cognate], yc, txc, budget=1.0)["threshold"] for n in heads}
-    line("non-cognate mean p (→0)", [grounding_stats(preds[n][noncog], thr[n])["mean_p"] for n in heads], "{:.4f}")
-    line("non-cognate p95", [grounding_stats(preds[n][noncog], thr[n])["p95"] for n in heads], "{:.4f}")
-    line("cognate Brier", [reliability(preds[n][cognate], yc)["brier"] for n in heads], "{:.4f}")
-    print("\nReads: flat recall across budgets => ranking-limited; steep climb => ≤1 FP/tx is just strict.")
+
+    # Honest operating point: select once on VAL, then apply unchanged to TEST.
+    selected = {}
+    for name, head in heads.items():
+        if "operating_rows" in head:
+            operating = np.isin(va, head["operating_rows"])
+        else:
+            operating = np.ones(len(va), dtype=bool)
+        eligible = operating & val_cognate
+        selected[name] = recall_at_fp_budget(
+            val_preds[name][eligible],
+            sm.label_tis.values[va][eligible],
+            sm.transcript_id.values[va][eligible],
+            budget=budget,
+        )
+    fixed = {
+        name: evaluate_at_threshold(
+            preds[name][cognate], yc, txc, selected[name]["threshold"]
+        )
+        for name in heads
+    }
+    line(
+        f"VAL-selected recall @ {budget:g}",
+        [fixed[name]["recall"] for name in heads],
+    )
+    line(
+        "TEST FP/tx at VAL threshold",
+        [fixed[name]["fp_per_transcript"] for name in heads],
+    )
+    thr = {name: selected[name]["threshold"] for name in heads}
+    line(
+        "non-cognate mean p (→0)",
+        [grounding_stats(preds[n][noncog], thr[n])["mean_p"] for n in heads],
+        "{:.4f}",
+    )
+    line(
+        "non-cognate p95",
+        [grounding_stats(preds[n][noncog], thr[n])["p95"] for n in heads],
+        "{:.4f}",
+    )
+    line(
+        "cognate Brier",
+        [reliability(preds[n][cognate], yc)["brier"] for n in heads],
+        "{:.4f}",
+    )
+    print("\nOracle rows diagnose ranking; VAL-selected rows estimate the deployable TEST point.")
 
 
 def score_demo(demo_store: Path, heads: dict, keys=KEYS_7) -> None:
@@ -256,8 +387,15 @@ def main() -> None:
     ap.add_argument("--curated-store", default="data/store")
     ap.add_argument("--scan-store", default="data/scan_store_allsplits")
     ap.add_argument("--demo-store", default=None, help="optional 3-gene demo store")
-    ap.add_argument("--features", choices=list(FEATURE_SETS), default="ag7",
-                    help="ag7 = full AG+Evo2+Kozak winner; ag = AG+Kozak (pre-evo2 substrate)")
+    ap.add_argument(
+        "--features",
+        choices=list(FEATURE_SETS),
+        default="ag7",
+        help=(
+            "ag7 = established AG+genomic-Evo2+Kozak stack; ag = AG+Kozak; "
+            "ag_evo_txp = AG+exon-spliced transcript-Evo2+Kozak ablation"
+        ),
+    )
     ap.add_argument("--train", choices=["curated", "dense"], default="curated",
                     help="curated = 3:1 set (old); dense = scan TRAIN split at true imbalance")
     ap.add_argument("--neg-cap", type=int, default=2_000_000, help="dense train negative cap")
@@ -289,7 +427,13 @@ def main() -> None:
                                        head=args.head, tree_params=tree_params))
     else:
         heads = train_heads(Path(args.curated_store), keys=keys)
-    evaluate(Path(args.scan_store), heads, keys=keys, budget=args.budget, save_preds=args.save_preds)
+    evaluate(
+        Path(args.scan_store),
+        heads,
+        keys=keys,
+        budget=args.budget,
+        save_preds=args.save_preds,
+    )
     if args.demo_store:
         score_demo(Path(args.demo_store), heads, keys=keys)
 

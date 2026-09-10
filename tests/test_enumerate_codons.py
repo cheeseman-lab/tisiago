@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -9,9 +12,9 @@ from tisiago.enumerate_codons import (
     spliced_positions,
 )
 
-_REF = "/lab/barcheese01/mdiberna/swissisoform-v2/data/reference"
-GENOME = f"{_REF}/Gencode_v49_GRCh38.primary_assembly.genome.fa"
-GTF = f"{_REF}/gencode.v49.primary_assembly.annotation.gtf"
+_REF = os.environ.get("TISIAGO_REFERENCE_DIR")
+GENOME = Path(_REF) / "Gencode_v49_GRCh38.primary_assembly.genome.fa" if _REF else None
+GTF = Path(_REF) / "gencode.v49.primary_assembly.annotation.gtf" if _REF else None
 
 
 def test_classify_aug():
@@ -81,7 +84,10 @@ def test_parse_gtf_exons_filters_by_keep(tmp_path):
     assert set(models) == {"KEEP.1"}
 
 
-@pytest.mark.skipif(not pd.io.common.file_exists(GENOME), reason="genome not present")
+@pytest.mark.skipif(
+    GENOME is None or GTF is None or not GENOME.is_file() or not GTF.is_file(),
+    reason="set TISIAGO_REFERENCE_DIR to run the reference integration test",
+)
 def test_enumerated_coords_match_curated_manifest():
     from pyfaidx import Fasta
 
@@ -93,8 +99,8 @@ def test_enumerated_coords_match_curated_manifest():
         .head(5)
         .transcript_id.tolist()
     )
-    models = parse_gtf_exons(GTF, keep=set(sample_tx))
-    fa = Fasta(GENOME, sequence_always_upper=True, rebuild=False)
+    models = parse_gtf_exons(str(GTF), keep=set(sample_tx))
+    fa = Fasta(str(GENOME), sequence_always_upper=True, rebuild=False)
 
     n_checked = 0
     for tx in sample_tx:

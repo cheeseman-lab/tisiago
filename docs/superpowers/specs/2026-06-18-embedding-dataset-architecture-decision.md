@@ -100,9 +100,9 @@ The monolith path conflates two needs that want opposite designs.
 
 ### A3. Storage format & tier — *operon's format call*
 
-- **Current.** `.npy` fp16 per key on NFS (`/lab/barcheese01`). Random / fancy-index reads are
+- **Current.** `.npy` fp16 per key on shared NFS. Random / fancy-index reads are
   catastrophic; even sequential block reads run ~27 MB/s.
-- **Proposed.** Compact store on **fast SSD** (`/lab/ops_analysis_ssd`, 23 TB free):
+- **Proposed.** Compact store on **fast SSD**:
   **memmap-per-feature-key fp16** + a row-aligned **parquet manifest** (labels, coords, split).
   Each key is a column-group, so an autoresearch run loads only the subset it sweeps. Small set →
   slurp into RAM (1-min logistic); large set → minibatch SGD straight off the memmap. **One
@@ -278,7 +278,7 @@ true prior.
 | Compact experiment store | `data/dense_exp_store` | ~160 GB | 4,329,984 rows; **all 7 `ag7` keys in** (AG + Evo2 4×33 GB + Kozak) |
 | Dense scan size | — | 62,683,645 positions | TEST eval substrate: 1,823,302 codons (823,302 cognate + 1,000,000 non-cognate; 3,555 positives; 230.6:1) |
 
-**Storage tiers.** `/lab/barcheese01` (NFS, 23 TB free, ~27 MB/s random) · `/lab/ops_analysis_ssd`
+**Storage tiers.** shared NFS (~27 MB/s random in the original benchmark) · fast local SSD
 (SSD, 23 TB free — proposed home for the compact store) · `/run/user/$UID` (tmpfs, 51 GB).
 
 ---

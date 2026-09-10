@@ -1,7 +1,8 @@
 """Ridge efficiency head: metrics dict + classifier-thresholding of continuous predictions."""
 import numpy as np
+import pandas as pd
 
-from tisiago.efficiency_head import evaluate_as_classifier, fit_efficiency_head
+from tisiago.efficiency_head import _build_target, evaluate_as_classifier, fit_efficiency_head
 
 
 def test_fit_returns_metrics_and_predict():
@@ -14,6 +15,8 @@ def test_fit_returns_metrics_and_predict():
     assert head["metrics"]["r2_val"] > 0.5  # recoverable linear signal
     p = head["predict"](X[:5])
     assert p.shape == (5,)
+    expected = head["model"].predict(head["scaler"].transform(X[:5]))
+    np.testing.assert_allclose(p, expected, rtol=2e-5, atol=2e-6)
 
 
 def test_evaluate_as_classifier_keys_and_norm():
@@ -34,3 +37,18 @@ def test_evaluate_as_classifier_constant_preds_safe():
     tx = np.arange(50) % 7
     out = evaluate_as_classifier(preds, y, tx, budgets=(1.0,))
     assert np.isfinite(out["AUPRC"])
+
+
+def test_build_target_excludes_unexpressed_and_aggregates_duplicate_calls():
+    m = pd.DataFrame(
+        {
+            "transcript_id": ["a", "a", "b", "c"],
+            "mrna_index": [1, 1, 2, 3],
+            "max_norm_HeLa": [np.nan, 3.0, np.nan, np.nan],
+            "expressed_HeLa": [False, True, True, False],
+        }
+    )
+    y = _build_target(m, "max_norm_HeLa")
+    assert y[0] == y[1] == np.log1p(3.0)
+    assert y[2] == 0.0
+    assert np.isnan(y[3])

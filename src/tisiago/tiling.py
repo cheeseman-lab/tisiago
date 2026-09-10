@@ -31,6 +31,19 @@ MODEL_SPECS: dict[str, dict] = {
                "step": 65536, "offsets": [0], "length_tag": "L131k"},
     "evo2_8k": {"backend": "evo2", "window": 8192, "placement": "left_heavy",
                 "step": 2048, "up_anchor": 5120, "offsets": [0, 3, 6, 9], "length_tag": "W8k"},
+    # Frozen-inference ablations. Their distinct length tags prevent accidental
+    # mixing with the established W8k/S2k feature distribution. Retrain the small
+    # downstream head before comparing either variant.
+    "evo2_8k_s4k": {
+        "backend": "evo2", "window": 8192, "placement": "left_heavy",
+        "step": 4096, "up_anchor": 5120, "offsets": [0, 3, 6, 9],
+        "length_tag": "W8kS4k",
+    },
+    "evo2_4k": {
+        "backend": "evo2", "window": 4096, "placement": "left_heavy",
+        "step": 2048, "up_anchor": 3000, "offsets": [0, 3, 6, 9],
+        "length_tag": "W4k",
+    },
 }
 
 
@@ -55,6 +68,7 @@ class Tile:
 
     @property
     def end(self) -> int:
+        """Return the half-open genomic end coordinate of the tile."""
         return self.start + self.window
 
 
@@ -107,3 +121,32 @@ def group_into_tiles(candidates, spec: dict) -> list[Tile]:
             tiles[key] = tile
         tile.members.append(TileMember(row_idx=int(c.row_idx), offset=offset, codon=c.codon))
     return list(tiles.values())
+
+
+def tile_position_requests(
+    tile: Tile, offsets: list[int]
+) -> tuple[list[int], list[tuple[int, int, int]]]:
+    """Deduplicate model positions requested by overlapping candidate offsets.
+
+    Returns a list of unique within-tile positions and request triples
+    ``(row_idx, feature_offset, position_index)``. Dense scans request adjacent
+    candidates, so offset features otherwise gather and transfer the same hidden
+    state as many as four times.
+    """
+    positions: list[int] = []
+    position_index: dict[int, int] = {}
+    requests: list[tuple[int, int, int]] = []
+    for member in tile.members:
+        for feature_offset in offsets:
+            position = member.offset + feature_offset
+            if not 0 <= position < tile.window:
+                raise ValueError(
+                    f"candidate row {member.row_idx} offset {position} falls outside tile"
+                )
+            index = position_index.get(position)
+            if index is None:
+                index = len(positions)
+                position_index[position] = index
+                positions.append(position)
+            requests.append((member.row_idx, feature_offset, index))
+    return positions, requests

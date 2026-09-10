@@ -22,6 +22,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, brier_score_loss
 from sklearn.preprocessing import StandardScaler
 
+from tisiago.manifest import split_grouped_indices, unique_site_indices
+
 
 def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
     """Recall at the threshold whose mean false-positives-per-transcript ≤ budget.
@@ -42,15 +44,16 @@ def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
     p = np.asarray(p, dtype=np.float64)
     y = np.asarray(y).astype(bool)
     tx = np.asarray(transcript_id)
+    if p.ndim != 1 or y.ndim != 1 or tx.ndim != 1:
+        raise ValueError("p, y, and transcript_id must be one-dimensional")
+    if not (len(p) == len(y) == len(tx)):
+        raise ValueError("p, y, and transcript_id must have equal lengths")
+    if budget < 0:
+        raise ValueError("budget must be non-negative")
+    if not np.isfinite(p).all():
+        raise ValueError("p must contain only finite scores")
     n_tx = len(np.unique(tx))
     n_pos = int(y.sum())
-
-    # Candidate thresholds: all unique scores plus an +inf sentinel (admit nothing).
-    # Sweep from strict (high) to loose (low); each score used as a ">=" cutoff so
-    # every distinct operating point is visited.
-    candidates = np.concatenate([np.unique(p), [np.inf]])
-    candidates.sort()  # ascending
-    candidates = candidates[::-1]  # descending: strict -> loose
 
     best = {
         "recall": 0.0,
@@ -58,23 +61,62 @@ def recall_at_fp_budget(p, y, transcript_id, budget: float = 1.0) -> dict:
         "fp_per_transcript": 0.0,
         "budget": float(budget),
     }
-    for thr in candidates:
-        admitted = p >= thr
-        fp = admitted & ~y
-        # mean FP per transcript across ALL transcripts present (not just those with FP)
-        fp_per_tx = fp.sum() / max(1, n_tx)
-        if fp_per_tx <= budget:
-            recall = (admitted & y).sum() / max(1, n_pos)
-            if recall > best["recall"]:  # strict: keep the tightest threshold at each recall level
-                best = {
-                    "recall": float(recall),
-                    "threshold": float(thr),
-                    "fp_per_transcript": float(fp_per_tx),
-                    "budget": float(budget),
-                }
-        else:
-            break  # thresholds only get looser -> FP only grows
+    if len(p) == 0 or n_pos == 0:
+        return best
+
+    # Sort once and evaluate only the ends of tied-score groups. The former
+    # implementation allocated an N-element boolean mask at every distinct score,
+    # making a dense scan O(N^2). This is O(N log N) and has identical >= semantics.
+    order = np.argsort(-p, kind="stable")
+    scores = p[order]
+    labels = y[order]
+    group_end = np.r_[scores[1:] != scores[:-1], True]
+    end_idx = np.flatnonzero(group_end)
+    tp = np.cumsum(labels, dtype=np.int64)[end_idx]
+    fp = np.cumsum(~labels, dtype=np.int64)[end_idx]
+    feasible = fp / max(1, n_tx) <= budget
+    if feasible.any():
+        max_tp = int(tp[feasible].max())
+        # First match is the highest threshold for this recall (the documented tie-break).
+        chosen = int(np.flatnonzero(feasible & (tp == max_tp))[0])
+        best = {
+            "recall": float(tp[chosen] / n_pos),
+            "threshold": float(scores[end_idx[chosen]]),
+            "fp_per_transcript": float(fp[chosen] / max(1, n_tx)),
+            "budget": float(budget),
+        }
     return best
+
+
+def evaluate_at_threshold(p, y, transcript_id, threshold: float) -> dict:
+    """Evaluate a fixed, previously selected operating threshold.
+
+    Unlike :func:`recall_at_fp_budget`, this function does not optimize anything on
+    the supplied data. Use it on test data with a threshold selected on validation
+    data to estimate deployable performance without test-set threshold leakage.
+    """
+    p = np.asarray(p, dtype=np.float64)
+    y = np.asarray(y).astype(bool)
+    tx = np.asarray(transcript_id)
+    if p.ndim != 1 or y.ndim != 1 or tx.ndim != 1:
+        raise ValueError("p, y, and transcript_id must be one-dimensional")
+    if not (len(p) == len(y) == len(tx)):
+        raise ValueError("p, y, and transcript_id must have equal lengths")
+    if not np.isfinite(p).all():
+        raise ValueError("p must contain only finite scores")
+
+    admitted = p >= threshold
+    n_pos = int(y.sum())
+    n_tx = len(np.unique(tx))
+    tp = int((admitted & y).sum())
+    fp = int((admitted & ~y).sum())
+    return {
+        "recall": float(tp / max(1, n_pos)),
+        "threshold": float(threshold),
+        "fp_per_transcript": float(fp / max(1, n_tx)),
+        "true_positives": tp,
+        "false_positives": fp,
+    }
 
 
 def reliability(p, y, n_bins: int = 10) -> dict:
@@ -132,15 +174,49 @@ def fit_calibrated_head(
         scaler.transform(X_train), y_train
     )
 
+    # Fold StandardScaler into the linear layer once. At inference this replaces
+    # scaler.transform(X) + sklearn validation + predict_proba with one matrix-vector
+    # product, without changing the fitted decision function:
+    #   ((X - mean) / scale) @ beta + b == X @ (beta / scale) + adjusted_b
+    linear_coef = (clf.coef_[0] / scaler.scale_).astype(np.float32)
+    linear_intercept = float(clf.intercept_[0] - scaler.mean_ @ linear_coef)
+
+    def predict_logit(X):
+        return np.asarray(X) @ linear_coef + linear_intercept
+
+    def predict_from_logit(logit):
+        logit = np.asarray(logit)
+        # Stable sigmoid without adding scipy as a direct runtime dependency.
+        out = np.empty_like(logit, dtype=np.float64)
+        positive = logit >= 0
+        out[positive] = 1.0 / (1.0 + np.exp(-logit[positive]))
+        exp_x = np.exp(logit[~positive])
+        out[~positive] = exp_x / (1.0 + exp_x)
+        return out
+
     def predict_raw(X):
-        return clf.predict_proba(scaler.transform(X))[:, 1]
+        return predict_from_logit(predict_logit(X))
 
     iso = IsotonicRegression(out_of_bounds="clip").fit(predict_raw(X_cal), y_cal)
 
-    def predict(X):
-        return iso.predict(predict_raw(X))
+    def calibrate_raw(p):
+        return iso.predict(np.asarray(p))
 
-    return {"predict": predict, "predict_raw": predict_raw}
+    def predict(X):
+        return calibrate_raw(predict_raw(X))
+
+    return {
+        "predict": predict,
+        "predict_raw": predict_raw,
+        "predict_logit": predict_logit,
+        "predict_from_logit": predict_from_logit,
+        "calibrate_raw": calibrate_raw,
+        "linear_coef": linear_coef,
+        "linear_intercept": linear_intercept,
+        "model": clf,
+        "scaler": scaler,
+        "calibrator": iso,
+    }
 
 
 # default feature set = the FINDINGS headline (AlphaGenome 16k + Evo2 blk28).
@@ -182,13 +258,18 @@ def main() -> None:
     y = m.label_tis.values
     rng = np.random.default_rng(0)
 
-    tr_all = np.where(m.split.values == "train")[0]
-    cal = np.where(m.split.values == "val")[0]
-    te = np.where(m.split.values == "test")[0]
+    unique = unique_site_indices(m)
+    tr_all = unique[m.split.values[unique] == "train"]
+    val = unique[m.split.values[unique] == "val"]
+    te = unique[m.split.values[unique] == "test"]
+    cal, operating = split_grouped_indices(
+        val, m.transcript_id.values[val], fraction=0.5, seed=0
+    )
     tr = rng.choice(tr_all, min(TRAIN_SUBSAMPLE, len(tr_all)), replace=False)
 
     X = load(args.keys, emb)
     head = fit_calibrated_head(X[tr], y[tr], X[cal], y[cal])
+    p_val = head["predict"](X[operating])
     p_raw = head["predict_raw"](X[te])
     p_cal = head["predict"](X[te])
     yte = y[te]
@@ -196,7 +277,8 @@ def main() -> None:
 
     print(f"features: {'+'.join(args.keys)}  dim={X.shape[1]}")
     print(
-        f"train={len(tr)} (of {len(tr_all)})  cal/val={len(cal)}  test={len(te)}  "
+        f"train={len(tr)} (of {len(tr_all)})  calibration={len(cal)}  "
+        f"operating-val={len(operating)}  test={len(te)}  "
         f"test transcripts={len(np.unique(tx_te))}  test pos-rate={yte.mean():.3f}"
     )
     print(
@@ -209,11 +291,19 @@ def main() -> None:
         print(f"  {name:22s} Brier={r['brier']:.4f}  max_gap={r['max_gap']:.3f}")
 
     print(f"\n-- caller metric (calibrated, budget ≤ {args.budget} FP/transcript) --")
-    res = recall_at_fp_budget(p_cal, yte, tx_te, budget=args.budget)
-    print(
-        f"  recall={res['recall']:.3f}  at threshold p≥{res['threshold']:.3f}  "
-        f"(actual {res['fp_per_transcript']:.3f} FP/transcript)"
+    selected = recall_at_fp_budget(
+        p_val,
+        y[operating],
+        m.transcript_id.values[operating],
+        budget=args.budget,
     )
+    res = evaluate_at_threshold(p_cal, yte, tx_te, selected["threshold"])
+    print(
+        f"  TEST recall={res['recall']:.3f} at VAL-selected threshold "
+        f"p≥{res['threshold']:.3f} ({res['fp_per_transcript']:.3f} TEST FP/transcript)"
+    )
+    oracle = recall_at_fp_budget(p_cal, yte, tx_te, budget=args.budget)
+    print(f"  diagnostic oracle TEST recall={oracle['recall']:.3f} (threshold fit on TEST)")
     print("\n  NOTE: on the curated 3:1 decoy set, NOT true genome-wide imbalance.")
     print("  The true-imbalance number requires the Phase 2 dense codon scan.")
 

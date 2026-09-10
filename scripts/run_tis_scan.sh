@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=mdiberna_tis_scan
+#SBATCH --job-name=tisiago_scan
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -15,18 +15,18 @@
 # slices every enumerated position, so GPU cost ~ the curated run.
 #
 # Usage:
-#   sbatch --array=0-19%3 --partition=nvidia-A6000-20 \
-#       scripts/run_tis_scan.sh TILE_SPEC CONFIG ENV N_SHARDS [MANIFEST] [OUT_DIR]
+#   sbatch --array=0-19%3 --partition="$TISIAGO_AG_PARTITION" \
+#       scripts/run_tis_scan.sh TILE_SPEC CONFIG N_SHARDS [MANIFEST] [OUT_DIR]
 #
-#   TILE_SPEC : ag16k | ag131k | evo2_8k   (headline set = ag16k + evo2_8k)
-#   ENV       : conda env (alphagenome for ag*, evo2 for evo2_8k)
+#   TILE_SPEC : ag16k | ag131k | evo2_8k | evo2_8k_s4k | evo2_4k
+#               (headline set = ag16k + evo2_8k; latter two are speed ablations)
 #   N_SHARDS  : must equal the array size
+# Set PYTHON_BIN to the uv-managed backend environment and TISIAGO_GENOME to
+# the indexed reference FASTA.
 #
-# MEMORY: the dense scan slices ~300k positions/shard. extract.py accumulates all
-# sliced vectors in RAM before writing, so evo2_8k (3 layers x 4 offsets = 12 keys,
-# 4096-dim) needs ~85 GB/shard — OVERRIDE the 64G default with `sbatch --mem=384G`
-# for evo2 (the A100 partition allows up to 1920G). ag16k (1 key) fits in 64G. A
-# cleaner long-term fix is to stream parts to disk or use more shards (see ROADMAP).
+# MEMORY: extraction preallocates one fp16 matrix per requested key and fills it
+# batch-wise. Peak host RAM is therefore close to final shard size plus model/manifest
+# overhead; the blk28-only config (4 keys) is the production Evo2 configuration.
 #
 # Scope / size: the scan store is large — ~89 GB at 5632 dims (fp16) for test+val,
 # ~57 GB for test only. Calibration uses the CURATED val, so the scan only needs
@@ -36,28 +36,37 @@
 
 set -euo pipefail
 
+REPO_ROOT="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 TILE_SPEC="$1"
 CONFIG="$2"
-ENVNAME="$3"
-N_SHARDS="$4"
-MANIFEST="${5:-./data/scan_manifest.parquet}"
-OUT_DIR="${6:-./data/scan_parts}"
+N_SHARDS="$3"
+MANIFEST="${4:-$REPO_ROOT/data/scan_manifest.parquet}"
+OUT_DIR="${5:-$REPO_ROOT/data/scan_parts}"
 
-GEN=/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa
+GENOME="${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 
-# Use the /lab HF cache (evo2_7b lives here; home dir is over quota). AlphaGenome
-# loads from a local weights path and ignores this.
-export HF_HOME=/lab/barcheese01/mdiberna/gruyerenome/weights/.hf_cache
+if [[ "$TILE_SPEC" == ag* ]]; then
+    DEFAULT_PYTHON="$REPO_ROOT/.venv/alphagenome/bin/python"
+else
+    DEFAULT_PYTHON="$REPO_ROOT/.venv/evo2-next/bin/python"
+fi
+PYTHON="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+[[ -x "$PYTHON" ]] || {
+    echo "Python not found at $PYTHON; set PYTHON_BIN to a uv-managed backend environment" >&2
+    exit 2
+}
+"$PYTHON" -c "import gruyerenome, pyfaidx" || {
+    echo "Install extraction dependencies with uv before submitting this job" >&2
+    exit 2
+}
 
-eval "$(conda shell.bash hook)"
-conda activate "$ENVNAME"
-python -c "import pyfaidx" 2>/dev/null || uv pip install -q pyfaidx
-
-python -m tisiago.extract \
+cd "$REPO_ROOT"
+"$PYTHON" -m tisiago.extract \
     --manifest "$MANIFEST" \
     --tile-spec "$TILE_SPEC" \
     --config "$CONFIG" \
-    --genome "$GEN" \
+    --genome "$GENOME" \
     --out-dir "$OUT_DIR" \
     --shard-id "${SLURM_ARRAY_TASK_ID}" \
-    --n-shards "$N_SHARDS"
+    --n-shards "$N_SHARDS" \
+    --resume

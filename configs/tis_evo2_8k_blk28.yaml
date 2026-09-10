@@ -1,4 +1,6 @@
-# TIS per-candidate extraction — Evo-2 7B, 8 kb left-heavy windows.
+# TIS per-candidate extraction — Evo-2 7B, blk28-only.
+# Window and stride are selected by tisiago's --tile-spec, so this config can also
+# drive the namespaced evo2_8k_s4k and evo2_4k frozen-inference ablations.
 # Blk28-only variant: autoresearch confirmed only blocks.28.mlp.l3 matters.
 # Drops blk24/blk26 to cut RAM from 59GB→20GB per shard (fits 64G).
 model: evo2

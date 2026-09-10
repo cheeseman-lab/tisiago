@@ -44,3 +44,17 @@ def test_xgb_route(tiny_store):
 def test_unknown_head_raises(tiny_store):
     with pytest.raises((ValueError, KeyError)):
         dc.train_heads_dense(tiny_store, keys=["a/x.npy", "a/z.npy"], head="banana")
+
+
+def test_chunked_linear_predictions_match_direct_head(tiny_store):
+    keys = ["a/x.npy", "a/z.npy"]
+    X = dc._load_full(tiny_store / "embeddings", keys)
+    rng = np.random.default_rng(4)
+    y = rng.integers(0, 2, len(X))
+    head = dc.fit_calibrated_head(X[:300], y[:300], X[300:450], y[300:450])
+    rows = np.arange(450, 600)
+    expected = head["predict"](X[rows])
+    actual = dc._predict_chunked(
+        tiny_store / "embeddings", keys, {"linear": head}, rows, chunk=37
+    )["linear"]
+    np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)

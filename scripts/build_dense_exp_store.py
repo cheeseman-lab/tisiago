@@ -93,7 +93,8 @@ def main() -> None:
                 mat[op : op + cnt] = np.asarray(a[s:e])[bm]
                 op += cnt
             print(f"  {k}: read {e:,}/{n_src:,}  kept {op:,}/{len(rows):,}", flush=True)
-        assert op == len(rows), f"collected {op} != expected {len(rows)}"
+        if op != len(rows):
+            raise ValueError(f"collected {op} != expected {len(rows)}")
         outp = out / "embeddings" / k
         outp.parent.mkdir(parents=True, exist_ok=True)
         np.save(outp, mat)

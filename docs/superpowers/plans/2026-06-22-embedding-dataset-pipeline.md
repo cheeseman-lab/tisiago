@@ -14,7 +14,7 @@
 - ruff line-length 100. Match each file's existing comment density (no new comment blocks where the file has none).
 - pytest; `testpaths = ["tests"]`. New tests live in `tests/` mirroring the module name.
 - Temp files in the working directory only — never `/tmp`. Use `tmp_path` (pytest) or `dir="."`.
-- SSD store root (namespaced): `/lab/ops_analysis_ssd/test_matteo/tisiago_store/`.
+- SSD store root: configurable site-local scratch storage.
 - Memory rule: build matrices by **preallocation**, never parts-list + `np.concatenate` (holds 2× peak); cgroup RSS counts mmap page-cache, so size jobs as `arrays + working-set`.
 - SLURM hygiene: `${USER}`-namespaced job names; **`scancel` by job ID only** (never by name).
 - Conda: `eval "$(conda shell.bash hook)" && conda activate tisiago` before any python.
@@ -255,7 +255,7 @@ from tisiago.shard_io import build_src_to_compact, iter_shards, map_rows
 
 Run:
 ```bash
-eval "$(conda shell.bash hook)" && conda activate tisiago && cd /lab/barcheese01/mdiberna/tisiago
+cd /path/to/tisiago
 python -c "
 import numpy as np, pandas as pd
 from pathlib import Path
@@ -542,7 +542,7 @@ Expected: PASS (1 passed). (If `scripts` is not importable, add `tests/conftest.
 # configs/dataset_dense_ag7.yaml
 name: dense_ag7
 parts_dir: data/scan_parts_allsplits
-out_store: /lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7
+out_store: /path/to/dense_ag7
 keys:
   - alphagenome_jax/L16k/decoder_1bp/off0.npy
   - alphagenome_jax/L131k/decoder_1bp/off0.npy
@@ -563,12 +563,12 @@ SSD out-store, then build via a big-mem SLURM job (sequential reads; ~hours on t
 Evo2 shards):
 
 ```bash
-mkdir -p /lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7
-cp data/dense_exp_store/manifest.parquet /lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7/
+mkdir -p /path/to/dense_ag7
+cp data/dense_exp_store/manifest.parquet /path/to/dense_ag7/
 sbatch --job-name=${USER}_build_ag7 --partition=20 --cpus-per-task=8 --mem=240G \
   --time=18:00:00 --output=build_ag7.log \
   --wrap='eval "$(conda shell.bash hook)" && conda activate tisiago && \
-          cd /lab/barcheese01/mdiberna/tisiago && \
+          cd /path/to/tisiago && \
           python scripts/build_store.py --config configs/dataset_dense_ag7.yaml'
 ```
 Validate: `grep -c covered build_ag7.log` shows each key `covered=4329984/4329984`; abort/raise

@@ -12,4 +12,7 @@ with torch.no_grad():
     _, emb = m(ids, return_embeddings=True, layer_names=layers)
 for ln in layers:
     a = emb[ln].squeeze(0).float().cpu().numpy()
-    print(f"{ln:24s} shape={a.shape} absmean={np.abs(a).mean():.5f} allzero={bool(np.abs(a).sum()==0)}")
+    print(
+        f"{ln:24s} shape={a.shape} absmean={np.abs(a).mean():.5f} "
+        f"allzero={bool(np.abs(a).sum() == 0)}"
+    )

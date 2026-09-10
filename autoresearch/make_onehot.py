@@ -16,6 +16,7 @@ self-checked: the centered 3-mer must equal the manifest ``codon``.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -24,10 +25,6 @@ from pyfaidx import Fasta
 
 _BASES = {"A": 0, "C": 1, "G": 2, "T": 3}
 _COMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
-_REF = "/lab/barcheese01/mdiberna/swissisoform-v2/data/reference"
-GENOME = f"{_REF}/Gencode_v49_GRCh38.primary_assembly.genome.fa"
-
-
 def _revcomp(s: str) -> str:
     return s.translate(_COMP)[::-1]
 
@@ -75,9 +72,15 @@ def window_onehot(m: pd.DataFrame, fa: Fasta, half: int) -> np.ndarray:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--store", default="data/store")
-    ap.add_argument("--genome", default=GENOME)
+    ap.add_argument(
+        "--genome",
+        default=os.environ.get("TISIAGO_GENOME"),
+        help="indexed reference FASTA (default: TISIAGO_GENOME)",
+    )
     ap.add_argument("--half", type=int, default=20, help="window half-width (bp)")
     args = ap.parse_args()
+    if not args.genome:
+        ap.error("--genome is required (or set TISIAGO_GENOME)")
 
     store = Path(args.store)
     m = pd.read_parquet(store / "manifest.parquet")

@@ -14,7 +14,7 @@ ROOT="$(cd "$HERE/.." && pwd)"          # worktree repo root
 cd "$ROOT"
 
 export OBJECTIVE="${OBJECTIVE:?set OBJECTIVE (auprc|auroc|recall1fp|winrate64)}"
-export STORE="${STORE:-/lab/barcheese01/mdiberna/tisiago/data/store}"
+export STORE="${STORE:-$ROOT/data/store}"
 RESULTS="autoresearch/results.tsv"
 LOG="autoresearch/run.log"
 AGENTLOG="autoresearch/agent.log"

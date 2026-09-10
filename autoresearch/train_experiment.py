@@ -20,6 +20,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
 
+from tisiago.manifest import unique_site_indices
+
 # ===================== CONFIG — autoresearch edits this block =====================
 # Feature .npy keys to concatenate (subset of the 14 in data/store/config.yaml).
 FEATURE_KEYS = [
@@ -70,9 +72,10 @@ def main() -> None:
     y = m.label_tis.values
     rng = np.random.default_rng(SEED)
 
-    tr_all = np.where(m.split.values == "train")[0]
-    va = np.where(m.split.values == "val")[0]
-    te = np.where(m.split.values == "test")[0]
+    unique = unique_site_indices(m)
+    tr_all = unique[m.split.values[unique] == "train"]
+    va = unique[m.split.values[unique] == "val"]
+    te = unique[m.split.values[unique] == "test"]
     if len(tr_all) > TRAIN_CAP:
         tr_all = rng.choice(tr_all, TRAIN_CAP, replace=False)
     tr = _subsample_train(tr_all, y, NEG_SUBSAMPLE, rng)

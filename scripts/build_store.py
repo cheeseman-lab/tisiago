@@ -26,7 +26,8 @@ def build_store(cfg: DatasetConfig, git_sha: str) -> Path:
     out = Path(cfg.out_store)
     manifest = pd.read_parquet(out / "manifest.parquet")
     m = len(manifest)
-    assert (manifest.row_idx.values == np.arange(m)).all(), "row_idx must be 0..M-1"
+    if not (manifest.row_idx.values == np.arange(m)).all():
+        raise ValueError("row_idx must be 0..M-1")
     src2cmp = build_src_to_compact(manifest)
     want = [k[:-4].replace("/", "::") for k in cfg.keys]
     arrays, covered = {}, {}
@@ -43,14 +44,16 @@ def build_store(cfg: DatasetConfig, git_sha: str) -> Path:
             covered[w][dst] = True
         print(f"  shard {i}: {int(keep.sum()):,} wanted rows", flush=True)
     missing = set(want) - set(arrays.keys())
-    assert not missing, f"keys missing from shards: {missing}"
+    if missing:
+        raise ValueError(f"keys missing from shards: {missing}")
     keys_meta = {}
     for w, mat in arrays.items():
         op = out / "embeddings" / (w.replace("::", "/") + ".npy")
         op.parent.mkdir(parents=True, exist_ok=True)
         np.save(op, mat)
         cov = int(covered[w].sum())
-        assert cov == m, f"{w}: {cov}/{m} covered"
+        if cov != m:
+            raise ValueError(f"{w}: {cov}/{m} covered")
         keys_meta[w] = {
             "path": str(op.relative_to(out)),
             "dim": int(mat.shape[1]),

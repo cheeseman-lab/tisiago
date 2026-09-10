@@ -9,4 +9,4 @@ device: cuda
 dtype: bfloat16
 embedding_resolution: 1bp
 extract_tracks: false
-alphagenome_weights_path: /lab/barcheese01/mdiberna/gruyerenome/weights/alphagenome-all-folds
+alphagenome_weights_path: ${ALPHAGENOME_WEIGHTS_PATH}

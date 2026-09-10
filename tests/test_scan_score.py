@@ -38,6 +38,6 @@ def test_score_shards_raises_on_incomplete_coverage(tmp_path):
     head = {"predict": lambda X: X[:, 0]}
     try:
         score_shards(tmp_path, "*.npz", manifest, [key + ".npy"], head)
-        assert False, "expected coverage assertion"
-    except AssertionError as e:
+        assert False, "expected coverage failure"
+    except ValueError as e:
         assert "covered" in str(e)

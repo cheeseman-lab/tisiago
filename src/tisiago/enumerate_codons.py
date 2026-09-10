@@ -14,10 +14,13 @@ codon)`` to equal the curated manifest for every existing candidate.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+from tisiago.sequence import spliced_transcript_sequence
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -99,13 +102,6 @@ def parse_gtf_exons(gtf_path: str, keep: set[str] | None = None) -> dict:
     return models
 
 
-_COMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
-
-
-def _revcomp(s: str) -> str:
-    return s.translate(_COMP)[::-1]
-
-
 def enumerate_transcript(tx: str, model: dict, fa) -> "pd.DataFrame":
     """Enumerate every codon of one transcript into a DataFrame.
 
@@ -122,8 +118,7 @@ def enumerate_transcript(tx: str, model: dict, fa) -> "pd.DataFrame":
 
     chrom, strand, exons = model["chrom"], model["strand"], model["exons"]
     coords = spliced_positions(exons, strand)
-    seq = "".join(str(fa[chrom][s:e]) for s, e in exons)
-    mrna = seq if strand == "+" else _revcomp(seq)
+    mrna = spliced_transcript_sequence(fa, model)
     # gstart convention (confirmed against the curated manifest):
     #   + : gstart = coords[i]      ;  - : gstart = coords[i] + 1
     # (so tiling.a_plus_of(gstart, '-') = gstart - 1 = coords[i], the plus-strand A.)
@@ -153,15 +148,19 @@ def main() -> None:
     ap.add_argument("--manifest", default="data/store/manifest.parquet")
     ap.add_argument(
         "--gtf",
-        default="/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf",
+        default=os.environ.get("TISIAGO_GTF"),
+        help="Transcript annotation GTF (default: TISIAGO_GTF)",
     )
     ap.add_argument(
         "--genome",
-        default="/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa",
+        default=os.environ.get("TISIAGO_GENOME"),
+        help="Indexed reference FASTA (default: TISIAGO_GENOME)",
     )
     ap.add_argument("--splits", nargs="+", default=["val", "test"])
     ap.add_argument("--out", default="data/scan_manifest.parquet")
     args = ap.parse_args()
+    if not args.gtf or not args.genome:
+        ap.error("--gtf and --genome are required (or set TISIAGO_GTF/TISIAGO_GENOME)")
 
     man = pd.read_parquet(args.manifest)
     sub = man[man.split.isin(args.splits)]

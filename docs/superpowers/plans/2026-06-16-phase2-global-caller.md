@@ -13,8 +13,8 @@
 eval "$(conda shell.bash hook)" && conda activate tisiago
 ```
 The enumerator needs `pyfaidx` (Task 4 installs it into the env). Reference files:
-- GTF: `/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf`
-- Genome: `/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa`
+- GTF: `/path/to/reference/gencode.annotation.gtf`
+- Genome: `/path/to/reference/genome.fa`
 
 **Coordinate conventions (verified, critical):**
 - GTF coords are **1-based inclusive**; manifest `gstart` is **0-based**.
@@ -361,8 +361,8 @@ import pandas as pd
 import pytest
 from tisiago.enumerate_codons import enumerate_transcript
 
-GENOME = "/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa"
-GTF = "/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf"
+GENOME = "/path/to/reference/genome.fa"
+GTF = "/path/to/reference/gencode.annotation.gtf"
 
 
 @pytest.mark.skipif(not pd.io.common.file_exists(GENOME), reason="genome not present")
@@ -468,8 +468,8 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", default="data/store/manifest.parquet")
-    ap.add_argument("--gtf", default="/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf")
-    ap.add_argument("--genome", default="/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa")
+    ap.add_argument("--gtf", required=True)
+    ap.add_argument("--genome", required=True)
     ap.add_argument("--splits", nargs="+", default=["val", "test"])
     ap.add_argument("--out", default="data/scan_manifest.parquet")
     args = ap.parse_args()

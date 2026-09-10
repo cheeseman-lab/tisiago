@@ -20,9 +20,11 @@ import pandas as pd
 from tisiago.caller import (
     DEFAULT_KEYS,
     TRAIN_SUBSAMPLE,
+    evaluate_at_threshold,
     fit_calibrated_head,
     recall_at_fp_budget,
 )
+from tisiago.manifest import unique_site_indices
 from tisiago.scan_score import score_shards
 
 
@@ -66,8 +68,9 @@ def main() -> None:
     cur = Path(args.curated_store)
     cm = pd.read_parquet(cur / "manifest.parquet")
     cy = cm.label_tis.values
-    tr_all = np.where(cm.split.values == "train")[0]
-    cal = np.where(cm.split.values == "val")[0]
+    unique = unique_site_indices(cm)
+    tr_all = unique[cm.split.values[unique] == "train"]
+    cal = unique[cm.split.values[unique] == "val"]
     tr = rng.choice(tr_all, min(TRAIN_SUBSAMPLE, len(tr_all)), replace=False)
     Xc = _load(args.keys, cur / "embeddings")
     head = fit_calibrated_head(Xc[tr], cy[tr], Xc[cal], cy[cal])
@@ -76,13 +79,29 @@ def main() -> None:
     sm = pd.read_parquet(scan / "manifest.parquet")
     p = score_shards(Path(args.parts_dir), args.glob, sm, args.keys, head)
     te = sm.split.values == "test"
+    va = sm.split.values == "val"
 
     cognate = te & np.isin(sm.codon_class.values, ["AUG", "near_cognate"])
+    val_cognate = va & np.isin(sm.codon_class.values, ["AUG", "near_cognate"])
     noncog = te & (sm.codon_class.values == "non_cognate")
     ys = sm.label_tis.values
-    res = recall_at_fp_budget(
-        p[cognate], ys[cognate], sm.transcript_id.values[cognate], budget=args.budget
-    )
+    has_val_operating_set = bool(val_cognate.any())
+    if has_val_operating_set:
+        selected = recall_at_fp_budget(
+            p[val_cognate],
+            ys[val_cognate],
+            sm.transcript_id.values[val_cognate],
+            budget=args.budget,
+        )
+        res = evaluate_at_threshold(
+            p[cognate], ys[cognate], sm.transcript_id.values[cognate], selected["threshold"]
+        )
+        threshold_note = "VAL-selected"
+    else:
+        res = recall_at_fp_budget(
+            p[cognate], ys[cognate], sm.transcript_id.values[cognate], budget=args.budget
+        )
+        threshold_note = "TEST-optimized oracle; no val rows available"
     npos = int((ys[cognate] == 1).sum())
     ratio = (ys[cognate] == 0).sum() / max(1, npos)
 
@@ -91,7 +110,10 @@ def main() -> None:
         f"non-cognate={int(noncog.sum())}"
     )
     print(f"true imbalance (neg:pos over cognate test codons) = {ratio:.1f}:1  (curated was 3:1)")
-    print(f"\nCALLER @ <={args.budget} FP/transcript (true imbalance):")
+    if has_val_operating_set:
+        print(f"\nCALLER (threshold chosen for <={args.budget} FP/transcript on VAL):")
+    else:
+        print(f"\nCALLER ORACLE @ <={args.budget} FP/transcript ({threshold_note}):")
     print(
         f"  recall={res['recall']:.3f}  threshold p>={res['threshold']:.3f}  "
         f"({res['fp_per_transcript']:.3f} FP/transcript)"

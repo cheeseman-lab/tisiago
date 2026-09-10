@@ -8,15 +8,24 @@
 # Usage:  OBJECTIVE=winrate64 bash run.sh
 set -euo pipefail
 
-STORE="${STORE:-/lab/barcheese01/mdiberna/tisiago/data/store}"
 OBJECTIVE="${OBJECTIVE:-auprc}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/.." && pwd)"
+STORE="${STORE:-$ROOT/data/store}"
+PYTHON="${PYTHON_BIN:-$ROOT/.venv/dev/bin/python}"
+[[ -x "$PYTHON" ]] || {
+    echo "Python not found at $PYTHON; set PYTHON_BIN to a uv-managed environment" >&2
+    exit 2
+}
+SCHEDULER=()
+if [[ -n "${TISIAGO_CPU_PARTITION:-}" ]]; then
+    SCHEDULER+=(--partition="$TISIAGO_CPU_PARTITION")
+fi
 
 # ~4 GB for the headline feature set; the full 14-key concat (52k dim) needs ~40 GB.
-srun --partition=20 --cpus-per-task=4 --mem=64G --time=0:20:00 \
-    bash -c "
-        eval \"\$(conda shell.bash hook)\" && conda activate tisiago
-        cd '$HERE'
-        python train_experiment.py --store '$STORE' --out preds.npz
-        OBJECTIVE='$OBJECTIVE' python evaluate.py --preds preds.npz
-    "
+srun "${SCHEDULER[@]}" --cpus-per-task=4 --mem=64G --time=0:20:00 \
+    bash -c '
+        "$1" "$2" --store "$3" --out "$4"
+        OBJECTIVE="$5" "$1" "$6" --preds "$4"
+    ' _ "$PYTHON" "$HERE/train_experiment.py" "$STORE" "$HERE/preds.npz" \
+    "$OBJECTIVE" "$HERE/evaluate.py"

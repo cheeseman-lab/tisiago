@@ -3,6 +3,10 @@
 Each scoring run (dense_caller --save-preds, efficiency_head --save-preds) writes y/cognate/tx and
 one or more ``p::<head>`` arrays. This recomputes the headline metrics identically across heads so
 the comparison is apples-to-apples, and writes data/head_comparison.tsv.
+
+Legacy files contain TEST predictions only, so recall-at-budget values are explicitly
+named ``oracle_recall``: their thresholds are optimized on TEST and are ranking diagnostics,
+not deployable operating-point estimates.
 """
 
 from __future__ import annotations
@@ -40,14 +44,16 @@ def metrics_for(npz_path) -> list[dict]:
         }
         thr = recall_at_fp_budget(pc, yc, txc, budget=1.0)["threshold"]
         for b in BUDGETS:
-            row[f"recall@{int(b)}FP"] = float(
+            row[f"oracle_recall@{int(b)}FP"] = float(
                 recall_at_fp_budget(pc, yc, txc, budget=b)["recall"]
             )
         row["brier"] = float(reliability(pc, yc)["brier"])
         if noncog is not None:
-            row["noncog_mean_p"] = float(grounding_stats(p[noncog], thr)["mean_p"])
+            row["noncog_mean_p_at_oracle"] = float(
+                grounding_stats(p[noncog], thr)["mean_p"]
+            )
         else:
-            row["noncog_mean_p"] = float("nan")
+            row["noncog_mean_p_at_oracle"] = float("nan")
         rows.append(row)
     return rows
 
@@ -66,8 +72,16 @@ def main() -> None:
         print(f"no prediction files matched {args.glob}")
         return
 
-    cols = ["head", "AUPRC", "recall@1FP", "recall@5FP", "recall@20FP", "noncog_mean_p",
-            "brier", "source"]
+    cols = [
+        "head",
+        "AUPRC",
+        "oracle_recall@1FP",
+        "oracle_recall@5FP",
+        "oracle_recall@20FP",
+        "noncog_mean_p_at_oracle",
+        "brier",
+        "source",
+    ]
     hdr = "".join(f"{c:>16}" if c != "head" else f"{c:<20}" for c in cols)
     print(hdr)
     lines = ["\t".join(cols)]

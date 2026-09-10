@@ -198,7 +198,7 @@ disk remains logged debt for a full 12-key dense run.
 scripts/run_tis_pipeline.sh  N
         │
         ├─ run_tis_extract.sh   (SLURM array, GPU)  ── 3 specs × shards ──▶ data/parts/*.npz
-        │        env: alphagenome / evo2   ·   extract.py
+        │        uv env: alphagenome / evo2   ·   extract.py
         │
         └─ run_tis_assemble.sh  (CPU)  ── store.py ──▶ data/store/
                  env: tisiago
@@ -209,7 +209,7 @@ eval / resolution / caller  (CPU, tisiago env)  ── read-only over data/store
 enumerate_codons.py  (CPU)  ── GENCODE GTF + genome ──▶ data/scan_manifest_allsplits.parquet (62.7M codons)
         │
         ├─ run_tis_scan.sh  (SLURM array, GPU)  ── extract.py ──▶ data/scan_parts_allsplits/*.npz
-        │        env: alphagenome / evo2   ·   evo2 blk28-only config @ --mem=192G
+        │        uv env: alphagenome / evo2   ·   evo2 blk28-only config @ --mem=192G
         ├─ kozak_onehot_scan.py  (CPU)  ── genome ──▶ kozakW20_allsplits.npy (validated vs curated)
         │
         └─ store.py  (CPU)  ──▶ data/scan_store_allsplits/

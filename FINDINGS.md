@@ -254,7 +254,7 @@ untouched; only calibration can move (`scripts/saerens_control.py`):
   head — weighted or not, recalibrated or not — reaches dense.** Reweighting during training
   cannot substitute for the right negative *distribution*; this exhaustively closes D1.
 
-## 9. Richer heads don't beat logistic — 0.300 is the *feature* ceiling (2026-06-24)
+## 9. Richer tested heads don't beat logistic (2026-06-24)
 
 §7 set the dense-trained logistic head at **recall 0.300 @ ≤1 FP/tx, AUPRC 0.307**. The natural
 next question: is the *head* the bottleneck? Phase 3 swaps the classifier while holding everything
@@ -278,10 +278,10 @@ dense val:
   0.303–0.307, recall@1FP 0.300–0.312) at matched 2M scale. Trees nudge the *tightest* operating
   point up ~1 pt (0.31 vs 0.30) but give it back in the mid-range (AUPRC and recall@5FP both
   lower). Nonlinear interaction-learning extracts nothing extra from these frozen-embedding
-  features that a linear boundary misses. **The bottleneck is the features, not the classifier —
-  0.300 is the feature ceiling.** The next lever is richer features (Phase 5 LoRA / fine-tuning),
-  not a fancier head; attention-pooling over Evo2 offsets (the spec's 3c) is correspondingly not
-  worth pursuing. Grounding holds across heads (non-cognate ≈ 0.002, both ≈ 0).
+  features that a linear boundary misses. This single-seed comparison provides no evidence that
+  classifier capacity is limiting; it does not establish an absolute feature ceiling. The next
+  lever is a better frozen representation, not a fancier head or foundation-model training.
+  Grounding holds across heads (non-cognate ≈ 0.002, both ≈ 0).
 - **Phase 4 — continuous efficiency regression (`src/tisiago/efficiency_head.py`).** A Ridge head
   on `log1p(max_norm_HeLa)` predicts efficiency **in-distribution** on curated val at **R² 0.24,
   Spearman ρ 0.30** (best at heavy α=100; the 19.6k features are badly collinear — rcond ~5e-9).
@@ -304,16 +304,27 @@ dense val:
 4. **A linear head is a strong baseline — and stayed best under search _and_ at dense scale.**
    The autoresearch fleet (§6) found logistic best across all four metrics; §9 then confirms it
    against gradient-boosted trees at the true 2M imbalance — XGBoost and LightGBM both land within
-   noise of logistic. **0.300 recall @ ≤1 FP/tx is the feature ceiling, not the head ceiling.**
-5. **The bottleneck is the features — push the encoder next, not the classifier.** Since no head
-   beats logistic on the frozen `ag7` stack (§9), the lift has to come from better representations
-   (Phase 5 LoRA / fine-tuning of the GLM), not richer downstream heads. Efficiency is weakly
+   noise of logistic. This points toward frozen-representation experiments, but the single-seed
+   result is not evidence of an absolute feature ceiling.
+5. **The bottleneck is the features — improve frozen inference next, not the classifier.** Since no
+   head beats logistic on the frozen `ag7` stack (§9), the next comparison is better frozen
+   representations: context/stride ablations, faster Evo2 inference, a smaller checkpoint, and
+   exon-spliced transcript input. Efficiency is weakly
    decodable in-distribution (ρ 0.30, §9) but inherits the same curated→dense shift as every
    curated-trained head — the per-condition `max_norm_*` labels need a dense-distribution training
    substrate to be useful as a caller.
 
 ## Caveats
 
+- **Protocol audit (2026-09-09):** historical recall-at-FP values optimized their threshold on
+  TEST and are oracle ranking diagnostics, not deployable operating points. The current code
+  selects a threshold on a disjoint validation subset. A five-fold transcript cross-fit over the
+  saved TEST predictions reproduced the main oracle point for `Dense(None)` (0.2999 recall,
+  0.821 FP/tx), but the clean calibration/operating/test protocol still requires a full rerun.
+- The curated manifest contains 1,310 duplicated `(transcript_id, mrna_index)` positive rows.
+  Current head paths retain one row per site; historical curated metrics implicitly up-weighted
+  those positives. Historical efficiency regression also treated unexpressed/unmeasured rows as
+  zero; the corrected target now excludes them.
 - Single seed, single 60k train subsample, single chromosome split — solid for
   "does it work", but run proper cross-validation before any figure/claim.
 - Negatives capped at 3× positives; the realistic genome-wide imbalance is larger —
@@ -325,7 +336,7 @@ dense val:
 ## Reproduce
 
 ```bash
-conda activate tisiago
-python -m tisiago.eval        --store data/store        # tables 1 + 2
-python -m tisiago.resolution  --store data/store        # table 3
+PYTHON_BIN="${PYTHON_BIN:-.venv/dev/bin/python}"
+"$PYTHON_BIN" -m tisiago.eval        --store data/store        # tables 1 + 2
+"$PYTHON_BIN" -m tisiago.resolution  --store data/store        # table 3
 ```

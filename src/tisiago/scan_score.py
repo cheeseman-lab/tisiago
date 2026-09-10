@@ -41,7 +41,7 @@ def score_shards(
         np.ndarray of shape (len(manifest),) with probabilities aligned to manifest.row_idx.
 
     Raises:
-        AssertionError: If any wanted row is never seen across shards.
+        ValueError: If any wanted row is never seen across shards.
     """
     # member names carry "::" and no ".npy"; manifest keys are slash paths with ".npy"
     want = [
@@ -65,7 +65,8 @@ def score_shards(
         p[dst] = head["predict"](X)
         covered[dst] = True
     n_cov = int(covered.sum())
-    assert (
-        n_cov == m
-    ), f"covered {n_cov}/{m} rows — shards do not cover all wanted positions"
+    if n_cov != m:
+        raise ValueError(
+            f"covered {n_cov}/{m} rows — shards do not cover all wanted positions"
+        )
     return p

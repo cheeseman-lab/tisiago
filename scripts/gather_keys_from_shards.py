@@ -27,16 +27,28 @@ from tisiago.shard_io import build_src_to_compact, iter_shards, map_rows
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    """Gather selected shard rows into an existing compact experiment store."""
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--parts-dir", required=True, help="Directory of *.npz shard partials.")
-    ap.add_argument("--glob", required=True, help="Which partials to read (e.g. 'evo2_8k_shard*.npz').")
-    ap.add_argument("--exp-store", required=True, help="Compact store with manifest.parquet (src_row_idx).")
+    ap.add_argument(
+        "--glob",
+        required=True,
+        help="Which partials to read (e.g. 'evo2_8k_shard*.npz').",
+    )
+    ap.add_argument(
+        "--exp-store",
+        required=True,
+        help="Compact store with manifest.parquet (src_row_idx).",
+    )
     args = ap.parse_args()
 
     store = Path(args.exp_store)
     manifest = pd.read_parquet(store / "manifest.parquet")
     m = len(manifest)
-    assert (manifest.row_idx.values == np.arange(m)).all(), "manifest row_idx must be 0..M-1 contiguous"
+    if not (manifest.row_idx.values == np.arange(m)).all():
+        raise ValueError("manifest row_idx must be 0..M-1 contiguous")
     if "src_row_idx" not in manifest.columns:
         raise SystemExit("manifest has no src_row_idx column — cannot map shards to compact rows")
 
@@ -45,7 +57,11 @@ def main() -> None:
     parts = sorted(Path(args.parts_dir).glob(args.glob))
     if not parts:
         raise SystemExit(f"No partials matching {args.glob!r} in {args.parts_dir}")
-    print(f"Found {len(parts)} shards matching {args.glob!r}; gathering {m:,} compact rows", flush=True)
+    print(
+        f"Found {len(parts)} shards matching {args.glob!r}; "
+        f"gathering {m:,} compact rows",
+        flush=True,
+    )
 
     arrays: dict[str, np.ndarray] = {}
     covered: dict[str, np.ndarray] = {}
@@ -70,10 +86,21 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         np.save(out_path, mat)
         cov = int(covered[key].sum())
-        prov["keys"][key] = {"path": str(out_path.relative_to(store)), "dim": int(mat.shape[1]), "covered": cov}
+        prov["keys"][key] = {
+            "path": str(out_path.relative_to(store)),
+            "dim": int(mat.shape[1]),
+            "covered": cov,
+        }
         flag = "" if cov == m else f"  !! only {cov}/{m} covered"
-        print(f"  saved {key} -> {out_path.relative_to(store)}  dim={mat.shape[1]} covered={cov}/{m}{flag}", flush=True)
-        assert cov == m, f"{key}: {cov}/{m} rows covered — shards do not cover all wanted rows"
+        print(
+            f"  saved {key} -> {out_path.relative_to(store)}  "
+            f"dim={mat.shape[1]} covered={cov}/{m}{flag}",
+            flush=True,
+        )
+        if cov != m:
+            raise ValueError(
+                f"{key}: {cov}/{m} rows covered — shards do not cover all wanted rows"
+            )
 
     with open(cfg_path, "w") as f:
         yaml.safe_dump(prov, f, default_flow_style=False, sort_keys=False)

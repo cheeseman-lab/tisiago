@@ -13,14 +13,12 @@ on before we apply it to the scan manifest.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from pyfaidx import Fasta
-
-_REF = "/lab/barcheese01/mdiberna/swissisoform-v2/data/reference"
-GENOME = f"{_REF}/Gencode_v49_GRCh38.primary_assembly.genome.fa"
 
 # base -> index 0..3 (A,C,G,T), everything else -> 4 (ignored / all-zero one-hot row)
 _LUT = np.full(256, 4, dtype=np.uint8)
@@ -76,11 +74,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--out", required=True, help="output .npy path")
-    ap.add_argument("--genome", default=GENOME)
+    ap.add_argument(
+        "--genome",
+        default=os.environ.get("TISIAGO_GENOME"),
+        help="indexed reference FASTA (default: TISIAGO_GENOME)",
+    )
     ap.add_argument("--half", type=int, default=20)
     ap.add_argument("--validate", default=None,
                     help="path to a reference kozak npy to assert bit-for-bit equality")
     args = ap.parse_args()
+    if not args.genome:
+        ap.error("--genome is required (or set TISIAGO_GENOME)")
 
     fa = Fasta(args.genome, sequence_always_upper=True, rebuild=False)
     m = pd.read_parquet(args.manifest)
