@@ -10,19 +10,11 @@ from tisiago.linear_head import LinearHeadArtifact
 from tisiago.transcript_inference import TRANSCRIPT_LENGTH_TAG, TRANSCRIPT_OFFSETS
 
 
-def transcript_feature_blocks(
-    request, result: Mapping[str, np.ndarray], *, dtype=np.float16
-):
+def transcript_feature_blocks(request, result: Mapping[str, np.ndarray], *, dtype=np.float16):
     """Align backend rows into candidate blocks quantized like stored features."""
-    member_rows = np.fromiter(
-        (row for row, _, _ in request.requests), dtype=np.int64
-    )
-    member_offsets = np.fromiter(
-        (offset for _, offset, _ in request.requests), dtype=np.int64
-    )
-    source_rows = np.fromiter(
-        (source for _, _, source in request.requests), dtype=np.int64
-    )
+    member_rows = np.fromiter((row for row, _, _ in request.requests), dtype=np.int64)
+    member_offsets = np.fromiter((offset for _, offset, _ in request.requests), dtype=np.int64)
+    source_rows = np.fromiter((source for _, _, source in request.requests), dtype=np.int64)
     output_rows, destination_rows = np.unique(member_rows, return_inverse=True)
     blocks = {}
     for layer, raw_values in result.items():
@@ -34,9 +26,7 @@ def transcript_feature_blocks(
         for offset in TRANSCRIPT_OFFSETS:
             selected = member_offsets == offset
             if int(selected.sum()) != len(output_rows):
-                raise ValueError(
-                    f"{layer}/off{offset}: expected one value per candidate row"
-                )
+                raise ValueError(f"{layer}/off{offset}: expected one value per candidate row")
             block = np.empty((len(output_rows), values.shape[1]), dtype=dtype)
             block[destination_rows[selected]] = values[source_rows[selected]]
             key = f"evo2/{TRANSCRIPT_LENGTH_TAG}/{layer}/off{offset}.npy"
@@ -65,9 +55,7 @@ def validate_txp_artifacts(
         raise ValueError("linear head artifact names must be unique")
     for name, artifact in artifacts.items():
         selected = {
-            key
-            for key in artifact.feature_keys
-            if key.startswith(f"evo2/{TRANSCRIPT_LENGTH_TAG}/")
+            key for key in artifact.feature_keys if key.startswith(f"evo2/{TRANSCRIPT_LENGTH_TAG}/")
         }
         if not selected:
             raise ValueError(f"{name}: artifact contains no TXP feature blocks")
@@ -84,21 +72,13 @@ def project_transcript_result(
     """Return additive TXP logits without building candidate-by-hidden-width blocks."""
     if not artifacts:
         raise ValueError("at least one linear head artifact is required")
-    member_rows = np.fromiter(
-        (row for row, _, _ in request.requests), dtype=np.int64
-    )
-    member_offsets = np.fromiter(
-        (offset for _, offset, _ in request.requests), dtype=np.int64
-    )
-    source_rows = np.fromiter(
-        (source for _, _, source in request.requests), dtype=np.int64
-    )
+    member_rows = np.fromiter((row for row, _, _ in request.requests), dtype=np.int64)
+    member_offsets = np.fromiter((offset for _, offset, _ in request.requests), dtype=np.int64)
+    source_rows = np.fromiter((source for _, _, source in request.requests), dtype=np.int64)
     output_rows, destination_rows = np.unique(member_rows, return_inverse=True)
     expected = {
         name: {
-            key
-            for key in artifact.feature_keys
-            if key.startswith(f"evo2/{TRANSCRIPT_LENGTH_TAG}/")
+            key for key in artifact.feature_keys if key.startswith(f"evo2/{TRANSCRIPT_LENGTH_TAG}/")
         }
         for name, artifact in artifacts.items()
     }
@@ -106,9 +86,7 @@ def project_transcript_result(
         if not keys:
             raise ValueError(f"{name}: artifact contains no TXP feature blocks")
     seen = {name: set() for name in artifacts}
-    projected = {
-        name: np.zeros(len(output_rows), dtype=np.float32) for name in artifacts
-    }
+    projected = {name: np.zeros(len(output_rows), dtype=np.float32) for name in artifacts}
     slices = {name: artifact.feature_slices() for name, artifact in artifacts.items()}
 
     for layer, raw_values in result.items():
@@ -125,9 +103,7 @@ def project_transcript_result(
         for offset in TRANSCRIPT_OFFSETS:
             selected = member_offsets == offset
             if int(selected.sum()) != len(output_rows):
-                raise ValueError(
-                    f"{layer}/off{offset}: expected one value per candidate row"
-                )
+                raise ValueError(f"{layer}/off{offset}: expected one value per candidate row")
             key = f"evo2/{TRANSCRIPT_LENGTH_TAG}/{layer}/off{offset}.npy"
             participating = [name for name in artifacts if key in expected[name]]
             if not participating:

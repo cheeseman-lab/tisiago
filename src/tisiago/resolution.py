@@ -78,12 +78,14 @@ def main():
                     pairs_by_d[d].append((p_i, n_i))
 
     print(f"test candidates={len(te)}  transcripts={len(by_tx)}")
-    print("near-neighbour decoy pairs per distance:",
-          {d: len(pairs_by_d[d]) for d in DISTANCES}, "\n")
+    print(
+        "near-neighbour decoy pairs per distance:", {d: len(pairs_by_d[d]) for d in DISTANCES}, "\n"
+    )
     print(f"{'model':22s} " + " ".join(f"win@{d}bp" for d in DISTANCES) + "   all-AUROC")
     print("-" * 70)
 
     from sklearn.metrics import roc_auc_score
+
     for name, keys in MODELS.items():
         X = load(keys, emb)
         sc = StandardScaler().fit(X[tr])

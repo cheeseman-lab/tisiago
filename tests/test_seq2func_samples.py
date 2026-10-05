@@ -29,21 +29,45 @@ def test_parse_para_without_m0(tmp_path):
 
 def _sheet(tmp_path):
     rows = []
-    lines = [("HeLa", ""), ("K562", ""), ("U2OS", ""), ("RPE1", "Async"),
-             ("RPE1", "Quiescent"), ("RPE1", "Senescent")]
+    lines = [
+        ("HeLa", ""),
+        ("K562", ""),
+        ("U2OS", ""),
+        ("RPE1", "Async"),
+        ("RPE1", "Quiescent"),
+        ("RPE1", "Senescent"),
+    ]
     for cell_line, condition in lines:
         for treatment in ("TIS", "CHX"):
             for kind in ("RPF", "Input"):
                 for rep in (1, 2):
                     sid = f"{cell_line}{condition}_{treatment}_{kind}_{rep}"
-                    rows.append({
-                        "sample_name": sid, "cell_line": cell_line, "condition": condition,
-                        "treatment": treatment, "rep": rep, "type": kind, "sample_id": sid,
-                        "bam_path": f"ribosome_profiling/bam/{sid}.bam", "bedgraph_path": "",
-                    })
-    rows.append({"sample_name": "Harr_iPSC", "cell_line": "iPSC", "condition": "",
-                 "treatment": "Harringtonine", "rep": "", "type": "RPF",
-                 "sample_id": "HarrIPSC", "bam_path": "", "bedgraph_path": "x.bedgraph"})
+                    rows.append(
+                        {
+                            "sample_name": sid,
+                            "cell_line": cell_line,
+                            "condition": condition,
+                            "treatment": treatment,
+                            "rep": rep,
+                            "type": kind,
+                            "sample_id": sid,
+                            "bam_path": f"ribosome_profiling/bam/{sid}.bam",
+                            "bedgraph_path": "",
+                        }
+                    )
+    rows.append(
+        {
+            "sample_name": "Harr_iPSC",
+            "cell_line": "iPSC",
+            "condition": "",
+            "treatment": "Harringtonine",
+            "rep": "",
+            "type": "RPF",
+            "sample_id": "HarrIPSC",
+            "bam_path": "",
+            "bedgraph_path": "x.bedgraph",
+        }
+    )
     sheet_dir = tmp_path / "ribosome_profiling"
     sheet_dir.mkdir()
     pd.DataFrame(rows).to_csv(sheet_dir / "manifest.csv", index=False)

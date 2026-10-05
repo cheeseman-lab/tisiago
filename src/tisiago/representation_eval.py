@@ -25,10 +25,7 @@ KOZAK = "onehot/kozakW20.npy"
 
 def _evo_keys(length_tag: str) -> list[str]:
     """Return the four offset keys for one Evo2 representation."""
-    return [
-        f"evo2/{length_tag}/blocks.28.mlp.l3/off{offset}.npy"
-        for offset in (0, 3, 6, 9)
-    ]
+    return [f"evo2/{length_tag}/blocks.28.mlp.l3/off{offset}.npy" for offset in (0, 3, 6, 9)]
 
 
 REPRESENTATIONS = {
@@ -56,9 +53,7 @@ def sample_training_rows(
     if not len(positive) or not len(negative):
         raise ValueError("training rows must contain both classes")
     if len(negative) > negative_cap:
-        negative = np.random.default_rng(seed).choice(
-            negative, negative_cap, replace=False
-        )
+        negative = np.random.default_rng(seed).choice(negative, negative_cap, replace=False)
     return np.sort(np.concatenate([positive, negative]))
 
 
@@ -107,13 +102,9 @@ def near_neighbor_pairs(
         group_positive = []
         group_negative = []
         for positive_index in positive:
-            near = negative[
-                np.abs(positions[negative] - positions[positive_index]) <= distance
-            ]
+            near = negative[np.abs(positions[negative] - positions[positive_index]) <= distance]
             if len(near):
-                group_positive.append(
-                    np.full(len(near), positive_index, dtype=np.int64)
-                )
+                group_positive.append(np.full(len(near), positive_index, dtype=np.int64))
                 group_negative.append(near)
         if group_positive:
             positive_array = np.concatenate(group_positive)
@@ -144,24 +135,15 @@ def _metrics(
     has_both_classes = len(np.unique(labels)) == 2
     return {
         "auprc": (
-            float(average_precision_score(labels, probability))
-            if np.any(labels)
-            else float("nan")
+            float(average_precision_score(labels, probability)) if np.any(labels) else float("nan")
         ),
-        "auroc": (
-            float(roc_auc_score(labels, probability))
-            if has_both_classes
-            else float("nan")
-        ),
+        "auroc": (float(roc_auc_score(labels, probability)) if has_both_classes else float("nan")),
         "recall": fixed["recall"],
         "precision": float(
-            fixed["true_positives"]
-            / max(1, fixed["true_positives"] + fixed["false_positives"])
+            fixed["true_positives"] / max(1, fixed["true_positives"] + fixed["false_positives"])
         ),
         "fp_per_transcript": fixed["fp_per_transcript"],
-        "winrate64": float(
-            np.mean(probability[positive_pairs] > probability[negative_pairs])
-        )
+        "winrate64": float(np.mean(probability[positive_pairs] > probability[negative_pairs]))
         if len(positive_pairs)
         else float("nan"),
     }
@@ -197,9 +179,7 @@ def _bootstrap(
         "fp_per_transcript",
         "winrate64",
     )
-    metrics = {
-        arm: {name: [] for name in metric_names} for arm in predictions
-    }
+    metrics = {arm: {name: [] for name in metric_names} for arm in predictions}
     for _ in range(n_bootstrap):
         sampled = rng.integers(0, len(groups), size=len(groups))
         rows = np.concatenate([groups[index] for index in sampled])
@@ -218,16 +198,10 @@ def _bootstrap(
             )
             admitted = sampled_probability >= thresholds[arm]
             metrics[arm]["recall"].append(
-                float(
-                    np.sum(admitted & sampled_labels)
-                    / max(1, np.sum(sampled_labels))
-                )
+                float(np.sum(admitted & sampled_labels) / max(1, np.sum(sampled_labels)))
             )
             metrics[arm]["precision"].append(
-                float(
-                    np.sum(admitted & sampled_labels)
-                    / max(1, np.sum(admitted))
-                )
+                float(np.sum(admitted & sampled_labels) / max(1, np.sum(admitted)))
             )
             metrics[arm]["fp_per_transcript"].append(
                 float(np.sum(admitted & ~sampled_labels) / len(sampled))
@@ -256,9 +230,7 @@ def _bootstrap(
         if reference not in metrics or candidate not in metrics:
             continue
         for name in metrics[reference]:
-            difference = np.asarray(metrics[candidate][name]) - np.asarray(
-                metrics[reference][name]
-            )
+            difference = np.asarray(metrics[candidate][name]) - np.asarray(metrics[reference][name])
             paired_rows.append(
                 {
                     "comparison": f"{candidate}-{reference}",
@@ -323,9 +295,7 @@ def main() -> None:
         unknown = requested - available
         if unknown:
             raise ValueError(f"unknown test codon classes: {sorted(unknown)}")
-        test = test[
-            manifest.codon_class.astype(str).isin(requested).to_numpy()[test]
-        ]
+        test = test[manifest.codon_class.astype(str).isin(requested).to_numpy()[test]]
     if not len(train_all) or not len(validation) or not len(test):
         raise ValueError("train, validation, and selected test rows must all be non-empty")
     calibration, operating = split_grouped_indices(
@@ -335,14 +305,10 @@ def main() -> None:
         seed=0,
     )
     train_rows = {
-        seed: sample_training_rows(
-            train_all, labels, negative_cap=args.train_negatives, seed=seed
-        )
+        seed: sample_training_rows(train_all, labels, negative_cap=args.train_negatives, seed=seed)
         for seed in seeds
     }
-    needed = np.unique(
-        np.concatenate([calibration, operating, test, *train_rows.values()])
-    )
+    needed = np.unique(np.concatenate([calibration, operating, test, *train_rows.values()]))
     lookup = np.full(len(manifest), -1, dtype=np.int64)
     lookup[needed] = np.arange(len(needed))
     positive_pairs, negative_pairs, pair_groups = near_neighbor_pairs(manifest, test)
@@ -374,9 +340,7 @@ def main() -> None:
             "calibration": int(len(calibration)),
             "operating": int(len(operating)),
             "test": int(len(test)),
-            "train_by_seed": {
-                str(seed): int(len(rows)) for seed, rows in train_rows.items()
-            },
+            "train_by_seed": {str(seed): int(len(rows)) for seed, rows in train_rows.items()},
         },
         "evaluation_scope": args.evaluation_scope,
     }
@@ -487,9 +451,7 @@ def main() -> None:
                     )
                 )
             stratum_rows.append({"arm": arm, "stratum": stratum, **metrics})
-    pd.DataFrame(stratum_rows).to_csv(
-        output_dir / "stratified_metrics.tsv", sep="\t", index=False
-    )
+    pd.DataFrame(stratum_rows).to_csv(output_dir / "stratified_metrics.tsv", sep="\t", index=False)
     intervals, paired = _bootstrap(
         ensemble_predictions,
         ensemble_thresholds,
@@ -500,9 +462,7 @@ def main() -> None:
     )
     intervals.to_csv(output_dir / "bootstrap_ci.tsv", sep="\t", index=False)
     paired.to_csv(output_dir / "paired_bootstrap_ci.tsv", sep="\t", index=False)
-    (output_dir / "run.json").write_text(
-        json.dumps(run_metadata, indent=2, sort_keys=True) + "\n"
-    )
+    (output_dir / "run.json").write_text(json.dumps(run_metadata, indent=2, sort_keys=True) + "\n")
     print(f"\n{metrics_frame.to_string(index=False)}")
     print(f"\nbootstrap intervals\n{intervals.to_string(index=False)}")
     if len(paired):

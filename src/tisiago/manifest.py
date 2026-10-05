@@ -17,9 +17,7 @@ def transcript_shard_mask(transcript_id, shard_id: int, n_shards: int) -> np.nda
     if not 0 <= shard_id < n_shards:
         raise ValueError("shard_id must satisfy 0 <= shard_id < n_shards")
     unique = transcript_id.unique()
-    assignment = {
-        value: zlib.crc32(str(value).encode()) % n_shards for value in unique
-    }
+    assignment = {value: zlib.crc32(str(value).encode()) % n_shards for value in unique}
     return transcript_id.map(assignment).to_numpy() == shard_id
 
 
@@ -64,10 +62,7 @@ def split_grouped_indices(indices, groups, *, fraction: float = 0.5, seed: int =
     modulus = 10_000
     cutoff = round(fraction * modulus)
     first = np.fromiter(
-        (
-            zlib.crc32(f"{seed}:{group}".encode()) % modulus < cutoff
-            for group in groups
-        ),
+        (zlib.crc32(f"{seed}:{group}".encode()) % modulus < cutoff for group in groups),
         dtype=bool,
         count=len(groups),
     )

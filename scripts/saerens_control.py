@@ -46,13 +46,19 @@ def main() -> None:
         pc_s = saerens(pc, PI_TRAIN, pi_de)
         nc, nc_s = z["p::curated-C"][ncog], saerens(z["p::curated-C"][ncog], PI_TRAIN, pi_de)
         print(f"=== {tag}  (true cognate prior {pi_de:.5f}) ===")
-        print(f"  curated-C  AUPRC raw={average_precision_score(y, pc):.4f}  "
-              f"+Saerens={average_precision_score(y, pc_s):.4f}  (rank-invariant)")
-        print(f"  curated-C  Brier raw={brier_score_loss(y, pc):.4f}  "
-              f"+Saerens={brier_score_loss(y, pc_s):.4f}  (recovers)")
+        print(
+            f"  curated-C  AUPRC raw={average_precision_score(y, pc):.4f}  "
+            f"+Saerens={average_precision_score(y, pc_s):.4f}  (rank-invariant)"
+        )
+        print(
+            f"  curated-C  Brier raw={brier_score_loss(y, pc):.4f}  "
+            f"+Saerens={brier_score_loss(y, pc_s):.4f}  (recovers)"
+        )
         print(f"  curated-C  non-cog mean p raw={nc.mean():.4f}  +Saerens={nc_s.mean():.4f}")
-        print(f"  Dense(None) AUPRC={average_precision_score(y, pd_none):.4f}  "
-              f"Brier={brier_score_loss(y, pd_none):.4f}  <- target\n")
+        print(
+            f"  Dense(None) AUPRC={average_precision_score(y, pd_none):.4f}  "
+            f"Brier={brier_score_loss(y, pd_none):.4f}  <- target\n"
+        )
 
     # Balanced-train arm: does class_weight="balanced" curated training (+ Saerens) help?
     print("--- balanced-train arm (curated class_weight=balanced + Saerens) ---")
@@ -65,12 +71,18 @@ def main() -> None:
         pi_de = float(y.mean())
         pb_s = saerens(pb, PI_TRAIN, pi_de)
         print(f"=== {tag} ===")
-        print(f"  curated-balanced  AUPRC raw={average_precision_score(y, pb):.4f}  "
-              f"+Saerens={average_precision_score(y, pb_s):.4f}  (rank-invariant)")
-        print(f"  curated-balanced  Brier raw={brier_score_loss(y, pb):.4f}  "
-              f"+Saerens={brier_score_loss(y, pb_s):.4f}")
-        print(f"  (curated-unweighted AUPRC={average_precision_score(y, pc):.4f} — balanced "
-              f"does not beat it; both << dense)\n")
+        print(
+            f"  curated-balanced  AUPRC raw={average_precision_score(y, pb):.4f}  "
+            f"+Saerens={average_precision_score(y, pb_s):.4f}  (rank-invariant)"
+        )
+        print(
+            f"  curated-balanced  Brier raw={brier_score_loss(y, pb):.4f}  "
+            f"+Saerens={brier_score_loss(y, pb_s):.4f}"
+        )
+        print(
+            f"  (curated-unweighted AUPRC={average_precision_score(y, pc):.4f} — balanced "
+            f"does not beat it; both << dense)\n"
+        )
 
 
 if __name__ == "__main__":

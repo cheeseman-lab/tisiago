@@ -74,8 +74,7 @@ def build_transcript_request(
     positions = sorted({position for _, _, position in requested})
     position_index = {position: index for index, position in enumerate(positions)}
     requests = [
-        (row_idx, offset, position_index[position])
-        for row_idx, offset, position in requested
+        (row_idx, offset, position_index[position]) for row_idx, offset, position in requested
     ]
 
     sequence = transcript_sequence + ("N" * max(offsets))

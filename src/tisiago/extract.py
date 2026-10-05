@@ -126,8 +126,7 @@ def main() -> None:
     # Stable genomic order improves FASTA locality and makes reruns reproducible.
     tiles.sort(key=lambda tile: (tile.chrom, tile.start, tile.strand))
     print(
-        f"[shard {args.shard_id}] {len(tiles)} tiles "
-        f"(share={len(shard) / max(1, len(tiles)):.2f})",
+        f"[shard {args.shard_id}] {len(tiles)} tiles (share={len(shard) / max(1, len(tiles)):.2f})",
         flush=True,
     )
 
@@ -174,7 +173,7 @@ def main() -> None:
                         output.add(key, member_rows[select], arr[source_rows[select]])
         collect_seconds += time.perf_counter() - stage_started
         if (b // tile_batch) % 50 == 0:
-            print(f"[shard {args.shard_id}] tiles {b+len(batch)}/{len(tiles)}", flush=True)
+            print(f"[shard {args.shard_id}] tiles {b + len(batch)}/{len(tiles)}", flush=True)
 
     write_started = time.perf_counter()
     output.save(

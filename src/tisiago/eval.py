@@ -66,10 +66,7 @@ def main():
         f"train={len(tr)} (subsampled from {len(tr_all)})  test={len(te)}  "
         f"test positive-rate={pos_rate:.3f}\n"
     )
-    print(
-        f"{'feature set':26s} {'dim':>6} {'val AUROC':>10} "
-        f"{'test AUROC':>11} {'test AUPRC':>11}"
-    )
+    print(f"{'feature set':26s} {'dim':>6} {'val AUROC':>10} {'test AUROC':>11} {'test AUPRC':>11}")
     print("-" * 76)
 
     best_key, best = None, None
@@ -91,9 +88,7 @@ def main():
     # one small MLP on the best logistic feature set, to see if nonlinearity helps
     print("-" * 76)
     Xtr, Xte = best_sc.transform(best_X[tr]), best_sc.transform(best_X[te])
-    mlp = MLPClassifier(
-        hidden_layer_sizes=(256,), max_iter=60, early_stopping=True, random_state=0
-    )
+    mlp = MLPClassifier(hidden_layer_sizes=(256,), max_iter=60, early_stopping=True, random_state=0)
     mlp.fit(Xtr, y[tr])
     p_mlp = mlp.predict_proba(Xte)[:, 1]
     print(

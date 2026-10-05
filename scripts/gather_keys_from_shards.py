@@ -58,8 +58,7 @@ def main() -> None:
     if not parts:
         raise SystemExit(f"No partials matching {args.glob!r} in {args.parts_dir}")
     print(
-        f"Found {len(parts)} shards matching {args.glob!r}; "
-        f"gathering {m:,} compact rows",
+        f"Found {len(parts)} shards matching {args.glob!r}; gathering {m:,} compact rows",
         flush=True,
     )
 
@@ -98,9 +97,7 @@ def main() -> None:
             flush=True,
         )
         if cov != m:
-            raise ValueError(
-                f"{key}: {cov}/{m} rows covered — shards do not cover all wanted rows"
-            )
+            raise ValueError(f"{key}: {cov}/{m} rows covered — shards do not cover all wanted rows")
 
     with open(cfg_path, "w") as f:
         yaml.safe_dump(prov, f, default_flow_style=False, sort_keys=False)

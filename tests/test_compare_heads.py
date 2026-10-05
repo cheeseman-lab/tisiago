@@ -1,4 +1,5 @@
 """compare_heads recomputes the headline metrics per head from saved .npz prediction files."""
+
 import numpy as np
 
 from scripts.compare_heads import metrics_for

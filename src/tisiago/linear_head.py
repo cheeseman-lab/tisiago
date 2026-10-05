@@ -174,9 +174,7 @@ class LinearHeadArtifact:
                     intercept=np.asarray(self.intercept, dtype=np.float64),
                     isotonic_x=self.isotonic_x,
                     isotonic_y=self.isotonic_y,
-                    operating_threshold=np.asarray(
-                        self.operating_threshold, dtype=np.float64
-                    ),
+                    operating_threshold=np.asarray(self.operating_threshold, dtype=np.float64),
                 )
             os.replace(tmp_path, path)
         except BaseException:

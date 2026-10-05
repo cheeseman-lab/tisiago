@@ -29,9 +29,7 @@ def validate_sparse_dense_parity(
         raise AssertionError("backend returned the wrong number of sequences")
     primary_layer = getattr(backend, "layer_names", [None])[0]
     maximum_error = 0.0
-    for dense_output, sparse_output, selected in zip(
-        dense, sparse, positions, strict=True
-    ):
+    for dense_output, sparse_output, selected in zip(dense, sparse, positions, strict=True):
         sparse_layers = _layer_map(sparse_output)
         key = primary_layer if primary_layer in sparse_layers else "embedding"
         expected = np.asarray(dense_output)[np.asarray(selected, dtype=np.int64)]
@@ -104,9 +102,7 @@ def validate_causal_suffix_invariance(
     errors = {}
     for layer in ref_layers:
         expected, observed = ref_layers[layer], changed_layers[layer]
-        error = float(
-            np.max(np.abs(expected.astype(np.float64) - observed))
-        )
+        error = float(np.max(np.abs(expected.astype(np.float64) - observed)))
         errors[layer] = error
         if not np.allclose(expected, observed, rtol=rtol, atol=atol):
             raise AssertionError(
@@ -141,17 +137,14 @@ def mutation_influence_profile(
         sequences.append("".join(mutated))
     outputs = backend.embed_positions(sequences, [[position]] * len(sequences))
     reference = _layer_map(outputs[0])
-    profile: dict[str, dict[int, tuple[float, float]]] = {
-        layer: {} for layer in reference
-    }
+    profile: dict[str, dict[int, tuple[float, float]]] = {layer: {} for layer in reference}
     for delta, output in zip(deltas, outputs[1:], strict=True):
         changed = _layer_map(output)
         if reference.keys() != changed.keys():
             raise AssertionError("mutation-profile layer keys differ")
         for layer in reference:
             difference = np.abs(
-                reference[layer].astype(np.float64)
-                - changed[layer].astype(np.float64)
+                reference[layer].astype(np.float64) - changed[layer].astype(np.float64)
             )
             profile[layer][delta] = (
                 float(np.max(difference)),
@@ -187,8 +180,7 @@ def validate_current_base_sensitivity(
         layer: float(
             np.max(
                 np.abs(
-                    ref_layers[layer].astype(np.float64)
-                    - changed_layers[layer].astype(np.float64)
+                    ref_layers[layer].astype(np.float64) - changed_layers[layer].astype(np.float64)
                 )
             )
         )
@@ -239,10 +231,7 @@ def main() -> None:
     config = Config.from_yaml(args.config)
     backend = load_backend(config)
     sequences = _validation_sequences(args.length)
-    positions = [
-        [args.length // 4, args.length // 2, 3 * args.length // 4]
-        for _ in sequences
-    ]
+    positions = [[args.length // 4, args.length // 2, 3 * args.length // 4] for _ in sequences]
     sparse_error = validate_sparse_dense_parity(
         backend, sequences, positions, rtol=args.rtol, atol=args.atol
     )
@@ -264,8 +253,7 @@ def main() -> None:
                     for delta, (maximum, mean) in effects.items()
                 )
                 print(
-                    f"DIAGNOSTIC mutation influence {layer} "
-                    f"(delta:max/mean): {detail}",
+                    f"DIAGNOSTIC mutation influence {layer} (delta:max/mean): {detail}",
                     flush=True,
                 )
         try:
@@ -281,9 +269,7 @@ def main() -> None:
                 raise
             print(f"AUDIT suffix-sensitive backend (allowed by input design): {error}")
         else:
-            detail = ", ".join(
-                f"{layer}={error:.3g}" for layer, error in errors.items()
-            )
+            detail = ", ".join(f"{layer}={error:.3g}" for layer, error in errors.items())
             print(f"PASS causal suffix invariance max_abs_error: {detail}")
         effects = validate_current_base_sensitivity(
             backend,

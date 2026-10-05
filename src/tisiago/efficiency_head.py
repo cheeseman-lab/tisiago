@@ -124,15 +124,21 @@ def main() -> None:
     tr = (m.split.values == "train") & eligible
     va = (m.split.values == "val") & eligible
     X = _load_full(cur / "embeddings", keys)
-    print(f"curated: train={int(tr.sum())} val={int(va.sum())} dim={X.shape[1]} "
-          f"target={args.target} (nonzero={int((y_full > 0).sum())})", flush=True)
+    print(
+        f"curated: train={int(tr.sum())} val={int(va.sum())} dim={X.shape[1]} "
+        f"target={args.target} (nonzero={int((y_full > 0).sum())})",
+        flush=True,
+    )
 
     best = None
     for alpha in [float(a) for a in args.alphas.split(",")]:
         head = fit_efficiency_head(X[tr], y_full[tr], X[va], y_full[va], alpha=alpha)
         mt = head["metrics"]
-        print(f"alpha={alpha:>8.2f}  R2={mt['r2_val']:.4f}  rho={mt['spearman_val']:.4f}  "
-              f"rmse={mt['rmse_val']:.4f}", flush=True)
+        print(
+            f"alpha={alpha:>8.2f}  R2={mt['r2_val']:.4f}  rho={mt['spearman_val']:.4f}  "
+            f"rmse={mt['rmse_val']:.4f}",
+            flush=True,
+        )
         if best is None or mt["spearman_val"] > best[1]["metrics"]["spearman_val"]:
             best = (alpha, head)
 
@@ -144,9 +150,9 @@ def main() -> None:
     sm = pd.read_parquet(Path(args.scan_store) / "manifest.parquet")
     te = np.where(sm.split.values == "test")[0]
     cog = np.isin(sm.codon_class.values[te], ["AUG", "near_cognate"])
-    preds = _predict_chunked(
-        Path(args.scan_store) / "embeddings", keys, {"ridge": head}, te
-    )["ridge"]
+    preds = _predict_chunked(Path(args.scan_store) / "embeddings", keys, {"ridge": head}, te)[
+        "ridge"
+    ]
     yc = sm.label_tis.values[te][cog]
     txc = sm.transcript_id.values[te][cog]
     out = evaluate_as_classifier(preds[cog], yc, txc, budgets=(1.0, 5.0, 20.0))
@@ -156,9 +162,13 @@ def main() -> None:
     print("\nCAVEAT: trained curated / evaluated dense (FINDINGS §5 shift) — interpret with care.")
 
     if args.save_preds:
-        np.savez(args.save_preds, y=sm.label_tis.values[te], cognate=cog,
-                 tx=sm.transcript_id.values[te].astype(str),
-                 **{"p::Ridge(eff)": preds})
+        np.savez(
+            args.save_preds,
+            y=sm.label_tis.values[te],
+            cognate=cog,
+            tx=sm.transcript_id.values[te].astype(str),
+            **{"p::Ridge(eff)": preds},
+        )
         print(f"saved -> {args.save_preds}")
 
 

@@ -27,9 +27,7 @@ def assemble_partial_logits(
     """Assemble projected transcript shards into aligned additive-logit vectors."""
     if n_rows < 0 or not artifact_names:
         raise ValueError("n_rows must be non-negative and artifact_names non-empty")
-    partials = {
-        name: np.empty(n_rows, dtype=np.float32) for name in artifact_names
-    }
+    partials = {name: np.empty(n_rows, dtype=np.float32) for name in artifact_names}
     covered = np.zeros(n_rows, dtype=bool)
     n_shards = 0
     expected = {f"partial_logit::{name}" for name in artifact_names}
@@ -43,9 +41,7 @@ def assemble_partial_logits(
         if set(members) != expected:
             missing = sorted(expected - members.keys())
             extra = sorted(members.keys() - expected)
-            raise ValueError(
-                f"projected shard members differ: missing={missing}, extra={extra}"
-            )
+            raise ValueError(f"projected shard members differ: missing={missing}, extra={extra}")
         for name in artifact_names:
             values = np.asarray(members[f"partial_logit::{name}"])
             if values.shape == (len(rows), 1):
@@ -94,9 +90,7 @@ def score_projected_blocks(
             raise ValueError(f"{key}: expected ({n_rows}, width), got {array.shape}")
         arrays[key] = array
 
-    predictions = {
-        name: np.empty(n_rows, dtype=np.float64) for name in artifacts
-    }
+    predictions = {name: np.empty(n_rows, dtype=np.float64) for name in artifacts}
     for start in range(0, n_rows, chunk_size):
         end = min(start + chunk_size, n_rows)
         for name, artifact in artifacts.items():

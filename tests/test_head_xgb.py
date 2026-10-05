@@ -1,5 +1,6 @@
 # tests/test_head_xgb.py
 """Contract tests for tree-ensemble TIS heads: predict() returns calibrated [0,1] probs."""
+
 import numpy as np
 import pytest
 

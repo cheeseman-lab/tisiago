@@ -33,24 +33,15 @@ def _request():
 def test_transcript_feature_blocks_align_candidates_and_offsets():
     values = np.arange(12, dtype=np.float32).reshape(6, 2)
 
-    rows, blocks = transcript_feature_blocks(
-        _request(), {"blocks.28.mlp.l3": values}
-    )
+    rows, blocks = transcript_feature_blocks(_request(), {"blocks.28.mlp.l3": values})
 
     np.testing.assert_array_equal(rows, [4, 9])
-    np.testing.assert_array_equal(
-        blocks["evo2/TXP/blocks.28.mlp.l3/off0.npy"], values[[2, 0]]
-    )
-    np.testing.assert_array_equal(
-        blocks["evo2/TXP/blocks.28.mlp.l3/off9.npy"], values[[5, 3]]
-    )
+    np.testing.assert_array_equal(blocks["evo2/TXP/blocks.28.mlp.l3/off0.npy"], values[[2, 0]])
+    np.testing.assert_array_equal(blocks["evo2/TXP/blocks.28.mlp.l3/off9.npy"], values[[5, 3]])
 
 
 def test_projected_txp_partial_matches_blockwise_artifact_projection():
-    keys = tuple(
-        f"evo2/TXP/blocks.28.mlp.l3/off{offset}.npy"
-        for offset in (0, 3, 6, 9)
-    )
+    keys = tuple(f"evo2/TXP/blocks.28.mlp.l3/off{offset}.npy" for offset in (0, 3, 6, 9))
     artifact = LinearHeadArtifact(
         feature_keys=("other/model.npy", *keys),
         feature_dims=(1, 2, 2, 2, 2),
@@ -63,9 +54,7 @@ def test_projected_txp_partial_matches_blockwise_artifact_projection():
     result = {"blocks.28.mlp.l3": np.arange(12, dtype=np.float32).reshape(6, 2)}
     rows, blocks = transcript_feature_blocks(_request(), result)
 
-    projected_rows, partials = project_transcript_result(
-        _request(), result, {"seed0": artifact}
-    )
+    projected_rows, partials = project_transcript_result(_request(), result, {"seed0": artifact})
 
     np.testing.assert_array_equal(projected_rows, rows)
     expected = artifact.partial_logit_from_blocks({key: blocks[key] for key in keys})
@@ -84,9 +73,7 @@ def test_txp_artifact_schema_validation_rejects_wrong_layer():
     )
 
     try:
-        validate_txp_artifacts(
-            {"head": artifact}, txp_feature_keys(["blocks.28.mlp.l3"])
-        )
+        validate_txp_artifacts({"head": artifact}, txp_feature_keys(["blocks.28.mlp.l3"]))
         raise AssertionError("a wrong TXP layer should fail before extraction")
     except ValueError as error:
         assert "not configured" in str(error)

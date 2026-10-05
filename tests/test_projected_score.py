@@ -42,9 +42,7 @@ def test_projected_score_matches_full_block_prediction(tmp_path):
     path = tmp_path / "other"
     path.mkdir()
     np.save(path / "model.npy", external)
-    txp_partial = artifact.partial_logit_from_blocks(
-        {"evo2/TXP/layer/off0.npy": txp}
-    )
+    txp_partial = artifact.partial_logit_from_blocks({"evo2/TXP/layer/off0.npy": txp})
 
     observed = score_projected_blocks(
         {"seed0": artifact},

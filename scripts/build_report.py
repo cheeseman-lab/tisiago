@@ -9,7 +9,9 @@ OUT.parent.mkdir(parents=True, exist_ok=True)
 
 def img64(p):
     p = Path(p)
-    return "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode() if p.exists() else ""
+    return (
+        "data:image/png;base64," + base64.b64encode(p.read_bytes()).decode() if p.exists() else ""
+    )
 
 
 PLOT_BEST = img64("autoresearch/plots/best_vs_floor.png")
@@ -17,18 +19,24 @@ PLOT_TRAJ = img64("autoresearch/plots/trajectories.png")
 
 # --- codon-track diagram: same transcript framed as 3:1 vs codon-aware ---
 N, START = 42, 9
-COGNATE = {5, 9, 14, 21, 27, 33, 38}   # AUG/near-cognate positions (the start is one of them)
-DECOY3 = {5, 21, 38}                    # the 3 matched decoys the 3:1 set uses as negatives
+COGNATE = {5, 9, 14, 21, 27, 33, 38}  # AUG/near-cognate positions (the start is one of them)
+DECOY3 = {5, 21, 38}  # the 3 matched decoys the 3:1 set uses as negatives
 _c = lambda cls: f'<i class="c {cls}"></i>'  # noqa: E731
 T_3TO1 = "".join(_c("pos" if i == START else "dec" if i in DECOY3 else "ign") for i in range(N))
 T_CODON = "".join(_c("pos" if i == START else "neg" if i in COGNATE else "non") for i in range(N))
 
+
 # --- shard chips (representative subset of 80, colored by partition) ---
 def _shards():
     out = "".join(f'<span class="sh a6">{i}</span>' for i in range(6))
-    out += '<span class="shx">&hellip;</span>' + "".join(f'<span class="sh a1">{i}</span>' for i in (48, 49))
-    out += '<span class="shx">&hellip;</span>' + "".join(f'<span class="sh l4">{i}</span>' for i in (78, 79))
+    out += '<span class="shx">&hellip;</span>' + "".join(
+        f'<span class="sh a1">{i}</span>' for i in (48, 49)
+    )
+    out += '<span class="shx">&hellip;</span>' + "".join(
+        f'<span class="sh l4">{i}</span>' for i in (78, 79)
+    )
     return out
+
 
 SHARDS = _shards()
 
@@ -44,7 +52,9 @@ EMB_ROWS = "".join(
 # --- worked example: one DNA region -> per-position embeddings -> 3 predictions ---
 EX_SEQ = ["GCU", "ACG", "GAC", "AUG", "CUC", "GGA", "CUG", "UAC", "GCA", "AAA", "UUC", "GGC"]
 EX_ROLE = {3: "pos", 6: "dec", 9: "non"}  # start / near-cognate decoy / non-cognate
-EX_CODONS = "".join(f'<span class="cod {EX_ROLE.get(i, "f")}">{c}</span>' for i, c in enumerate(EX_SEQ))
+EX_CODONS = "".join(
+    f'<span class="cod {EX_ROLE.get(i, "f")}">{c}</span>' for i, c in enumerate(EX_SEQ)
+)
 EX_VECS = "".join(f'<span class="vec {EX_ROLE.get(i, "f")}"></span>' for i in range(len(EX_SEQ)))
 
 SLIDES = f"""
@@ -373,4 +383,4 @@ go(0);
 </script></body></html>"""
 
 OUT.write_text(HTML.replace("__SLIDES__", SLIDES))
-print(f"wrote {OUT}  ({OUT.stat().st_size/1024:.0f} KB, {SLIDES.count('<section')} slides)")
+print(f"wrote {OUT}  ({OUT.stat().st_size / 1024:.0f} KB, {SLIDES.count('<section')} slides)")

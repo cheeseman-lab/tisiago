@@ -25,11 +25,30 @@ def predict_command(
     """Jimmy's pooled ``ribotish predict``; ``estimate`` isolates the background file."""
     join = lambda paths: ",".join(str(p) for p in paths)  # noqa: E731
     return [
-        str(ribotish), "predict",
-        "-t", join(tis_bams), "-b", join(chx_bams),
-        "--tispara", join(tis_paras), "--ribopara", join(chx_paras),
-        "-g", str(gtf), "-f", str(fasta), "-o", str(output), "-e", str(estimate),
-        "--minaalen", "3", "--alt", "--seq", "--aaseq", "--verbose",
+        str(ribotish),
+        "predict",
+        "-t",
+        join(tis_bams),
+        "-b",
+        join(chx_bams),
+        "--tispara",
+        join(tis_paras),
+        "--ribopara",
+        join(chx_paras),
+        "-g",
+        str(gtf),
+        "-f",
+        str(fasta),
+        "-o",
+        str(output),
+        "-e",
+        str(estimate),
+        "--minaalen",
+        "3",
+        "--alt",
+        "--seq",
+        "--aaseq",
+        "--verbose",
     ]
 
 

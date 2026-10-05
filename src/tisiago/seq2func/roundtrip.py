@@ -45,19 +45,25 @@ def run_condition(
     inputs = prepare_inputs(condition, Path(tracks_dir).resolve(), work_dir)
     output = work_dir / f"{condition}_TIS_predict.txt"
     argv = predict_command(
-        ribotish, inputs["tis_bams"], inputs["chx_bams"], inputs["tis_paras"],
+        ribotish,
+        inputs["tis_bams"],
+        inputs["chx_bams"],
+        inputs["tis_paras"],
         inputs["chx_paras"],
         atis_root / "reference" / "gencode.v49.primary_assembly.annotation.gtf",
         atis_root / "reference" / "Gencode_v49_GRCh38.primary_assembly.genome.fa",
-        output, work_dir / "tisBackground.txt",
+        output,
+        work_dir / "tisBackground.txt",
     )
     subprocess.run(argv, check=True, cwd=work_dir)
     ours = pd.read_csv(work_dir / f"{condition}_TIS_predict_all.txt", sep="\t")
     jimmy = pd.read_csv(
         atis_root / "ribotish" / "combined" / f"{condition}_TIS_predict_all.txt", sep="\t"
     )
-    report = {"condition": condition, **compare_calls(filter_predictions(ours),
-                                                      filter_predictions(jimmy))}
+    report = {
+        "condition": condition,
+        **compare_calls(filter_predictions(ours), filter_predictions(jimmy)),
+    }
     report["passed"] = report["jaccard"] >= PASS_JACCARD
     return report
 

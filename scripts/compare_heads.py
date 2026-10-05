@@ -49,9 +49,7 @@ def metrics_for(npz_path) -> list[dict]:
             )
         row["brier"] = float(reliability(pc, yc)["brier"])
         if noncog is not None:
-            row["noncog_mean_p_at_oracle"] = float(
-                grounding_stats(p[noncog], thr)["mean_p"]
-            )
+            row["noncog_mean_p_at_oracle"] = float(grounding_stats(p[noncog], thr)["mean_p"])
         else:
             row["noncog_mean_p_at_oracle"] = float("nan")
         rows.append(row)

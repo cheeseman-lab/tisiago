@@ -25,23 +25,50 @@ from dataclasses import dataclass
 # Model tile specs. window/step in bp; offsets applied on top of each candidate
 # (Evo-2 grabs downstream Kozak/frame positions its causality hides at the codon).
 MODEL_SPECS: dict[str, dict] = {
-    "ag16k": {"backend": "alphagenome_jax", "window": 16384, "placement": "centered",
-              "step": 8192, "offsets": [0], "length_tag": "L16k"},
-    "ag131k": {"backend": "alphagenome_jax", "window": 131072, "placement": "centered",
-               "step": 65536, "offsets": [0], "length_tag": "L131k"},
-    "evo2_8k": {"backend": "evo2", "window": 8192, "placement": "left_heavy",
-                "step": 2048, "up_anchor": 5120, "offsets": [0, 3, 6, 9], "length_tag": "W8k"},
+    "ag16k": {
+        "backend": "alphagenome_jax",
+        "window": 16384,
+        "placement": "centered",
+        "step": 8192,
+        "offsets": [0],
+        "length_tag": "L16k",
+    },
+    "ag131k": {
+        "backend": "alphagenome_jax",
+        "window": 131072,
+        "placement": "centered",
+        "step": 65536,
+        "offsets": [0],
+        "length_tag": "L131k",
+    },
+    "evo2_8k": {
+        "backend": "evo2",
+        "window": 8192,
+        "placement": "left_heavy",
+        "step": 2048,
+        "up_anchor": 5120,
+        "offsets": [0, 3, 6, 9],
+        "length_tag": "W8k",
+    },
     # Frozen-inference ablations. Their distinct length tags prevent accidental
     # mixing with the established W8k/S2k feature distribution. Retrain the small
     # downstream head before comparing either variant.
     "evo2_8k_s4k": {
-        "backend": "evo2", "window": 8192, "placement": "left_heavy",
-        "step": 4096, "up_anchor": 5120, "offsets": [0, 3, 6, 9],
+        "backend": "evo2",
+        "window": 8192,
+        "placement": "left_heavy",
+        "step": 4096,
+        "up_anchor": 5120,
+        "offsets": [0, 3, 6, 9],
         "length_tag": "W8kS4k",
     },
     "evo2_4k": {
-        "backend": "evo2", "window": 4096, "placement": "left_heavy",
-        "step": 2048, "up_anchor": 3000, "offsets": [0, 3, 6, 9],
+        "backend": "evo2",
+        "window": 4096,
+        "placement": "left_heavy",
+        "step": 2048,
+        "up_anchor": 3000,
+        "offsets": [0, 3, 6, 9],
         "length_tag": "W4k",
     },
 }

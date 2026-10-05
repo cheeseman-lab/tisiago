@@ -89,6 +89,4 @@ def test_transcript_request_rejects_coordinate_or_annotation_mismatch():
 def test_transcript_keys_have_a_distinct_feature_namespace():
     keys = expected_transcript_keys(["blocks.28.mlp.l3"])
     assert TRANSCRIPT_LENGTH_TAG == "TXP"
-    assert keys == {
-        f"evo2::TXP::blocks.28.mlp.l3::off{offset}" for offset in (0, 3, 6, 9)
-    }
+    assert keys == {f"evo2::TXP::blocks.28.mlp.l3::off{offset}" for offset in (0, 3, 6, 9)}

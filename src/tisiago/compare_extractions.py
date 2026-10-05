@@ -38,9 +38,7 @@ def compare_extraction_artifacts(
             expected = reference[key]
             observed = candidate[key]
             if expected.shape != observed.shape:
-                raise AssertionError(
-                    f"{key}: shape mismatch {expected.shape} != {observed.shape}"
-                )
+                raise AssertionError(f"{key}: shape mismatch {expected.shape} != {observed.shape}")
             if not (np.isfinite(expected).all() and np.isfinite(observed).all()):
                 raise AssertionError(f"{key}: artifact contains non-finite values")
 

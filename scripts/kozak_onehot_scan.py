@@ -80,8 +80,11 @@ def main() -> None:
         help="indexed reference FASTA (default: TISIAGO_GENOME)",
     )
     ap.add_argument("--half", type=int, default=20)
-    ap.add_argument("--validate", default=None,
-                    help="path to a reference kozak npy to assert bit-for-bit equality")
+    ap.add_argument(
+        "--validate",
+        default=None,
+        help="path to a reference kozak npy to assert bit-for-bit equality",
+    )
     args = ap.parse_args()
     if not args.genome:
         ap.error("--genome is required (or set TISIAGO_GENOME)")

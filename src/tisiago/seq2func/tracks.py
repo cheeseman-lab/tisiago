@@ -23,9 +23,7 @@ def track_prefix(out_dir: str | Path, condition: str, library: str, rep: int | s
     return Path(out_dir) / condition / f"{library}_rep{rep}"
 
 
-def count_positions(
-    bam_path: str | Path, position_fn: Callable
-) -> dict[tuple[str, str], Counter]:
+def count_positions(bam_path: str | Path, position_fn: Callable) -> dict[tuple[str, str], Counter]:
     """Count reads per (chrom, strand) at the position returned by ``position_fn``."""
     counts: dict[tuple[str, str], Counter] = {}
     with pysam.AlignmentFile(bam_path, "rb") as bam:

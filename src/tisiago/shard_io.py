@@ -25,9 +25,7 @@ def build_src_to_compact(manifest: pd.DataFrame) -> np.ndarray:
     return src2cmp
 
 
-def map_rows(
-    rows: np.ndarray, src2cmp: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
+def map_rows(rows: np.ndarray, src2cmp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Map shard row indices to compact indices, masking out-of-range and unwanted.
 
     Args:
@@ -45,9 +43,7 @@ def map_rows(
     return keep, cmp[keep]
 
 
-def iter_shards(
-    parts_dir: Path, glob: str
-) -> Iterator[tuple[np.ndarray, dict[str, np.ndarray]]]:
+def iter_shards(parts_dir: Path, glob: str) -> Iterator[tuple[np.ndarray, dict[str, np.ndarray]]]:
     """Iterate over shards, yielding row indices and member arrays.
 
     Args:

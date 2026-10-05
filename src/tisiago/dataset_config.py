@@ -16,8 +16,7 @@ def _expand_environment(value):
     """Expand required environment variables and ``~`` in configuration values."""
     if isinstance(value, str):
         names = {
-            match.group(1) or match.group(2)
-            for match in _ENVIRONMENT_VARIABLE.finditer(value)
+            match.group(1) or match.group(2) for match in _ENVIRONMENT_VARIABLE.finditer(value)
         }
         missing = sorted(name for name in names if name not in os.environ)
         if missing:

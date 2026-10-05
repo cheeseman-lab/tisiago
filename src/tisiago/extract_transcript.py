@@ -126,9 +126,7 @@ def main() -> None:
     missing = required - set(manifest.columns)
     if missing:
         raise ValueError(f"manifest is missing columns: {sorted(missing)}")
-    mask = transcript_shard_mask(
-        manifest.transcript_id, args.shard_id, args.n_shards
-    )
+    mask = transcript_shard_mask(manifest.transcript_id, args.shard_id, args.n_shards)
     shard = manifest[mask]
     row_idx = np.sort(shard.row_idx.to_numpy(dtype=np.int64))
     if len(np.unique(row_idx)) != len(row_idx):
@@ -139,9 +137,7 @@ def main() -> None:
     output_kind = "logits" if artifacts else "shard"
     out_path = out_dir / f"evo2_txp_{output_kind}{args.shard_id:05d}.npz"
     resume_keys = expected_keys if len(row_idx) else set()
-    if not args.dry_run and args.resume and shard_is_complete(
-        out_path, row_idx, resume_keys
-    ):
+    if not args.dry_run and args.resume and shard_is_complete(out_path, row_idx, resume_keys):
         print(f"[shard {args.shard_id}] complete output exists; skipping {out_path}")
         return
     if len(shard) == 0:
@@ -187,9 +183,7 @@ def main() -> None:
     if config is None:  # narrowed by the dry-run return above
         raise AssertionError("real extraction requires a parsed gruyerenome config")
     backend = load_backend(config)
-    output = PreallocatedShard(
-        row_idx, dtype=np.float32 if artifacts else np.float16
-    )
+    output = PreallocatedShard(row_idx, dtype=np.float32 if artifacts else np.float16)
     inference_seconds = collect_seconds = 0.0
     completed = 0
     group_start = 0
@@ -210,17 +204,11 @@ def main() -> None:
             stage_started = time.perf_counter()
             for item, result in zip(batch, results, strict=True):
                 if artifacts:
-                    projected_rows, partials = project_transcript_result(
-                        item, result, artifacts
-                    )
+                    projected_rows, partials = project_transcript_result(item, result, artifacts)
                     for name, values in partials.items():
-                        output.add(
-                            f"partial_logit::{name}", projected_rows, values[:, None]
-                        )
+                        output.add(f"partial_logit::{name}", projected_rows, values[:, None])
                 else:
-                    member_rows = np.fromiter(
-                        (row for row, _, _ in item.requests), dtype=np.int64
-                    )
+                    member_rows = np.fromiter((row for row, _, _ in item.requests), dtype=np.int64)
                     member_offsets = np.fromiter(
                         (offset for _, offset, _ in item.requests), dtype=np.int64
                     )

@@ -176,13 +176,18 @@ def train_heads(curated_store: Path, keys=KEYS_7, only=None) -> dict:
     if only is not None:
         specs = {n: specs[n] for n in only}
     return {
-        name: fit_calibrated_head(X[tr], y[tr], X[cal], y[cal], **kw)
-        for name, kw in specs.items()
+        name: fit_calibrated_head(X[tr], y[tr], X[cal], y[cal], **kw) for name, kw in specs.items()
     }
 
 
-def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, seed: int = 0,
-                      head: str = "logistic", tree_params: dict | None = None) -> dict:
+def train_heads_dense(
+    scan_store: Path,
+    keys=KEYS_7,
+    neg_cap: int = 2_000_000,
+    seed: int = 0,
+    head: str = "logistic",
+    tree_params: dict | None = None,
+) -> dict:
     """Train heads on the dense scan TRAIN split at (near-)true imbalance.
 
     The key experiment: instead of the curated 3:1 set, train on the *genome-scale* negative
@@ -209,8 +214,11 @@ def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, s
     cal_idx, operating_idx = split_grouped_indices(
         va, sm.transcript_id.values[va], fraction=0.5, seed=seed
     )
-    print(f"dense train: pos={len(pos):,} neg={len(neg):,} ({len(neg) / len(pos):.0f}:1)  "
-          f"cal(val)={len(cal_idx):,} operating(val)={len(operating_idx):,}", flush=True)
+    print(
+        f"dense train: pos={len(pos):,} neg={len(neg):,} ({len(neg) / len(pos):.0f}:1)  "
+        f"cal(val)={len(cal_idx):,} operating(val)={len(operating_idx):,}",
+        flush=True,
+    )
 
     Xtr = _load_full(emb, keys, tr_idx)
     Xva = _load_full(emb, keys, cal_idx)
@@ -243,8 +251,9 @@ def train_heads_dense(scan_store: Path, keys=KEYS_7, neg_cap: int = 2_000_000, s
 BUDGETS = (1.0, 2.0, 5.0, 10.0, 20.0)
 
 
-def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
-             save_preds: str | None = None) -> None:
+def evaluate(
+    scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0, save_preds: str | None = None
+) -> None:
     """Score heads on the dense scan TEST split at true imbalance; print a diagnostic table.
 
     Beyond the single ≤``budget`` operating point, reports the recall-vs-FP-budget curve and
@@ -265,8 +274,10 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
     npos = int((y[cognate] == 1).sum())
     ratio = (y[cognate] == 0).sum() / max(1, npos)
 
-    print(f"\nscan TEST: {len(te):,} codons  cognate={int(cognate.sum()):,}  "
-          f"non-cognate={int(noncog.sum()):,}  positives={npos:,}")
+    print(
+        f"\nscan TEST: {len(te):,} codons  cognate={int(cognate.sum()):,}  "
+        f"non-cognate={int(noncog.sum()):,}  positives={npos:,}"
+    )
     print(f"true imbalance (neg:pos over cognate) = {ratio:.1f}:1   (curated was 3:1)\n")
 
     # Score validation and test together. Thresholds are selected on validation and
@@ -277,8 +288,14 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
     preds = {name: p[len(va) :] for name, p in eval_preds.items()}
 
     if save_preds:
-        np.savez(save_preds, y=y, cognate=cognate, noncog=noncog,
-                 tx=tx.astype(str), **{f"p::{n}": p for n, p in preds.items()})
+        np.savez(
+            save_preds,
+            y=y,
+            cognate=cognate,
+            noncog=noncog,
+            tx=tx.astype(str),
+            **{f"p::{n}": p for n, p in preds.items()},
+        )
         print(f"saved predictions -> {save_preds}\n")
 
     yc, txc = y[cognate], tx[cognate]
@@ -301,8 +318,10 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
     # Oracle recall-vs-budget curve: a useful ranking diagnostic, but thresholds are
     # optimized on TEST and therefore must not be presented as deployable performance.
     for b in BUDGETS:
-        line(f"oracle recall @ ≤{b:g} FP/tx",
-             [recall_at_fp_budget(preds[n][cognate], yc, txc, budget=b)["recall"] for n in heads])
+        line(
+            f"oracle recall @ ≤{b:g} FP/tx",
+            [recall_at_fp_budget(preds[n][cognate], yc, txc, budget=b)["recall"] for n in heads],
+        )
 
     # Honest operating point: select once on VAL, then apply unchanged to TEST.
     selected = {}
@@ -319,9 +338,7 @@ def evaluate(scan_store: Path, heads: dict, keys=KEYS_7, budget: float = 1.0,
             budget=budget,
         )
     fixed = {
-        name: evaluate_at_threshold(
-            preds[name][cognate], yc, txc, selected[name]["threshold"]
-        )
+        name: evaluate_at_threshold(preds[name][cognate], yc, txc, selected[name]["threshold"])
         for name in heads
     }
     line(
@@ -371,8 +388,10 @@ def score_demo(demo_store: Path, heads: dict, keys=KEYS_7) -> None:
         print(f"\n{g}:")
         print(cols)
         for i in order:
-            row = (f"{str(m[gene_col].values[i]):<10}{int(m.gstart.values[i]):>10} "
-                   f"{str(m.codon.values[i]):>6} {str(m.codon_class.values[i]):>13}")
+            row = (
+                f"{str(m[gene_col].values[i]):<10}{int(m.gstart.values[i]):>10} "
+                f"{str(m.codon.values[i]):>6} {str(m.codon_class.values[i]):>13}"
+            )
             if region_col:
                 row += f" {str(m[region_col].values[i]):>8}"
             row += "".join(f"{preds[n][i]:>26.4f}" for n in heads)
@@ -396,11 +415,19 @@ def main() -> None:
             "ag_evo_txp = AG+exon-spliced transcript-Evo2+Kozak ablation"
         ),
     )
-    ap.add_argument("--train", choices=["curated", "dense"], default="curated",
-                    help="curated = 3:1 set (old); dense = scan TRAIN split at true imbalance")
+    ap.add_argument(
+        "--train",
+        choices=["curated", "dense"],
+        default="curated",
+        help="curated = 3:1 set (old); dense = scan TRAIN split at true imbalance",
+    )
     ap.add_argument("--neg-cap", type=int, default=2_000_000, help="dense train negative cap")
-    ap.add_argument("--head", choices=["logistic", "xgboost", "lightgbm", "rf"],
-                    default="logistic", help="dense-train classifier (logistic = §7 baseline)")
+    ap.add_argument(
+        "--head",
+        choices=["logistic", "xgboost", "lightgbm", "rf"],
+        default="logistic",
+        help="dense-train classifier (logistic = §7 baseline)",
+    )
     ap.add_argument("--xgb-depth", type=int, default=6)
     ap.add_argument("--xgb-lr", type=float, default=0.05)
     ap.add_argument("--xgb-estimators", type=int, default=500)
@@ -415,16 +442,27 @@ def main() -> None:
     if args.train == "dense":
         tree_params = None
         if args.head in ("xgboost", "lightgbm"):
-            tree_params = dict(max_depth=args.xgb_depth, learning_rate=args.xgb_lr,
-                               n_estimators=args.xgb_estimators,
-                               colsample_bytree=args.xgb_colsample,
-                               scale_pos_weight=args.xgb_spw)
+            tree_params = dict(
+                max_depth=args.xgb_depth,
+                learning_rate=args.xgb_lr,
+                n_estimators=args.xgb_estimators,
+                colsample_bytree=args.xgb_colsample,
+                scale_pos_weight=args.xgb_spw,
+            )
         heads = {}
         if args.head == "logistic":
-            heads["curated-C"] = train_heads(Path(args.curated_store), keys=keys,
-                                             only=["C(.00075,None)"])["C(.00075,None)"]
-        heads.update(train_heads_dense(Path(args.scan_store), keys=keys, neg_cap=args.neg_cap,
-                                       head=args.head, tree_params=tree_params))
+            heads["curated-C"] = train_heads(
+                Path(args.curated_store), keys=keys, only=["C(.00075,None)"]
+            )["C(.00075,None)"]
+        heads.update(
+            train_heads_dense(
+                Path(args.scan_store),
+                keys=keys,
+                neg_cap=args.neg_cap,
+                head=args.head,
+                tree_params=tree_params,
+            )
+        )
     else:
         heads = train_heads(Path(args.curated_store), keys=keys)
     evaluate(

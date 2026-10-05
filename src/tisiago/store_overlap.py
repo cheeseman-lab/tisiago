@@ -31,12 +31,8 @@ def align_shared_sites(
                 .any(axis=1)
             )
             if conflicts.any():
-                raise ValueError(
-                    f"{name} manifest has conflicting duplicate transcript sites"
-                )
-        positions = np.flatnonzero(
-            ~manifest.duplicated(list(SITE_KEY), keep="first")
-        )
+                raise ValueError(f"{name} manifest has conflicting duplicate transcript sites")
+        positions = np.flatnonzero(~manifest.duplicated(list(SITE_KEY), keep="first"))
         unique = manifest.iloc[positions][[*SITE_KEY, "codon", "label_tis"]].copy()
         unique[f"{name}_row"] = positions
         unique_manifests[name] = unique
@@ -54,10 +50,7 @@ def align_shared_sites(
     identity_matches = (
         shared.codon_reference.astype(str).to_numpy()
         == shared.codon_candidate.astype(str).to_numpy()
-    ) & (
-        shared.label_tis_reference.to_numpy()
-        == shared.label_tis_candidate.to_numpy()
-    )
+    ) & (shared.label_tis_reference.to_numpy() == shared.label_tis_candidate.to_numpy())
     if not identity_matches.all():
         raise ValueError(
             f"{int((~identity_matches).sum())} shared sites disagree on codon or label"
@@ -86,9 +79,7 @@ def compare_overlap_feature(
     if reference.ndim != 2 or candidate.ndim != 2:
         raise ValueError("feature arrays must be two-dimensional")
     if reference.shape[1] != candidate.shape[1]:
-        raise ValueError(
-            f"feature widths differ: {reference.shape[1]} != {candidate.shape[1]}"
-        )
+        raise ValueError(f"feature widths differ: {reference.shape[1]} != {candidate.shape[1]}")
     exact_count = 0
     value_count = 0
     max_abs = 0.0
@@ -124,15 +115,9 @@ def main() -> None:
     reference_store = Path(args.reference_store)
     candidate_store = Path(args.candidate_store)
     columns = [*SITE_KEY, "codon", "label_tis"]
-    reference_manifest = pd.read_parquet(
-        reference_store / "manifest.parquet", columns=columns
-    )
-    candidate_manifest = pd.read_parquet(
-        candidate_store / "manifest.parquet", columns=columns
-    )
-    reference_rows, candidate_rows = align_shared_sites(
-        reference_manifest, candidate_manifest
-    )
+    reference_manifest = pd.read_parquet(reference_store / "manifest.parquet", columns=columns)
+    candidate_manifest = pd.read_parquet(candidate_store / "manifest.parquet", columns=columns)
+    reference_rows, candidate_rows = align_shared_sites(reference_manifest, candidate_manifest)
     print(f"shared unique transcript sites: {len(reference_rows):,}")
     failed = []
     for key in args.keys:

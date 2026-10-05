@@ -44,10 +44,7 @@ def score_shards(
         ValueError: If any wanted row is never seen across shards.
     """
     # member names carry "::" and no ".npy"; manifest keys are slash paths with ".npy"
-    want = [
-        k[:-4].replace("/", "::") if k.endswith(".npy") else k.replace("/", "::")
-        for k in keys
-    ]
+    want = [k[:-4].replace("/", "::") if k.endswith(".npy") else k.replace("/", "::") for k in keys]
     m = len(manifest)
     src2cmp = build_src_to_compact(manifest)
     p = np.full(m, np.nan, dtype=np.float64)
@@ -66,7 +63,5 @@ def score_shards(
         covered[dst] = True
     n_cov = int(covered.sum())
     if n_cov != m:
-        raise ValueError(
-            f"covered {n_cov}/{m} rows — shards do not cover all wanted positions"
-        )
+        raise ValueError(f"covered {n_cov}/{m} rows — shards do not cover all wanted positions")
     return p

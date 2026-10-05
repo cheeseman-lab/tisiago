@@ -43,9 +43,7 @@ def test_build_store_two_segment_key(tmp_path):
     out = tmp_path / "store"
     out.mkdir()
     key = "onehot::kozakW20"
-    pd.DataFrame({"src_row_idx": [0, 1], "row_idx": [0, 1]}).to_parquet(
-        out / "manifest.parquet"
-    )
+    pd.DataFrame({"src_row_idx": [0, 1], "row_idx": [0, 1]}).to_parquet(out / "manifest.parquet")
     np.savez(
         parts / "a_shard0.npz",
         row_idx=np.array([0, 1]),

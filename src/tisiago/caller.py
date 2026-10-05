@@ -262,9 +262,7 @@ def main() -> None:
     tr_all = unique[m.split.values[unique] == "train"]
     val = unique[m.split.values[unique] == "val"]
     te = unique[m.split.values[unique] == "test"]
-    cal, operating = split_grouped_indices(
-        val, m.transcript_id.values[val], fraction=0.5, seed=0
-    )
+    cal, operating = split_grouped_indices(val, m.transcript_id.values[val], fraction=0.5, seed=0)
     tr = rng.choice(tr_all, min(TRAIN_SUBSAMPLE, len(tr_all)), replace=False)
 
     X = load(args.keys, emb)

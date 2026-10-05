@@ -63,17 +63,25 @@ def main() -> None:
         tnc = np.where((sp == "test") & noncog)[0]
         if len(tnc) > args.noncog_sample:
             tnc = rng.choice(tnc, args.noncog_sample, replace=False)
-        rows = np.sort(np.concatenate([
-            np.where((sp == "train") & cog & (y == 1))[0], tn,
-            np.where((sp == "val") & cog)[0],
-            np.where((sp == "test") & cog)[0], tnc,
-        ]))
+        rows = np.sort(
+            np.concatenate(
+                [
+                    np.where((sp == "train") & cog & (y == 1))[0],
+                    tn,
+                    np.where((sp == "val") & cog)[0],
+                    np.where((sp == "test") & cog)[0],
+                    tnc,
+                ]
+            )
+        )
         em = m.iloc[rows].reset_index(drop=True).copy()
-        em["src_row_idx"] = rows            # provenance back to the full scan manifest
+        em["src_row_idx"] = rows  # provenance back to the full scan manifest
         em["row_idx"] = np.arange(len(em))  # 0..M-1 for the experiment store
         em.to_parquet(out / "manifest.parquet", index=False)
-        print(f"experiment rows: {len(rows):,}  splits={em.split.value_counts().to_dict()}",
-              flush=True)
+        print(
+            f"experiment rows: {len(rows):,}  splits={em.split.value_counts().to_dict()}",
+            flush=True,
+        )
 
     # SEQUENTIAL read: stream the whole source array in big blocks and keep the wanted rows.
     # `rows` is sorted, so masked extraction in source order matches the manifest order.
