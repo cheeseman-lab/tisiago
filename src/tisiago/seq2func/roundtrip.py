@@ -41,8 +41,8 @@ def run_condition(
     condition: str, tracks_dir: Path, work_dir: Path, atis_root: Path, ribotish: str
 ) -> dict:
     """Run Jimmy's Ribo-TISH on synthetic BAMs and compare with his pooled calls."""
-    work_dir, atis_root = Path(work_dir), Path(atis_root)
-    inputs = prepare_inputs(condition, tracks_dir, work_dir)
+    work_dir, atis_root = Path(work_dir).resolve(), Path(atis_root).resolve()
+    inputs = prepare_inputs(condition, Path(tracks_dir).resolve(), work_dir)
     output = work_dir / f"{condition}_TIS_predict.txt"
     argv = predict_command(
         ribotish, inputs["tis_bams"], inputs["chx_bams"], inputs["tis_paras"],
@@ -71,6 +71,8 @@ def main() -> None:
     ap.add_argument("--atis-root", default=os.environ.get("TISIAGO_ATIS_DATA"))
     ap.add_argument("--ribotish", default=os.environ.get("TISIAGO_RIBOTISH", "ribotish"))
     args = ap.parse_args()
+    if not args.atis_root:
+        ap.error("--atis-root is required (or set TISIAGO_ATIS_DATA)")
     work_dir = Path(args.out_dir) / args.condition
     report = run_condition(
         args.condition, Path(args.tracks_dir), work_dir, Path(args.atis_root), args.ribotish
