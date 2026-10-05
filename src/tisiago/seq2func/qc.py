@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
 from tisiago.seq2func.samples import CONDITIONS, LIBRARIES
 from tisiago.seq2func.tracks import read_bigwig_counts, track_prefix
 
@@ -52,7 +53,7 @@ def _frame_counts(
         track = counts.get(chrom, {})
         positions = [p for start, end in sorted(exons) for p in range(start, end)]
         if strand == "-":
-            positions = positions[::-1]
+            positions = [p + RIBOTISH_MINUS_SHIFT for p in positions[::-1]]
         for index, position in enumerate(positions):
             value = track.get(position, 0)
             total += value

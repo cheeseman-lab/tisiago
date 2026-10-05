@@ -21,10 +21,16 @@ def test_frame_fraction_counts_codon_first_positions_across_exons():
     assert frame_fraction(counts, cds) == pytest.approx(7 / 10)
 
 
+def test_minus_strand_frame_undoes_ribotish_shift():
+    # - strand CDS [10, 16): codon first bases are 15 and 12; Ribo-TISH puts P-sites at +1.
+    cds = [("chr1", "-", [(10, 16)])]
+    counts = {"chr1": Counter({16: 5, 13: 3, 15: 2})}
+    assert frame_fraction(counts, cds) == pytest.approx(8 / 10)
+
+
 def test_stranded_frame_fraction_uses_same_strand_track():
-    # - strand CDS [10, 16): codon starts are the highest coordinates 15 and 12.
     cds = [("chr1", "+", [(10, 16)]), ("chr1", "-", [(10, 16)])]
     plus = {"chr1": Counter({10: 3, 11: 1, 15: 50})}  # 15 is out of frame for + (index 5)
-    minus = {"chr1": Counter({15: 2, 14: 2, 10: 40})}  # 10 is index 5 for - (out of frame)
-    # + : 3 in frame of 3+1+50 = 54 ; - : 2 in frame of 2+2+40 = 44 ; combined count-weighted
+    minus = {"chr1": Counter({16: 2, 15: 2, 11: 40})}  # 16 in frame (shifted); 11 is index 4 for -
+    # + : 3 in frame of 54 ; - : 2 in frame of 44 ; plus-track counts must not leak into minus
     assert stranded_frame_fraction(plus, minus, cds) == pytest.approx(5 / 98)

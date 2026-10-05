@@ -7,6 +7,8 @@ MIN_MAPQ = 1
 _MATCH = (0, 7, 8)
 _INSERTION = 1
 _SKIP = (2, 3)
+# Minus-strand Ribo-TISH P-sites are this many bases 3' (genomically higher) of canonical.
+RIBOTISH_MINUS_SHIFT = 1
 
 
 def ribotish_genome_pos(
