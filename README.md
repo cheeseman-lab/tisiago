@@ -54,3 +54,6 @@ threshold chosen on validation, transcript-bootstrap CIs) gives the dense-traine
 **AUPRC 0.304 [0.288, 0.322]** and **recall 0.306 at 0.99 FP/transcript**. Recall is driven by
 AUG starts (0.58); near-cognate starts are largely missed (0.07). See [`FINDINGS.md`](FINDINGS.md)
 §10 and [`ROADMAP.md`](ROADMAP.md).
+
+Discrete calls for the held-out chromosomes: `sbatch --partition=20 scripts/run_tis_call_starts.sh`
+→ `data/calls/ag_w8k_test_calls.parquet`.

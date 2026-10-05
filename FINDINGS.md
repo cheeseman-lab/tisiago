@@ -333,6 +333,16 @@ AUPRC [−0.013, +0.002], recall [+0.001, +0.019], win@64 [−0.009, −0.003].
 
 **Caveat.** 500k train negatives vs §7's 2M — the clean rerun is not yet cap-matched to §7.
 
+**Deliverable — discrete calls.** `python -m tisiago.call_starts` (Slurm:
+`scripts/run_tis_call_starts.sh`) applies the 5-seed `AG + W8k` ensemble and its validation-chosen
+threshold (0.2318) to the held-out chr8/chr9 cognate codons and writes
+`data/calls/ag_w8k_test_calls.parquet` (823,302 codons, 2,514 called) plus a summary JSON. The run
+refuses to write unless it reproduces the logged ensemble metrics; it did (recall 0.306,
+0.99 FP/transcript). One call differs from the logged evaluation: the evaluation scored with the
+unfolded sklearn pipeline, the deployable artifacts with folded coefficients, and isotonic steps
+turn a float-precision logit difference into a visible probability jump for 3 codons at the
+threshold. Training-chromosome calls are not produced (the model saw them).
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest

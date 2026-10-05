@@ -94,6 +94,7 @@ src/tisiago/
   head_xgb.py              XGBoost / LightGBM / RF heads
   efficiency_head.py       Ridge regression on max_norm_HeLa (P4)
   representation_eval.py   clean multi-seed W8k vs TXP comparison with bootstrap CIs
+  call_starts.py           discrete calls from the frozen 5-seed ensemble (held-out chr only)
   linear_head.py           portable calibrated linear-head artifact
   projected_score.py, transcript_projection.py   partial-logit scoring without full features
   scan_eval.py, scan_score.py                     dense-scan scoring (Regime B streaming)
