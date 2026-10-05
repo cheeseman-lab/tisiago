@@ -9,7 +9,7 @@
 #SBATCH --error=logs/%x_%j.err
 #
 # Usage (from the repo root):
-#   ATIS_GTF=/path/gencode.v49.primary_assembly.annotation.gtf sbatch --export=ALL --partition=20 scripts/run_p6_qc.sh
+#   sbatch --partition=20 scripts/run_p6_qc.sh
 
 set -euo pipefail
 
@@ -21,4 +21,4 @@ PYTHON="${PYTHON_BIN:-$TISIAGO_CPU_PYTHON}"
 require_python "$PYTHON"
 
 cd "$REPO_ROOT"
-"$PYTHON" -m tisiago.seq2func.qc --gtf "${ATIS_GTF:?set ATIS_GTF to the GENCODE v49 GTF}"
+"$PYTHON" -m tisiago.seq2func.qc --gtf "${TISIAGO_GTF:?Set TISIAGO_GTF in .env}"
