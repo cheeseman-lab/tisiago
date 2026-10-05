@@ -51,7 +51,8 @@ ribotish quality -b <bam> -g <gtf> --th 0.60 -l 20,38 [-t]
 ribotish predict -t <TIS BAMs> -b <CHX BAMs> --tispara <TIS paras> --ribopara <CHX paras>
                  -g <gtf> -f <fasta> --minaalen 3 --alt --seq --aaseq
 filter: TISPvalue <= 0.01, RiboPvalue <= 0.01, FisherQvalue <= 0.05
-swissisoform: NormTISCounts = TISCounts / gene RNA counts * 1e6 >= 0.1; MANE or TSL 1-3 transcripts
+swissisoform run_sample: NormTISCounts = TISCounts / total RNA-input reads (reps summed) * 1e6
+              >= 0.1; filter_tis (MANE or TSL 1-3, distance buffer); canonical starts imputed after
 ```
 
 ## 4. Phases
@@ -123,8 +124,8 @@ chr8/chr9 against the frozen calls (`data/calls/ag_w8k_test_calls.parquet`).
    over the same regions; round to integer counts; emit reads of a fixed length `L` with the
    5′ end at `P-site − offset` on the correct strand; write a matching `.para.py` `{L: offset}`.
 3. Run Jimmy's `ribotish predict` (same flags) with predicted TIS as treatment and predicted CHX
-   as background; apply his filters and the swissisoform NormTISCounts filter, using the predicted
-   RNA track summed over the gene for the normalization.
+   as background; apply his filters and swissisoform's `filter_tis`. NormTISCounts divides by the
+   condition's total RNA-input reads, a constant, so it does not depend on the predicted RNA track.
 4. Score against the rebuilt per-condition labels (P6.0): recall, precision, FP/transcript, split
    by AUG vs near-cognate. Also rank by TISPvalue to draw a recall-vs-FP curve.
 5. **Frozen comparison:** union the per-condition predicted calls; score the frozen calls at the
