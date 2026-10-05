@@ -27,6 +27,9 @@ fi
 : "${TISIAGO_AG_PYTHON:=$(command -v python)}"
 : "${TISIAGO_CPU_PYTHON:=$(command -v python)}"
 export TISIAGO_EVO_PYTHON TISIAGO_AG_PYTHON TISIAGO_CPU_PYTHON
+: "${TISIAGO_AGFT_PYTHON:=$REPO_ROOT/.venv/agft/bin/python}"
+: "${TISIAGO_AGFT_PARTITION:=nvidia-A6000-20}"
+export TISIAGO_AGFT_PYTHON TISIAGO_AGFT_PARTITION
 
 mkdir -p "$REPO_ROOT/logs"
 
