@@ -6,8 +6,8 @@
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # Build the isolated Evo2 extraction environment with uv and validate its CUDA
 # imports on the allocated GPU. The shared conda Evo2 environment is never
@@ -20,7 +20,11 @@ set -euo pipefail
 
 # Slurm copies submitted scripts into /var/spool. Prefer its recorded submit
 # directory so editable installs still resolve to the real checkout.
-REPO="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SELF="${BASH_SOURCE[0]}"
+[[ -n "${SLURM_JOB_ID:-}" ]] && SELF="$(scontrol show job "$SLURM_JOB_ID" \
+    | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -1)"
+source "$(cd "$(dirname "$SELF")" && pwd)/_common.sh"
+REPO="$REPO_ROOT"
 cd "$REPO"
 ENV_PREFIX="${1:-$REPO/.venv/evo2-next}"
 if [[ "$ENV_PREFIX" != /* ]]; then
@@ -28,7 +32,7 @@ if [[ "$ENV_PREFIX" != /* ]]; then
 fi
 BASE_PYTHON="${BASE_PYTHON:-python3.11}"
 GRUYERENOME="${GRUYERENOME:-$REPO/../gruyerenome}"
-UV_CACHE_DIR="${UV_CACHE_DIR:-${TMPDIR:-/tmp}/tisiago-uv-cache}"
+UV_CACHE_DIR="${UV_CACHE_DIR:-$REPO/.cache/uv}"
 PYTHON_BIN="$ENV_PREFIX/bin/python"
 command -v uv >/dev/null || {
     echo "uv is required; install it from https://docs.astral.sh/uv/" >&2

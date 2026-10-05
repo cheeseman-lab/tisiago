@@ -280,7 +280,7 @@ dense val:
   lower). Nonlinear interaction-learning extracts nothing extra from these frozen-embedding
   features that a linear boundary misses. This single-seed comparison provides no evidence that
   classifier capacity is limiting; it does not establish an absolute feature ceiling. The next
-  lever is a better frozen representation, not a fancier head or foundation-model training.
+  lever is the representation itself, not a fancier head.
   Grounding holds across heads (non-cognate ≈ 0.002, both ≈ 0).
 - **Phase 4 — continuous efficiency regression (`src/tisiago/efficiency_head.py`).** A Ridge head
   on `log1p(max_norm_HeLa)` predicts efficiency **in-distribution** on curated val at **R² 0.24,
@@ -291,6 +291,47 @@ dense val:
   eval-dense shift** (§5), not absence of signal: reframing the target as continuous efficiency
   did **not** rescue the distribution-shift problem. (Brier/grounding are N/A for a raw regressor,
   so Ridge sits on its own normalized eval surface, not the classifier table above.)
+
+## 10. Clean-protocol rerun + exon-spliced Evo2 (2026-09-10)
+
+Rerun of the §7 `ag7` dense head under the leakage-free protocol
+(`docs/INFERENCE_AND_EVALUATION.md`): unique sites only; validation transcripts split into a
+calibration half and an operating-threshold half; threshold chosen on operating validation and
+applied once to TEST; 5 negative-subsample seeds (500k train negatives each, not §7's 2M);
+transcript-bootstrap 95% CIs (1000 replicates). TEST = 823,302 cognate codons at true imbalance.
+Two arms differ only in the Evo2 input: genomic 8 kb windows (`W8k`) vs the complete exon-spliced
+mature transcript (`TXP`). Run: `scripts/run_tis_dense_representation_eval.sh`, outputs in
+`data/dense_txp_representation/`.
+
+| 5-seed ensemble, TEST @ true imbalance | `AG + W8k` | `AG + TXP` |
+|---|---|---|
+| AUPRC | 0.304 [0.288, 0.322] | 0.299 [0.281, 0.316] |
+| recall @ val-selected threshold | 0.306 [0.291, 0.322] | 0.316 [0.301, 0.331] |
+| precision | 0.433 | 0.423 |
+| FP / transcript (budget 1.0) | 0.99 | 1.06 |
+| win@64bp | 0.883 | 0.877 |
+
+Per-seed AUPRC 0.284–0.294 (`W8k`) and 0.279–0.287 (`TXP`). Paired TXP − W8k differences:
+AUPRC [−0.013, +0.002], recall [+0.001, +0.019], win@64 [−0.009, −0.003].
+
+- **The §7 headline survives an honest protocol.** Recall ≈0.30 at ≈1 FP/transcript now uses a
+  validation-chosen threshold, so it is a deployable operating point rather than an oracle one.
+- **TXP ≈ W8k on accuracy at ~1/7 the Evo2 model time.** AUPRC is indistinguishable; win@64 is
+  slightly lower. No non-inferiority margin was fixed before the run, so this is not yet a formal
+  acceptance.
+- **The caller is mostly an AUG caller.** Near-cognate starts are rarely recovered:
+
+| `AG + W8k` ensemble stratum | AUPRC | recall | precision |
+|---|---|---|---|
+| AUG | 0.514 | 0.577 | 0.532 |
+| near-cognate | 0.087 | 0.068 | 0.181 |
+| plus strand | 0.324 | 0.318 | 0.460 |
+| minus strand | 0.285 | 0.294 | 0.407 |
+
+  (`TXP` is the same picture: AUG recall 0.600, near-cognate 0.066.) The minus-strand deficit is
+  consistent across both arms and is not yet explained.
+
+**Caveat.** 500k train negatives vs §7's 2M — the clean rerun is not yet cap-matched to §7.
 
 ## Takeaways for downstream modeling
 
@@ -306,13 +347,13 @@ dense val:
    against gradient-boosted trees at the true 2M imbalance — XGBoost and LightGBM both land within
    noise of logistic. This points toward frozen-representation experiments, but the single-seed
    result is not evidence of an absolute feature ceiling.
-5. **The bottleneck is the features — improve frozen inference next, not the classifier.** Since no
-   head beats logistic on the frozen `ag7` stack (§9), the next comparison is better frozen
-   representations: context/stride ablations, faster Evo2 inference, a smaller checkpoint, and
-   exon-spliced transcript input. Efficiency is weakly
-   decodable in-distribution (ρ 0.30, §9) but inherits the same curated→dense shift as every
-   curated-trained head — the per-condition `max_norm_*` labels need a dense-distribution training
-   substrate to be useful as a caller.
+5. **The bottleneck is the representation, not the classifier.** No head beats logistic on the
+   frozen `ag7` stack (§9), and the clean rerun holds at ≈0.30 recall (§10). Training a sparse
+   binary head on frozen embeddings is the limiting design; the next phase fine-tunes the
+   sequence model on raw Ribo-seq tracks and derives calls on top (see ROADMAP P6). The frozen
+   `ag7` head is the baseline that model must beat.
+6. **Near-cognate starts are the open problem.** Recall is 0.58 on AUG vs 0.07 on near-cognate
+   (§10) — the novel biology is exactly where the current caller fails.
 
 ## Caveats
 
@@ -336,7 +377,7 @@ dense val:
 ## Reproduce
 
 ```bash
-PYTHON_BIN="${PYTHON_BIN:-.venv/dev/bin/python}"
-"$PYTHON_BIN" -m tisiago.eval        --store data/store        # tables 1 + 2
-"$PYTHON_BIN" -m tisiago.resolution  --store data/store        # table 3
+eval "$(conda shell.bash hook)" && conda activate tisiago
+python -m tisiago.eval        --store data/store        # tables 1 + 2
+python -m tisiago.resolution  --store data/store        # table 3
 ```

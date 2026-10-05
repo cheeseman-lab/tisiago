@@ -12,6 +12,7 @@ efficiency signal is absent. Report accordingly.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import numpy as np
@@ -102,7 +103,9 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     ap.add_argument("--curated-store", default="data/store")
-    ap.add_argument("--scan-store", default="data/dense_ag7")
+    ap.add_argument(
+        "--scan-store", default=os.environ.get("TISIAGO_DENSE_STORE", "data/dense_exp_store")
+    )
     ap.add_argument("--features", choices=list(FEATURE_SETS), default="ag7")
     ap.add_argument("--target", default="max_norm_HeLa")
     ap.add_argument("--alphas", default="0.01,0.1,1.0,10.0,100.0,1000.0")

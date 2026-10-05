@@ -366,7 +366,7 @@ pip install xgboost lightgbm
 
 ### Step 2: Run logistic baseline at 2M (reproduce SS7 headline as reference)
 ```bash
-cd /path/to/tisiago
+cd /lab/barcheese01/mdiberna/tisiago
 python -m tisiago.dense_caller --train dense --features ag7 --save-preds data/preds_logistic.npz
 ```
 This is the 0.300 recall baseline. Save predictions so metrics are instant for comparison.
@@ -443,3 +443,4 @@ Add SS9 with the comparison table and interpretation.
 - `src/tisiago/efficiency_head.py` -- Ridge regression head (NEW)
 - `src/tisiago/dense_caller.py` -- add `--head` argument, integrate new heads
 - `FINDINGS.md` -- add SS9 with comparison table
+

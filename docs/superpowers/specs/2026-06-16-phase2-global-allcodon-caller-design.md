@@ -52,7 +52,7 @@ GTF-driven enumeration → a **scan manifest** parquet, schema-compatible with t
 manifest so `extract.py` consumes it unchanged.
 
 - **Inputs:** GENCODE v49 GTF
-  (a caller-supplied matching GENCODE/Ensembl GTF),
+  (`/lab/barcheese01/mdiberna/swissisoform-v2/data/reference/gencode.v49.primary_assembly.annotation.gtf`),
   genome FASTA (same dir, `Gencode_v49_GRCh38.primary_assembly.genome.fa`, `.fai` present),
   the curated manifest (for the transcript set, splits, and positive labels).
 - **Per transcript:** build the exon model (chrom, strand, sorted exon intervals from GTF

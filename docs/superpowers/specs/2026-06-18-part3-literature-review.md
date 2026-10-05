@@ -190,7 +190,7 @@ of these apply to tisiago's current workflow (single-process training on a SLURM
 local SSD). Zarr adds a dependency and decode overhead with no benefit for sequential
 full-key reads.
 
-**Recommendation for A3:** Memmap-per-key fp16 on fast local storage. One `.npy`
+**Recommendation for A3:** Memmap-per-key fp16 on SSD (`/lab/ops_analysis_ssd`). One `.npy`
 per feature key, row-aligned to the manifest parquet. Feature-subset sweeps load only the
 selected keys. This is the simplest format that's also the fastest for the access pattern.
 Revisit if training moves to out-of-core SGD (adopt WebDataset at that point), but the
@@ -249,3 +249,4 @@ retired.
 
 The unresolved arm — balanced-train + Saerens recalibrate — should be run as a negative
 control. Predicting it recovers calibration (Brier) but not rank (AUPRC).
+

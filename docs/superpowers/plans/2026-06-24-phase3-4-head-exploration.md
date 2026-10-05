@@ -37,7 +37,7 @@ xgboost, lightgbm. CPU only — no GPU, no new embedding extraction. pytest for 
   head excepted — it returns a monotone score; see Task 3).
 - **7-key feature stack** (`dense_caller.KEYS_7`, 19,620-dim): AG16k off0 (1536) + AG131k off0
   (1536) + Evo2 blk28 off{0,3,6,9} (4096×4) + Kozak one-hot (164).
-- **Store:** pass `--scan-store /path/to/dense_ag7`
+- **Store:** default `--scan-store /lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7`
   (SSD, 4,329,984 rows, full `codon_class/split/label_tis` manifest — the validated §7 substrate).
   `data/dense_exp_store` is the identical NFS twin (fallback). Curated store: `data/store`.
 - **Save predictions.** Every dense-TEST scoring run writes per-head preds to `.npz` via
@@ -557,7 +557,7 @@ def main() -> None:
     )
     ap.add_argument("--curated-store", default="data/store")
     ap.add_argument("--scan-store",
-                    default="data/dense_ag7")
+                    default="/lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7")
     ap.add_argument("--features", choices=list(FEATURE_SETS), default="ag7")
     ap.add_argument("--target", default="max_norm_HeLa")
     ap.add_argument("--alphas", default="0.01,0.1,1.0,10.0,100.0,1000.0")
@@ -809,8 +809,8 @@ DMatrix/quantization on top. Run on a **983 GB node** (`it-bigboy`/`c5b8`, parti
 Look up limits first: `curl -s http://slurmstatus.wi.mit.edu/limits.html`.
 
 ```bash
-cd /path/to/tisiago
-SSD=/path/to/dense_ag7
+cd /lab/barcheese01/mdiberna/tisiago
+SSD=/lab/ops_analysis_ssd/test_matteo/tisiago_store/dense_ag7
 COMMON="--train dense --features ag7 --scan-store $SSD"
 
 # B0. Logistic baseline @ 2M — reproduce the §7 headline, save preds (reference row).

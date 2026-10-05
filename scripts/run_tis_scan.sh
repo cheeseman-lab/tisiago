@@ -6,8 +6,8 @@
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --output=%x_%A_%a.out
-#SBATCH --error=%x_%A_%a.err
+#SBATCH --output=logs/%x_%A_%a.out
+#SBATCH --error=logs/%x_%A_%a.err
 #
 # Phase 2 dense scan: embed the all-codon scan manifest (every codon in held-out
 # transcripts, from tisiago.enumerate_codons) through the SAME extract.py path as
@@ -21,8 +21,8 @@
 #   TILE_SPEC : ag16k | ag131k | evo2_8k | evo2_8k_s4k | evo2_4k
 #               (headline set = ag16k + evo2_8k; latter two are speed ablations)
 #   N_SHARDS  : must equal the array size
-# Set PYTHON_BIN to the uv-managed backend environment and TISIAGO_GENOME to
-# the indexed reference FASTA.
+# Environments and TISIAGO_GENOME come from .env (see scripts/_common.sh);
+# PYTHON_BIN overrides the per-backend default.
 #
 # MEMORY: extraction preallocates one fp16 matrix per requested key and fills it
 # batch-wise. Peak host RAM is therefore close to final shard size plus model/manifest
@@ -36,7 +36,10 @@
 
 set -euo pipefail
 
-REPO_ROOT="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SELF="${BASH_SOURCE[0]}"
+[[ -n "${SLURM_JOB_ID:-}" ]] && SELF="$(scontrol show job "$SLURM_JOB_ID" \
+    | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -1)"
+source "$(cd "$(dirname "$SELF")" && pwd)/_common.sh"
 TILE_SPEC="$1"
 CONFIG="$2"
 N_SHARDS="$3"
@@ -46,17 +49,17 @@ OUT_DIR="${5:-$REPO_ROOT/data/scan_parts}"
 GENOME="${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 
 if [[ "$TILE_SPEC" == ag* ]]; then
-    DEFAULT_PYTHON="$REPO_ROOT/.venv/alphagenome/bin/python"
+    DEFAULT_PYTHON="$TISIAGO_AG_PYTHON"
 else
-    DEFAULT_PYTHON="$REPO_ROOT/.venv/evo2-next/bin/python"
+    DEFAULT_PYTHON="$TISIAGO_EVO_PYTHON"
 fi
 PYTHON="${PYTHON_BIN:-$DEFAULT_PYTHON}"
 [[ -x "$PYTHON" ]] || {
-    echo "Python not found at $PYTHON; set PYTHON_BIN to a uv-managed backend environment" >&2
+    echo "Python not found at $PYTHON; check TISIAGO_AG_PYTHON/TISIAGO_EVO_PYTHON in .env" >&2
     exit 2
 }
 "$PYTHON" -c "import gruyerenome, pyfaidx" || {
-    echo "Install extraction dependencies with uv before submitting this job" >&2
+    echo "This environment lacks gruyerenome/pyfaidx" >&2
     exit 2
 }
 

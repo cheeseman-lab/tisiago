@@ -11,12 +11,10 @@ set -euo pipefail
 OBJECTIVE="${OBJECTIVE:-auprc}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+source "$ROOT/scripts/_common.sh"
 STORE="${STORE:-$ROOT/data/store}"
-PYTHON="${PYTHON_BIN:-$ROOT/.venv/dev/bin/python}"
-[[ -x "$PYTHON" ]] || {
-    echo "Python not found at $PYTHON; set PYTHON_BIN to a uv-managed environment" >&2
-    exit 2
-}
+PYTHON="${PYTHON_BIN:-$TISIAGO_CPU_PYTHON}"
+require_python "$PYTHON"
 SCHEDULER=()
 if [[ -n "${TISIAGO_CPU_PARTITION:-}" ]]; then
     SCHEDULER+=(--partition="$TISIAGO_CPU_PARTITION")

@@ -6,8 +6,8 @@
 #SBATCH --mem=64G
 #SBATCH --time=2:00:00
 #SBATCH --gres=gpu:1
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # Matched end-to-end benchmark of genomic W8k and exon-spliced TXP extraction.
 # Run only after run_tis_backend_contract.sh passes for the same environment/config.
@@ -17,7 +17,10 @@
 
 set -euo pipefail
 
-REPO_ROOT="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SELF="${BASH_SOURCE[0]}"
+[[ -n "${SLURM_JOB_ID:-}" ]] && SELF="$(scontrol show job "$SLURM_JOB_ID" \
+    | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -1)"
+source "$(cd "$(dirname "$SELF")" && pwd)/_common.sh"
 SHARD_ID="${1:-319}"
 N_SHARDS="${2:-1000}"
 OUT_DIR="${3:-$REPO_ROOT/benchmarks/txp_20260909/extraction}"
@@ -26,7 +29,7 @@ CONFIG="${5:-$REPO_ROOT/configs/tis_evo2_8k_blk28.yaml}"
 
 GENOME="${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 GTF="${TISIAGO_GTF:?Set TISIAGO_GTF to the matching transcript annotation}"
-PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/evo2-next/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-$TISIAGO_EVO_PYTHON}"
 [[ -x "$PYTHON_BIN" ]] || {
     echo "Python not found at $PYTHON_BIN; run run_tis_evo2_env_setup.sh first" >&2
     exit 2

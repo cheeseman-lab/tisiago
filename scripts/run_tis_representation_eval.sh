@@ -5,8 +5,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=192G
 #SBATCH --time=1-00:00:00
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
 #
 # Leakage-free, multi-seed comparison of curated W8k and transcript representations.
 # This is a representation ablation; dense-distribution training remains required
@@ -14,17 +14,20 @@
 #
 # Usage: sbatch scripts/run_tis_representation_eval.sh \
 #   [STORE] [OUT_DIR] [SEEDS] [TRAIN_NEGATIVES] [BOOTSTRAP]
-# Override PYTHON_BIN to select another uv-managed environment.
+# Override PYTHON_BIN to select another environment.
 
 set -euo pipefail
 
-REPO_ROOT="${TISIAGO_REPO:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
+SELF="${BASH_SOURCE[0]}"
+[[ -n "${SLURM_JOB_ID:-}" ]] && SELF="$(scontrol show job "$SLURM_JOB_ID" \
+    | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -1)"
+source "$(cd "$(dirname "$SELF")" && pwd)/_common.sh"
 STORE="${1:-$REPO_ROOT/data/store}"
 OUT_DIR="${2:-$REPO_ROOT/data/txp_representation}"
 SEEDS="${3:-0,1,2,3,4}"
 TRAIN_NEGATIVES="${4:-60000}"
 BOOTSTRAP="${5:-1000}"
-PYTHON="${PYTHON_BIN:-$REPO_ROOT/.venv/evo2-next/bin/python}"
+PYTHON="${PYTHON_BIN:-$TISIAGO_CPU_PYTHON}"
 
 cd "$REPO_ROOT"
 "$PYTHON" -m tisiago.representation_eval \

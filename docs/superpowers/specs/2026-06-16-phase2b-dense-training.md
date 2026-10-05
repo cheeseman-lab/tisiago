@@ -153,7 +153,7 @@ The GPU cost is comparable to the test+val scan already done (~similar transcrip
 
 ## Risks
 
-- **Train-set scan store size.** Train chromosomes have more transcripts than test+val. At ~60 GB for test-only, the full train scan store could be ~100–150 GB. Ensure adequate shared storage and note the disk footprint. Can restrict to headline keys only (AG16k + Evo2 blk28).
+- **Train-set scan store size.** Train chromosomes have more transcripts than test+val. At ~60 GB for test-only, the full train scan store could be ~100–150 GB. Manageable on `/lab/barcheese01/` but note the disk footprint. Can restrict to headline keys only (AG16k + Evo2 blk28).
 - **Logistic convergence at scale.** l-bfgs on ~30M × 5632 features may be slow. `max_iter=1000` should suffice; if not, try `saga` solver with `tol=1e-3` or subsample negatives (option 2 above).
 - **Overfitting to non-cognate trivial negatives.** At true imbalance, ~80% of negatives are non-cognate (trivially non-initiating). The head might learn "reject non-ATG/near-cognate" as a shortcut — which is correct biology but wouldn't generalize if we later want to score only cognate codons. **Mitigation:** the eval already stratifies cognate vs. non-cognate, so this would be visible. And `class_weight="balanced"` weights by label, not by codon class, so the logistic objective is still about initiation vs. non-initiation.
 - **Phase 3 interaction.** This phase deliberately keeps the architecture fixed (logistic, balanced weights) so the effect of the training distribution is isolated. Phase 3's architecture sweep should start from the dense-trained head, not the curated one.
@@ -175,3 +175,4 @@ The GPU cost is comparable to the test+val scan already done (~similar transcrip
 - Efficiency regression (Phase 4).
 - Genome-wide deployment beyond test+val+train transcripts.
 - Changing the embedding keys or adding new layers — this phase changes only the training regime.
+

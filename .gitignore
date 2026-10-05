@@ -28,3 +28,10 @@ autoresearch/.desc
 
 # local experiment outputs
 runs_phase34/
+
+# Slurm logs land here (directory kept so --output=logs/... works in fresh clones)
+logs/*
+!logs/.gitkeep
+
+# uv / tool caches
+.cache/

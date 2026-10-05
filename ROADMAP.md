@@ -9,13 +9,13 @@ Headline metrics: (1) curated-set discrimination judged **against the one-hot se
 floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution); and (3) recall at a
 **validation-selected** FP/transcript threshold on the dense, true-imbalance test set.
 
-_Last updated: 2026-09-09._
+_Last updated: 2026-10-05._
 
-> **Current (protocol audit, 2026-09-09):** the dense experiment is complete, but its historical
-> FP-budget thresholds were optimized on TEST and must be treated as oracle ranking diagnostics.
-> The corrected pipeline separates fitting, calibration, operating-threshold selection, and final
-> testing. The immediate task is a clean rerun, followed by frozen Evo2 context/stride/checkpoint
-> and exon-spliced-input ablations. See `docs/INFERENCE_AND_EVALUATION.md`.
+> **Current (2026-10-05): new direction — seq2func on raw Ribo-seq tracks (P6).** The frozen
+> embedding + binary head line is closed at ≈0.30 recall @ ≈1 FP/transcript (clean protocol,
+> FINDINGS §10): heads don't help (§9), and a sparse binary target on frozen features is the
+> limiting design. Next: fine-tune AlphaGenome to predict raw Ribo-seq tracks across 5 cell lines
+> × 2 replicates, then derive start-site calls on top. The frozen `ag7` head is the baseline.
 
 ---
 
@@ -26,12 +26,13 @@ _Last updated: 2026-09-09._
 | **PoC** | Frozen embeddings rank curated candidates | ✅ done | `eval.py`, `resolution.py`, `FINDINGS.md` |
 | **P1** | Calibration machinery + caller metrics | ✅ **done, merged** | `caller.py` |
 | **AR** | **Autoresearch fleet** (4 metrics) over the 1:3 set | ✅ **done + harvested 2026-06-16** | `autoresearch/winners.md`, `FINDINGS.md §6` |
-| **P3** | Confirm winners across seeds/splits (was "autoresearch the head") | 🔄 **Leakage-free curated and dense multi-seed runners implemented; TXP extraction/evaluation chain in progress.** | `representation_eval.py`, `linear_head.py` |
-| **P2 / Option B** | Imbalance-aware head @ true imbalance — **AG + Evo2** | 🟡 **Historical ranking result complete: imbalance-matched training wins and +Evo2 reaches oracle recall 0.300 / AUPRC 0.307. Single-seed; corrected fixed-threshold rerun required.** | `dense_caller.py`, `build_store.py`, SSD `dense_ag7` |
+| **P3** | Confirm winners across seeds/splits | ✅ **Clean 5-seed dense rerun (2026-09-10): ensemble AUPRC 0.304 [0.288, 0.322], recall 0.306 @ 0.99 FP/tx with a val-selected threshold. 500k-negative cap (not yet matched to §7's 2M). §10.** | `representation_eval.py`, `linear_head.py` |
+| **P2 / Option B** | Imbalance-aware head @ true imbalance — **AG + Evo2** | ✅ **Imbalance-matched training wins; +Evo2 reaches 0.300 / AUPRC 0.307 (single-seed, oracle threshold) — confirmed under the clean protocol in §10.** | `dense_caller.py`, `build_store.py`, SSD `dense_ag7` |
 | ~~P2~~ | ~~Global all-codon dense *training*~~ | ⏸️ still deferred (Option B sidesteps it) | `enumerate_codons.py`, `scan_eval.py` |
 | **P3.5** | **Head exploration — richer classifiers @ dense 2M** | 🟢 **DONE (2026-06-24): XGBoost 0.303 / LightGBM 0.304 AUPRC were within noise of logistic 0.307 in this single-seed comparison; no evidence that head capacity was limiting. §9.** | `head_xgb.py`, `compare_heads.py`, `FINDINGS.md §9` |
 | **P4** | TIS efficiency regression (HeLa first) | 🟡 **first result (2026-06-24): Ridge on log1p(max_norm_HeLa) — in-dist ρ 0.30 / R² 0.24, but dense ranking collapses to AUPRC 0.098 (curated→dense shift, not absence of signal). §9.** | `efficiency_head.py`, `FINDINGS.md §9` |
-| **P5** | Frozen-inference correctness + speed | 🟡 **TXP extractor and backend contract implemented. Evo2 0.6 / Vortex 1.1 is pinned and the deprecated API path is removed. Upgraded W8k features are bit-identical; TXP is 6.68x faster in model time on the matched shard. Curated and dense biological-accuracy gates are running.** | `extract_transcript.py`, `backend_contract.py`, `docs/INFERENCE_AND_EVALUATION.md` |
+| **P5** | Frozen-inference correctness + speed | ✅ **TXP extractor + backend contract; Evo2 0.6 / Vortex 1.1 pinned. TXP ≈ W8k on dense accuracy (AUPRC 0.299 vs 0.304, CIs overlap) at ~6.7× less Evo2 model time. §10.** | `extract_transcript.py`, `backend_contract.py`, `docs/INFERENCE_AND_EVALUATION.md` |
+| **P6** | **Seq2func: fine-tune AlphaGenome on raw Ribo-seq tracks, call TIS on top** | ⬜ **next — needs a spec** | — |
 
 ---
 
@@ -48,7 +49,7 @@ applies it unchanged to test. The curated set is also 3:1, not the deployment im
 
 ---
 
-## AR — autoresearch fleet 🟢 (active, run paused)
+## AR — autoresearch fleet ✅ (done, harvested 2026-06-16)
 
 Stood up `autoresearch/` — a **4-way parallel fleet**, each loop climbing a different
 objective on **val**, reporting **test** (never selecting on test):
@@ -137,35 +138,38 @@ all-splits store pre-stages it.
 
 ---
 
-## P4 — TIS efficiency regression (HeLa first) ⬜ (not specced)
+## P4 — TIS efficiency regression (HeLa first) 🟡 (first result, FINDINGS §9)
 
 Move beyond yes/no into quantitative initiation: regress the unused per-condition
 translational-efficiency label `max_norm_HeLa` on the frozen embeddings, restricted to
 HeLa.
 
-**Open questions before a spec:** which rows (positives only? expressed_HeLa filter?);
-target transform (raw `max_norm_HeLa` vs log); metric (Spearman / R²); whether to reuse the
-curated store or the dense scan; how the multi-line labels (K562/RPE1/U2OS) factor later.
+Ridge on `log1p(max_norm_HeLa)`: in-distribution ρ 0.30 / R² 0.24, but dense ranking collapses
+to AUPRC 0.098 (curated→dense shift). Superseded by P6, which predicts the raw per-cell-line
+tracks directly instead of regressing a summary label on frozen features.
 
 ---
 
+## P6 — seq2func on raw Ribo-seq tracks ⬜ (needs a spec)
+
+Fine-tune AlphaGenome to predict the raw Ribo-seq coverage tracks (5 cell lines × 2 replicates)
+rather than training a binary head on sparse, frozen start-site labels. Start-site calls are then
+derived from the predicted tracks.
+
+**Open questions for the spec:**
+- One model per cell line vs one multi-output model. The working hypothesis is that cross-line
+  differences are mainly driven by which genes are transcribed — an unexpressed gene has a blank
+  Ribo-seq track, which is missing data, not zero initiation.
+- How expression enters: mask or condition on RNA abundance per line, and report the
+  sequence-only model separately from any model that consumes measured expression.
+- Where fine-tuning code lives (gruyerenome owns model loading/forward passes today).
+- How to derive calls from predicted tracks, and how to score them against the frozen `ag7`
+  baseline under the §10 protocol (recall @ val-selected FP/transcript, AUG vs near-cognate).
+- Later: in-silico perturbation of the trained model.
+
 ## Immediate next action
 
-**Protocol and inference audit (2026-09-09).** Richer classifiers (XGBoost, LightGBM) at the true
-2M imbalance both land within noise of the logistic head (AUPRC 0.303–0.307, recall@1FP
-0.300–0.312). This is evidence that classifier capacity was not limiting in the tested setting,
-not proof of an absolute feature ceiling. The project remains frozen-GLM inference: the next lever
-is a better and cheaper inference representation, not a richer downstream head or
-foundation-model training. See
-`docs/INFERENCE_AND_EVALUATION.md`.
-
-**Two open items, in priority order:**
-1. **Protocol rerun + multi-seed confirmation.** Refit on unique sites, split validation
-   transcripts into calibration and operating-threshold subsets, and report the untouched test
-   result across SEED∈{0..4} with transcript-bootstrap confidence intervals. Historical
-   recall-at-budget values used TEST-optimized thresholds and remain oracle ranking diagnostics.
-2. **Frozen-inference Pareto sweep.** Run the implemented namespaced `W8kS4k`, `W4k`, and
-   exon-spliced `TXP` arms against established `W8k/S2k`. First run `backend_contract`, then
-   compare accuracy and end-to-end GPU time. The opt-in kernels helped fixed-length W8k but were
-   much slower for variable-length TXP and remain an accuracy-gated ablation. True Evo2 batching
-   belongs in `gruyerenome`; test the 1B checkpoint only as a separately namespaced representation.
+1. **Spec P6** (brainstorm → spec → plan): data/track preparation per cell line × replicate,
+   model/fine-tune setup, call derivation, and the evaluation contract against the frozen baseline.
+2. **Carry the frozen baseline forward** under the §10 protocol so P6 has a fixed comparator,
+   stratified by AUG vs near-cognate (near-cognate recall is 0.07 today).

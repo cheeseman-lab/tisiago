@@ -1,9 +1,10 @@
-# Frozen-GLM inference and evaluation protocol
+# Inference and evaluation protocol
 
-This project uses genome foundation models only for frozen inference. The learned task model is
-a small downstream classifier or regressor. Changing a window, stride, orientation, model
-checkpoint, hidden layer, or feature offset changes the feature distribution and therefore
-requires retraining that small head, but never the foundation model.
+This protocol was written for the frozen-embedding line (P1–P5): a frozen genome foundation model
+feeds a small downstream head. Changing a window, stride, orientation, checkpoint, hidden layer, or
+feature offset changes the feature distribution and requires retraining that head. The evaluation
+rules below (data roles, thresholds, strata, bootstrap) also apply to the P6 fine-tuned model,
+which must be compared against the frozen `ag7` baseline under the same protocol.
 
 ## Define the prediction target precisely
 
@@ -79,11 +80,8 @@ isolated uv virtualenv. `gruyerenome` remains the dependency and forward-pass au
 `tisiago` supplies extraction, contracts, and benchmarks:
 
 ```bash
-sbatch --partition="$TISIAGO_EVO_PARTITION" \
-  scripts/run_tis_evo2_env_setup.sh .venv/evo2-next
-
-PYTHON_BIN="$PWD/.venv/evo2-next/bin/python" \
-  sbatch --partition="$TISIAGO_EVO_PARTITION" scripts/run_tis_backend_contract.sh \
+sbatch --partition=nvidia-A100-20 scripts/run_tis_evo2_env_setup.sh .venv/evo2-next
+sbatch --partition=nvidia-A100-20 scripts/run_tis_backend_contract.sh \
   configs/tis_evo2_8k_blk28.yaml 4096 1 1
 ```
 
@@ -204,7 +202,7 @@ the matching stores:
 
 ```bash
 # Curated train/calibration features.
-sbatch --array=0-19%2 --partition="$TISIAGO_EVO_PARTITION" \
+sbatch --array=0-19%2 --partition=nvidia-A100-20 \
   scripts/run_tis_extract_transcript.sh \
   configs/tis_evo2_8k_blk28.yaml 20 data/manifest.parquet data/txp_parts
 python -m tisiago.store --manifest data/manifest.parquet \
@@ -212,7 +210,7 @@ python -m tisiago.store --manifest data/manifest.parquet \
   --glob 'evo2_txp_shard*.npz'
 
 # One-time dense experiment features (2M diverse train negatives plus held-out val/test).
-sbatch --array=0-19%2 --partition="$TISIAGO_EVO_PARTITION" \
+sbatch --array=0-19%2 --partition=nvidia-A100-20 \
   scripts/run_tis_extract_transcript.sh \
   configs/tis_evo2_8k_blk28.yaml 20 \
   data/dense_exp_store/manifest.parquet data/dense_txp_parts
@@ -270,7 +268,7 @@ python -m tisiago.extract_transcript \
   --config configs/tis_evo2_8k_blk28.yaml \
   --genome "$TISIAGO_GENOME" \
   --gtf "$TISIAGO_GTF" \
-  --out-dir /tmp/tisiago-txp-preflight --dry-run
+  --out-dir ./tmp/txp-preflight --dry-run
 ```
 
 On the current curated manifest this validates 192,072 candidate codons across 18,588 transcripts.

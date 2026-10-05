@@ -6,24 +6,24 @@
 # Assumes data/manifest.parquet already exists (produced by swissisoform).
 #
 # Usage: bash scripts/run_tis_pipeline.sh [N_SHARDS]
-# Required: TISIAGO_GENOME and ALPHAGENOME_WEIGHTS_PATH.
+# Required (from .env): TISIAGO_GENOME and ALPHAGENOME_WEIGHTS_PATH.
 # Optional scheduler settings: TISIAGO_AG_PARTITION, TISIAGO_EVO_PARTITION,
 # TISIAGO_AG_CONCURRENCY, and TISIAGO_EVO_CONCURRENCY.
 
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_common.sh"
 cd "$REPO_ROOT"
 
 N="${1:-20}"
 LAST=$((N - 1))
 : "${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 : "${ALPHAGENOME_WEIGHTS_PATH:?Set ALPHAGENOME_WEIGHTS_PATH to the AlphaGenome checkpoint directory}"
-AG_PYTHON="${TISIAGO_AG_PYTHON:-$REPO_ROOT/.venv/alphagenome/bin/python}"
-EVO_PYTHON="${TISIAGO_EVO_PYTHON:-$REPO_ROOT/.venv/evo2-next/bin/python}"
-CPU_PYTHON="${TISIAGO_CPU_PYTHON:-$EVO_PYTHON}"
+AG_PYTHON="$TISIAGO_AG_PYTHON"
+EVO_PYTHON="$TISIAGO_EVO_PYTHON"
+CPU_PYTHON="$TISIAGO_CPU_PYTHON"
 for executable in "$AG_PYTHON" "$EVO_PYTHON" "$CPU_PYTHON"; do
     [[ -x "$executable" ]] || {
-        echo "Python not found at $executable; configure the uv environments first" >&2
+        echo "Python not found at $executable; check TISIAGO_*_PYTHON in .env" >&2
         exit 2
     }
 done

@@ -36,6 +36,9 @@ no signal — the head must discriminate on learned context alone.
 
 ## 2. Module map
 
+Core path below; the full module list (TXP extraction, contracts, clean multi-seed
+evaluation, partial-logit scoring) is in `CLAUDE.md` → Code Structure.
+
 ```
 src/tisiago/
 ├── tiling.py      pure geometry      candidate codon ──▶ (tile_start, within-tile offset)
@@ -46,7 +49,7 @@ src/tisiago/
 ├── caller.py      head (CPU)         .npy ──▶ calibrated p ──▶ reliability · recall @ FP/transcript budget
 ├── enumerate_codons.py  scan setup (CPU)   GTF + genome ──▶ dense scan manifest (every codon)
 ├── scan_eval.py         global caller (CPU) scan store ──▶ recall @ true imbalance · non-cognate≈0
-└── dense_caller.py      Option B (CPU)      curated-trained heads ──▶ chunked score of dense scan @ true imbalance
+└── dense_caller.py      Option B (CPU)      curated- or dense-trained heads ──▶ chunked score of dense scan @ true imbalance
 ```
 
 | Module | Purpose | Depends on | Testable as |
@@ -175,8 +178,10 @@ full `[N, D]` scatter does not fit in RAM or SSD. Two regimes handle it instead 
 (`tisiago.scan_score`) streams shards directly to score every codon without materialising the
 matrix. Curated-candidate stores (≪ 10 M rows) continue to use `store.py` unchanged.
 
-**Option B (2026-06-17) is the live use of this store** (`src/tisiago/dense_caller.py`): it
-trains the autoresearch-winner 7-key head on the **curated** store (two variants —
+**Option B (2026-06-17) first used this store as an evaluation substrate**
+(`src/tisiago/dense_caller.py`). It later moved to `--train dense` (training on the compact dense
+store at 49:1, FINDINGS §7), and the clean multi-seed protocol lives in `representation_eval.py`
+(§10). The original design trained the autoresearch-winner 7-key head on the **curated** store (two variants —
 `class_weight=None` vs `balanced`), calibrates on curated val, and scores both on the dense
 scan TEST split at true ~230:1 imbalance (recall @ ≤1 FP/tx over cognate codons +
 non-cognate≈0 grounding + a 3-gene out-of-sample demo). At 19.6k-dim × 5 M test rows (~196 GB
@@ -198,7 +203,7 @@ disk remains logged debt for a full 12-key dense run.
 scripts/run_tis_pipeline.sh  N
         │
         ├─ run_tis_extract.sh   (SLURM array, GPU)  ── 3 specs × shards ──▶ data/parts/*.npz
-        │        uv env: alphagenome / evo2   ·   extract.py
+        │        env: conda alphagenome / uv .venv/evo2-next   ·   extract.py
         │
         └─ run_tis_assemble.sh  (CPU)  ── store.py ──▶ data/store/
                  env: tisiago
@@ -209,7 +214,7 @@ eval / resolution / caller  (CPU, tisiago env)  ── read-only over data/store
 enumerate_codons.py  (CPU)  ── GENCODE GTF + genome ──▶ data/scan_manifest_allsplits.parquet (62.7M codons)
         │
         ├─ run_tis_scan.sh  (SLURM array, GPU)  ── extract.py ──▶ data/scan_parts_allsplits/*.npz
-        │        uv env: alphagenome / evo2   ·   evo2 blk28-only config @ --mem=192G
+        │        env: conda alphagenome / uv .venv/evo2-next   ·   evo2 blk28-only config @ --mem=192G
         ├─ kozak_onehot_scan.py  (CPU)  ── genome ──▶ kozakW20_allsplits.npy (validated vs curated)
         │
         └─ store.py  (CPU)  ──▶ data/scan_store_allsplits/
@@ -218,9 +223,9 @@ enumerate_codons.py  (CPU)  ── GENCODE GTF + genome ──▶ data/scan_mani
 scan_eval  (CPU, tisiago env)  ── curated-trained calibrated head applied to data/scan_store/
 ```
 
-| Stage | Conda env | Needs | Entry point |
+| Stage | Environment | Needs | Entry point |
 |---|---|---|---|
-| Extraction | `alphagenome` / `evo2` | tisiago + gruyerenome (editable) + pyfaidx, GPU | `extract.py` via SLURM array |
+| Extraction | conda `alphagenome` / uv `.venv/evo2-next` | tisiago + gruyerenome (editable) + pyfaidx, GPU | `extract.py` via SLURM array |
 | Assembly | any (`tisiago`) | numpy/pandas/pyyaml | `store.py` |
 | Eval / training | `tisiago` | numpy/pandas/sklearn, no GPU | `eval.py`, `resolution.py`, `caller.py` |
 | Scan enumeration | `tisiago` (+pyfaidx) | GTF + genome, no GPU | `enumerate_codons.py` |
