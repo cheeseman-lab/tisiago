@@ -32,6 +32,10 @@ heads = [
     "xgboost>=2.0",
     "lightgbm>=4.0",
 ]
+tracks = [
+    "pysam>=0.22",
+    "pyBigWig>=0.3.22",
+]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
