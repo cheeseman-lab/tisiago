@@ -83,3 +83,19 @@ def test_log_pearson_zero_variance_nan_no_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert np.isnan(log_pearson(a, b)).all()
+
+
+def test_profile_kl_matches_dense_formula_on_sparse_targets():
+    rng = np.random.default_rng(1)
+    target = rng.poisson(0.05, size=(500, 4)).astype(np.float32)
+    pred = rng.gamma(1.0, size=(500, 4)).astype(np.float32)
+    pred[::7, 1] = 0.0
+    mask = rng.random((500, 4)) > 0.2
+    p = np.where(mask, pred.astype(np.float64), 0.0)
+    t = np.where(mask, target.astype(np.float64), 0.0)
+    pt, pp = t / t.sum(axis=0), p / p.sum(axis=0)
+    safe = np.where(pt > 0, pt, 1.0)
+    expected = np.where(
+        pt > 0, pt * (np.log(safe) - np.log(np.maximum(np.where(pt > 0, pp, 1.0), 1e-7))), 0.0
+    ).sum(axis=0)
+    np.testing.assert_allclose(profile_kl(pred, target, mask), expected, rtol=1e-10)

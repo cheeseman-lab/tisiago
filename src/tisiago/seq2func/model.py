@@ -106,6 +106,27 @@ def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True):
     )
 
 
+def make_predict(model, head: str):
+    """Jitted ``predict(params, state, sequences (B, S, 4)) -> (B, S, C)`` for ``head``."""
+    strand_reindexing = model._metadata[ORGANISM].strand_reindexing
+    org_index = dna_model.convert_to_organism_index(ORGANISM)
+
+    @jax.jit
+    def predict(params, state, sequences):
+        batch_size = sequences.shape[0]
+        return model._predict(
+            params,
+            state,
+            sequences,
+            jnp.full((batch_size,), org_index, jnp.int32),
+            requested_outputs=(),
+            negative_strand_mask=jnp.zeros((batch_size,), bool),
+            strand_reindexing=strand_reindexing,
+        )[head]
+
+    return predict
+
+
 def label_backbone_params(params, head: str):
     """Label leaves under ``head/<head>/`` as ``"head"`` and every other leaf ``"backbone"``."""
 

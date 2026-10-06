@@ -45,15 +45,17 @@ def replicate_concordance(
 
 
 def _frame_counts(
-    counts: dict[str, Counter], cds: list[tuple[str, str, list[tuple[int, int]]]]
+    counts: dict[str, Counter],
+    cds: list[tuple[str, str, list[tuple[int, int]]]],
+    shift: int = RIBOTISH_MINUS_SHIFT,
 ) -> tuple[int, int]:
-    """Return (in-frame, total) CDS P-site counts."""
+    """Return (in-frame, total) CDS P-site counts; minus-strand positions read at ``p + shift``."""
     in_frame = total = 0
     for chrom, strand, exons in cds:
         track = counts.get(chrom, {})
         positions = [p for start, end in sorted(exons) for p in range(start, end)]
         if strand == "-":
-            positions = [p + RIBOTISH_MINUS_SHIFT for p in positions[::-1]]
+            positions = [p + shift for p in positions[::-1]]
         for index, position in enumerate(positions):
             value = track.get(position, 0)
             total += value

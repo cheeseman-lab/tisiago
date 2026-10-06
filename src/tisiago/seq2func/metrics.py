@@ -18,9 +18,11 @@ def profile_kl(pred: np.ndarray, target: np.ndarray, mask: np.ndarray) -> np.nda
     target = np.where(mask, np.maximum(target.astype(np.float64), 0.0), 0.0)
     total_pred = pred.sum(axis=0)
     total_target = target.sum(axis=0)
-    p_target = target / np.maximum(total_target, EPS)
-    p_pred = pred / np.maximum(total_pred, EPS)
-    kl = (_xlogy(p_target, p_target) - _xlogy(p_target, p_pred)).sum(axis=0)
+    rows, cols = np.nonzero(target > 0)
+    p_target = target[rows, cols] / np.maximum(total_target[cols], EPS)
+    p_pred = pred[rows, cols] / np.maximum(total_pred[cols], EPS)
+    terms = _xlogy(p_target, p_target) - _xlogy(p_target, p_pred)
+    kl = np.bincount(cols, weights=terms, minlength=target.shape[1])
     return np.where(total_target > 0, kl, np.nan)
 
 

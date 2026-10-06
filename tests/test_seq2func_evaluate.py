@@ -1,0 +1,273 @@
+"""Tests for held-out evaluation and the replicate ceiling."""
+
+import math
+import sys
+from collections import Counter
+
+import numpy as np
+import pandas as pd
+import pytest
+from pyfaidx import Fasta
+
+from tisiago.seq2func import evaluate
+from tisiago.seq2func.evaluate import (
+    EXCLUDED,
+    OUTSIDE,
+    assign_spans,
+    ceiling_metrics,
+    evaluate_checkpoint,
+)
+from tisiago.seq2func.qc import _frame_counts
+from tisiago.seq2func.targets import channel_layout
+from tisiago.seq2func.tracks import track_prefix, write_bigwigs
+
+SIZE = 200
+SIZES = [("chr7", SIZE)]
+WINDOWS = pd.DataFrame({"chrom": ["chr7"] * 3, "start": [0, 50, 100], "end": [100, 150, 200]})
+
+
+def _genes(condition="HeLa"):
+    # G1 inside window 0 only; G2 inside windows 0 and 1 (nearer window 1's centre 100);
+    # G3 inside windows 1 and 2; G4 straddles every window boundary it touches -> excluded;
+    # G5 is unexpressed; G6 on the minus strand inside window 2.
+    return pd.DataFrame(
+        {
+            "condition": condition,
+            "gene_id": ["G1", "G2", "G3", "G4", "G5", "G6", "G7"],
+            "chrom": "chr7",
+            "start": [5, 60, 110, 40, 10, 160, 120],
+            "end": [30, 95, 140, 160, 20, 190, 145],
+            "strand": ["+", "+", "+", "+", "+", "-", "+"],
+            "expressed": [True, True, True, True, False, True, True],
+        }
+    )
+
+
+def _counts(seed):
+    rng = np.random.default_rng(seed)
+    plus = Counter({int(p): int(rng.integers(1, 20)) for p in rng.choice(SIZE, 80, replace=False)})
+    minus = Counter({int(p): int(rng.integers(1, 20)) for p in rng.choice(SIZE, 80, replace=False)})
+    return {("chr7", "+"): plus, ("chr7", "-"): minus}
+
+
+def _write(tracks, condition, rep, seed):
+    for k, library in enumerate(("tis", "chx", "rna")):
+        write_bigwigs(_counts(seed + k), SIZES, track_prefix(tracks, condition, library, rep))
+
+
+def test_assign_spans_nearest_centre_and_excluded():
+    where = assign_spans(_genes(), WINDOWS)
+    assert where.tolist()[:4] == [0, 1, 1, EXCLUDED]
+    # G3 [110, 140) centre 125 is inside windows 1 (centre 100) and 2 (centre 150): tie -> first
+    assert where.tolist()[2] == 1
+    assert where.tolist()[5] == 2
+    far = pd.DataFrame({"chrom": ["chr7", "chr8"], "start": [0, 0], "end": [10, 10]})
+    assert assign_spans(far, WINDOWS.iloc[2:]).tolist() == [OUTSIDE, OUTSIDE]
+
+
+def test_ceiling_identical_replicates_is_perfect(tmp_path):
+    tracks = tmp_path / "tracks"
+    _write(tracks, "HeLa", 1, seed=0)
+    _write(tracks, "HeLa", 2, seed=0)
+    table = ceiling_metrics(tracks, ["HeLa"], _genes(), WINDOWS)
+    assert len(table) == len(channel_layout(["HeLa"]))
+    assert np.allclose(table.profile_kl, 0.0, atol=1e-9)
+    plus = table[table.strand == "+"]
+    assert np.allclose(plus.log_pearson, 1.0)
+    # G1, G2, G3, G7 are + expressed genes fully inside a window; G4 is excluded and counted
+    assert plus.n_genes.tolist() == [4, 4, 4]
+    assert plus.genes_excluded.tolist() == [1, 1, 1]
+    minus = table[table.strand == "-"]
+    assert minus.n_genes.tolist() == [1, 1, 1]
+    assert minus.log_pearson.isna().all()  # < 3 genes -> NaN, not a crash
+    assert (table.kl_windows == 3).all()
+
+
+def test_ceiling_differs_for_different_replicates(tmp_path):
+    tracks = tmp_path / "tracks"
+    _write(tracks, "HeLa", 1, seed=0)
+    _write(tracks, "HeLa", 2, seed=10)
+    table = ceiling_metrics(tracks, ["HeLa"], _genes(), WINDOWS)
+    assert (table.profile_kl > 0).all()
+    assert (table.log_pearson[table.strand == "+"] < 1.0).all()
+
+
+def test_gene_totals_are_not_double_counted(tmp_path):
+    # rep1: one count per base inside G2; rep2 doubles it. A gene counted in two windows would
+    # double its totals in both replicates; check the totals directly.
+    tracks = tmp_path / "tracks"
+    flat = Counter({p: 1 for p in range(SIZE)})
+    for rep in (1, 2):
+        for library in ("tis", "chx", "rna"):
+            write_bigwigs(
+                {("chr7", "+"): flat, ("chr7", "-"): flat},
+                SIZES,
+                track_prefix(tracks, "HeLa", library, rep),
+            )
+    acc = evaluate.ChannelMetrics(channel_layout(["HeLa"]), _genes(), WINDOWS)
+    reader = evaluate.TrackReader(tracks, ["HeLa"], rep=1)
+    for i, row in enumerate(WINDOWS.itertuples()):
+        track = reader.read(row.chrom, row.start, row.end)
+        acc.add(i, track, track, np.ones_like(track, dtype=bool))
+    lengths = (acc.genes.end - acc.genes.start).to_numpy()
+    inside = acc.where >= 0
+    assert np.allclose(acc.obs_totals[inside, 0], lengths[inside])
+
+
+def test_frame_counts_shift_zero_for_canonical_psites():
+    cds = [("chr1", "-", [(10, 16)])]
+    canonical = {"chr1": Counter({15: 5, 12: 3, 14: 2})}
+    assert _frame_counts(canonical, cds, shift=0) == (8, 10)
+    shifted = {"chr1": Counter({16: 5, 13: 3, 15: 2})}
+    assert _frame_counts(shifted, cds) == (8, 10)
+
+
+@pytest.fixture
+def world(tmp_path):
+    seq = ("ATGAAACCC" * 30)[:SIZE]
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(f">chr7\n{seq}\n")
+    Fasta(str(fasta)).close()
+    tracks = tmp_path / "tracks"
+    _write(tracks, "HeLa", "pooled", seed=0)
+    # CHX pooled: + CDS [60, 90) fully in frame; - CDS [160, 190) codon first bases 189, 186,
+    # ... plus 4 off-frame at 170. Minus bigWigs hold Ribo-TISH positions (canonical + 1).
+    minus = Counter({p + 1: 2 for p in range(189, 159, -3)})
+    minus[171] = 4
+    chx = {("chr7", "+"): Counter({p: 3 for p in range(60, 90, 3)}), ("chr7", "-"): minus}
+    write_bigwigs(chx, SIZES, track_prefix(tracks, "HeLa", "chx", "pooled"))
+    cds = [("chr7", "+", [(60, 90)]), ("chr7", "-", [(160, 190)]), ("chr7", "+", [(40, 160)])]
+    return dict(fasta=str(fasta), tracks_dir=tracks, genes=_genes(), cds=cds)
+
+
+def test_evaluate_checkpoint_perfect_fake_model(world):
+    layout = channel_layout(["HeLa"])
+
+    def oracle(batch):
+        return batch["targets"]
+
+    table = evaluate_checkpoint(
+        None,
+        "condition:HeLa",
+        WINDOWS,
+        fasta=world["fasta"],
+        tracks_dir=world["tracks_dir"],
+        genes=world["genes"],
+        cds=world["cds"],
+        predict_fn=oracle,
+    )
+    assert len(table) == len(layout)
+    assert np.allclose(table.profile_kl, 0.0, atol=1e-9)
+    assert np.allclose(table.log_pearson[table.strand == "+"], 1.0)
+    chx = table[table.library == "chx"].set_index("strand")
+    assert chx.loc["+", "frame0_obs"] == pytest.approx(1.0)
+    assert chx.loc["+", "frame0_pred"] == pytest.approx(1.0)
+    assert chx.loc["-", "frame0_obs"] == pytest.approx(20 / 24)
+    # the + CDS spanning [40, 160) is never fully inside one window -> not counted
+    assert chx.loc["+", "frame0_cds"] == 1
+    assert chx.loc["-", "frame0_cds"] == 1
+    assert table[table.library != "chx"].frame0_pred.isna().all()
+
+
+def test_evaluate_checkpoint_flat_model_is_worse(world):
+    def flat(batch):
+        return np.ones_like(batch["targets"])
+
+    table = evaluate_checkpoint(
+        None,
+        "condition:HeLa",
+        WINDOWS,
+        fasta=world["fasta"],
+        tracks_dir=world["tracks_dir"],
+        genes=world["genes"],
+        cds=world["cds"],
+        predict_fn=flat,
+    )
+    assert (table.profile_kl > 0.1).all()
+    chx = table[table.library == "chx"].set_index("strand")
+    assert chx.loc["+", "frame0_pred"] == pytest.approx(1 / 3)
+
+
+def test_test_split_refuses_without_final_flag(tmp_path, monkeypatch, capsys):
+    argv = ["evaluate", "--arm", "shared", "--checkpoint", str(tmp_path), "--split", "test"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--out-dir", str(tmp_path / "eval")])
+    with pytest.raises(SystemExit) as exc:
+        evaluate.main()
+    assert exc.value.code != 0
+    assert "--i-am-final" in capsys.readouterr().err
+    assert not (tmp_path / "eval").exists()
+
+
+def test_cli_refuses_to_overwrite_existing_output(tmp_path, monkeypatch):
+    out = tmp_path / "eval"
+    out.mkdir()
+    (out / "condition_hela_val.tsv").write_text("x\n")
+    argv = ["evaluate", "--arm", "condition:HeLa", "--checkpoint", str(tmp_path)]
+    monkeypatch.setattr(sys, "argv", [*argv, "--split", "val", "--out-dir", str(out)])
+    with pytest.raises(SystemExit) as exc:
+        evaluate.main()
+    assert exc.value.code != 0
+    assert (out / "condition_hela_val.tsv").read_text() == "x\n"
+
+
+def test_ceiling_only_refuses_existing_ceiling(tmp_path, monkeypatch):
+    out = tmp_path / "eval"
+    out.mkdir()
+    (out / "ceiling_val.tsv").write_text("x\n")
+    argv = ["evaluate", "--ceiling-only", "--split", "val", "--out-dir", str(out)]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit) as exc:
+        evaluate.main()
+    assert exc.value.code != 0
+    assert (out / "ceiling_val.tsv").read_text() == "x\n"
+
+
+def test_output_paths():
+    out = evaluate.output_paths("data/p6/eval", "condition:RPE1_Que", "val")
+    assert str(out["model"]) == "data/p6/eval/condition_rpe1_que_val.tsv"
+    assert str(out["ceiling"]) == "data/p6/eval/ceiling_val.tsv"
+
+
+def test_mean_kl_skips_nan_windows():
+    assert math.isnan(evaluate.channel_kl(np.full((2, 1), np.nan))[0][0])
+
+
+def test_load_predict_fn_registers_head_then_loads_checkpoint(monkeypatch, tmp_path):
+    agft = pytest.importorskip("alphagenome_ft")
+    model_mod = pytest.importorskip("tisiago.seq2func.model")
+    calls = {}
+
+    class FakeModel:
+        _params, _state = "params", "state"
+
+    def fake_register(name, num_tracks, kind="mlp"):
+        calls["register"] = (name, num_tracks, kind)
+
+    def fake_load(checkpoint, **kwargs):
+        assert "register" in calls, "head must be registered before load_checkpoint"
+        calls["load"] = (checkpoint, kwargs)
+        return FakeModel()
+
+    def fake_make_predict(model, head):
+        calls["head"] = head
+        return lambda params, state, seq: np.zeros((1, seq.shape[1], 6)) + (params == "params")
+
+    monkeypatch.setattr(agft, "load_checkpoint", fake_load)
+    monkeypatch.setattr(model_mod, "register_track_head", fake_register)
+    monkeypatch.setattr(model_mod, "make_predict", fake_make_predict)
+    predict = evaluate.load_predict_fn(
+        tmp_path, "condition:HeLa", base_checkpoint="weights", head_kind="conv"
+    )
+    assert calls["register"] == ("p6_hela", 6, "conv")
+    assert calls["head"] == "p6_hela"
+    assert calls["load"][1]["base_checkpoint_path"] == "weights"
+    assert list(calls["load"][1]["organism_settings"]) == [model_mod.ORGANISM]
+    out = predict({"sequences": np.zeros((1, 8, 4), np.float32)})
+    assert out.shape == (1, 8, 6) and (out == 1).all()
+
+
+def test_head_kind_read_from_run_json(tmp_path):
+    (tmp_path / "best").mkdir()
+    assert evaluate.head_kind_of(tmp_path / "best") == "mlp"
+    (tmp_path / "run.json").write_text('{"args": {"head": "conv"}}')
+    assert evaluate.head_kind_of(tmp_path / "best") == "conv"

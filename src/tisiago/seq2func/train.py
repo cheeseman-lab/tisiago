@@ -240,12 +240,11 @@ def main() -> None:
     import jax
     import jax.numpy as jnp
     import pandas as pd
-    from alphagenome_research.model import dna_model
 
     from tisiago.seq2func.data import iterate
     from tisiago.seq2func.model import (
-        ORGANISM,
         load_model,
+        make_predict,
         make_train_step,
         register_track_head,
     )
@@ -285,21 +284,7 @@ def main() -> None:
         clip_norm=args.clip_norm,
     )
     params, state = model._params, model._state
-    strand_reindexing = model._metadata[ORGANISM].strand_reindexing
-    org_index = dna_model.convert_to_organism_index(ORGANISM)
-
-    @jax.jit
-    def predict(params, state, sequences):
-        batch_size = sequences.shape[0]
-        return model._predict(
-            params,
-            state,
-            sequences,
-            jnp.full((batch_size,), org_index, jnp.int32),
-            requested_outputs=(),
-            negative_strand_mask=jnp.zeros((batch_size,), bool),
-            strand_reindexing=strand_reindexing,
-        )[head]
+    predict = make_predict(model, head)
 
     data_kwargs = dict(
         fasta=args.genome, tracks_dir=args.tracks_dir, conditions=conditions, genes=genes
