@@ -343,6 +343,46 @@ unfolded sklearn pipeline, the deployable artifacts with folded coefficients, an
 turn a float-precision logit difference into a visible probability jump for 3 codons at the
 threshold. Training-chromosome calls are not produced (the model saw them).
 
+## 11. P6 — fine-tuning AlphaGenome on Ribo-seq tracks (in progress, 2026-10-06)
+
+P6.1 overfit gate: can a model reproduce base-resolution Ribo-seq profiles on a single window?
+Window: HeLa, chr12 131,072 bp centred on 6,536,000 (GAPDH), 6 channels (TIS/CHX/RNA x strand),
+canonical P-site targets, mask all True. Profile KL = mean multinomial KL over channels (deviance
+form). References: uniform prediction KL ~4.74; replicate floor (pooled vs rep2, smoothed 5 bp)
+0.35-1.41, mean ~0.6. Gate: total-loss reduction >= 0.9 AND final profile KL <= 1.0 (the profile
+gate was added after the first run met the total-loss gate by fitting window totals alone).
+
+| run | steps | final KL | best KL | s/step | peak GiB |
+|---|---|---|---|---|---|
+| frozen backbone, MLP head, lr 1e-3 | 300 | 4.31 | - | 0.080 | 8.70 |
+| frozen, MLP, lr 1e-3 | 3,000 | 3.83 | - | 0.080 | - |
+| frozen, MLP, lr 3e-3 | 3,000 | 3.71 | - | 0.081 | - |
+| frozen, conv head | 3,000 | 4.64 | - | 0.151 | 8.70 |
+| fine-tuned backbone (lr 1e-5), MLP | 3,000 | 2.52 | 2.24 | 0.263 | 17.27 |
+| fine-tuned backbone (lr 1e-5), conv | 3,000 | 4.55 | - | 0.359 | 18.46 |
+| fine-tuned (1e-4), MLP, constant lr | 6,000 | 2.15 | 1.44 | 0.263 | 17.27 |
+| fine-tuned (1e-4), MLP, cosine + warmup 300 + clip 1.0 | 6,000 | 1.005 | 1.005 | 0.265 | 16.96 |
+| **fine-tuned (1e-4), MLP, cosine + warmup 300 + clip 1.0** | **12,000** | **0.762** | **0.762** | 0.265 | 16.93 |
+
+All runs on one L40S. The frozen conv head sees embeddings only (agft never forwards sequence to
+custom heads, `custom_model.py:2338`).
+
+- **Frozen AG 1-bp embeddings cannot reproduce base-resolution profiles**, even when memorizing one
+  window (KL 3.7-4.6 vs uniform 4.74). Consistent with §3: the 1-bp embeddings mostly carry
+  regional context.
+- **Fine-tuning the backbone does** (0.76, near the replicate floor), but needs warmup-cosine and
+  gradient clipping to be stable (constant lr 1e-4 oscillated: best 1.44, final 2.15).
+- The conv head was unstable at lr 1e-3 and is inconclusive.
+- **One window, memorization, not generalization.** P6.2 tests held-out chromosomes.
+- Alignment check: top TIS+ peaks sit on the GAPDH ATG (A 11,182 / T 16,720 counts; the +13 offset
+  puts the max on the T); CHX downstream frame-0 fraction 0.59. P6.0 QC: replicate r 0.96-0.99;
+  CHX frame-0 0.45-0.67 after the Ribo-TISH minus-strand +1 correction.
+- The P6.0 round trip against Jimmy's Ribo-TISH calls is still running; not yet a result.
+
+Deviations from the spec found by the spike: own training loop (agft 0.1.12 trainer is broken);
+agft LoRA is head-side only; full fine-tuning fits at 131 kb in ~17 GiB on a 48 GB card (the spec's
+>=76 GB was for 1 Mb inputs); A100 queue unavailable, so all runs used L40S.
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest

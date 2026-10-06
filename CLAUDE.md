@@ -98,6 +98,15 @@ src/tisiago/
   linear_head.py           portable calibrated linear-head artifact
   projected_score.py, transcript_projection.py   partial-logit scoring without full features
   scan_eval.py, scan_score.py                     dense-scan scoring (Regime B streaming)
+  # P6 seq2func (fine-tune AlphaGenome on Ribo-seq tracks)
+  seq2func/
+    samples.py, psite.py, tracks.py   per-sample P-site tracks from BAMs
+    synthetic_bam.py                  synthetic BAMs for tests
+    ribotish.py, roundtrip.py         Ribo-TISH call parsing + P6.0 round trip
+    qc.py                             replicate / frame QC
+    targets.py, augment.py, masking.py   window targets, augmentation, loss masks
+    loss.py, model.py                 profile loss, agft model + 6-channel heads
+    overfit.py                        single-window overfit gate (own training loop)
 scripts/        Slurm wrappers (_common.sh shared header), store builders, compare_heads, report
 configs/        gruyerenome backend configs + dense dataset configs
 autoresearch/   4-objective head-search harness (done; winners.md)
@@ -115,6 +124,7 @@ Conda + uv, per stage (paths set in `.env`):
 | Eval / training / assembly (CPU) | conda `tisiago` | `uv pip install -e ".[dev]"` |
 | AlphaGenome extraction (GPU) | conda `alphagenome` | tisiago + gruyerenome editable, pyfaidx |
 | Evo2 extraction (GPU) | uv `.venv/evo2-next` | built by `scripts/run_tis_evo2_env_setup.sh` from `requirements-evo2.lock` (Evo2 0.6 / Vortex 1.1, source-built FlashAttention) |
+| P6 seq2func (GPU) | uv `.venv/agft` | built by `scripts/run_p6_agft_env_setup.sh` from `requirements-agft.lock` |
 
 ```bash
 eval "$(conda shell.bash hook)" && conda activate tisiago

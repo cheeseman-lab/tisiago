@@ -32,7 +32,7 @@ _Last updated: 2026-10-05._
 | **P3.5** | **Head exploration — richer classifiers @ dense 2M** | 🟢 **DONE (2026-06-24): XGBoost 0.303 / LightGBM 0.304 AUPRC were within noise of logistic 0.307 in this single-seed comparison; no evidence that head capacity was limiting. §9.** | `head_xgb.py`, `compare_heads.py`, `FINDINGS.md §9` |
 | **P4** | TIS efficiency regression (HeLa first) | 🟡 **first result (2026-06-24): Ridge on log1p(max_norm_HeLa) — in-dist ρ 0.30 / R² 0.24, but dense ranking collapses to AUPRC 0.098 (curated→dense shift, not absence of signal). §9.** | `efficiency_head.py`, `FINDINGS.md §9` |
 | **P5** | Frozen-inference correctness + speed | ✅ **TXP extractor + backend contract; Evo2 0.6 / Vortex 1.1 pinned. TXP ≈ W8k on dense accuracy (AUPRC 0.299 vs 0.304, CIs overlap) at ~6.7× less Evo2 model time. §10.** | `extract_transcript.py`, `backend_contract.py`, `docs/INFERENCE_AND_EVALUATION.md` |
-| **P6** | **Seq2func: fine-tune AlphaGenome on raw Ribo-seq tracks, call TIS on top** | ⬜ **next — needs a spec** | — |
+| **P6** | **Seq2func: fine-tune AlphaGenome on raw Ribo-seq tracks, call TIS on top** | 🟡 **P6.0 data + P6.1 agft core done (2026-10-06): fine-tuned AG memorizes one window to profile KL 0.76 (frozen heads cannot). P6.2 (held-out chromosomes) next. FINDINGS §11.** | `src/tisiago/seq2func/` |
 
 ---
 
@@ -150,11 +150,18 @@ tracks directly instead of regressing a summary label on frozen features.
 
 ---
 
-## P6 — seq2func on raw Ribo-seq tracks ⬜ (needs a spec)
+## P6 — seq2func on raw Ribo-seq tracks 🟡 (P6.0/P6.1 done, FINDINGS §11)
 
 Fine-tune AlphaGenome to predict the raw Ribo-seq coverage tracks (5 cell lines × 2 replicates)
 rather than training a binary head on sparse, frozen start-site labels. Start-site calls are then
 derived from the predicted tracks.
+
+**Progress (2026-10-06).** P6.0 data prep: per-sample P-site tracks and QC done (replicate r
+0.96-0.99; CHX frame-0 0.45-0.67); the round trip against Jimmy's Ribo-TISH calls is still running
+(no result yet). P6.1 agft core: own training loop, 6-channel head, overfit gate on one HeLa
+window (GAPDH, 131 kb). Frozen-backbone heads stall at profile KL 3.7-4.6; the fine-tuned backbone
+with warmup-cosine + gradient clipping reaches 0.76 (replicate floor ~0.6). One window,
+memorization only; generalization is P6.2. All runs on L40S (A100 queue unavailable).
 
 **Open questions for the spec:**
 - One model per cell line vs one multi-output model. The working hypothesis is that cross-line
