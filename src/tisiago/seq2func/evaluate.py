@@ -14,7 +14,10 @@ replicate 1). Metrics: mean masked ``profile_kl`` over windows (NaN windows skip
 counted); gene-level ``log_pearson`` over the channel's expressed same-strand genes, each gene
 totalled once in the window that contains it whose centre is nearest the gene centre (genes
 never fully inside a window are excluded and counted); and, for CHX channels, the frame-0
-fraction over MANE CDS assigned to windows the same way (canonical P-sites, no shift).
+fraction over MANE CDS of genes expressed in the channel's condition, assigned to windows
+the same way (canonical P-sites, no shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a
+truncated ceiling never stands in for the full one; a reused ceiling must match the window
+count and tracks directory.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import warnings
 from collections.abc import Callable, Sequence
@@ -33,7 +37,7 @@ import pandas as pd
 from tisiago.seq2func.data import TrackReader, iterate
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
-from tisiago.seq2func.qc import _frame_counts, load_mane
+from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.samples import CONDITIONS
 from tisiago.seq2func.targets import channel_layout
 from tisiago.seq2func.train import parse_arm
@@ -41,6 +45,26 @@ from tisiago.seq2func.train import parse_arm
 EXCLUDED = -1
 OUTSIDE = -2
 SPLIT_FILES = {"val": "val.parquet", "test": "test.parquet"}
+DEFAULT_TRACKS = Path("data/p6/tracks")
+_GENE_ID = re.compile(r'gene_id "([^"]+)"')
+_TRANSCRIPT_ID = re.compile(r'transcript_id "([^"]+)"')
+
+
+def load_mane_cds(gtf: str | Path) -> tuple[list[tuple[str, str, list]], list[str]]:
+    """MANE_Select CDS ``(chrom, strand, intervals)`` (as ``qc.load_mane``) and their gene_ids."""
+    cds: dict[str, list] = {}
+    genes: dict[str, str] = {}
+    with open(gtf) as handle:
+        for line in handle:
+            if line.startswith("#") or 'tag "MANE_Select"' not in line:
+                continue
+            f = line.rstrip("\n").split("\t")
+            if f[2] != "CDS":
+                continue
+            tid = _TRANSCRIPT_ID.search(f[8]).group(1)
+            cds.setdefault(tid, [f[0], f[6], []])[2].append((int(f[3]) - 1, int(f[4])))
+            genes[tid] = _GENE_ID.search(f[8]).group(1)
+    return [tuple(v) for v in cds.values()], [genes[t] for t in cds]
 
 
 def assign_spans(spans: pd.DataFrame, windows: pd.DataFrame) -> np.ndarray:
@@ -98,8 +122,13 @@ class ChannelMetrics:
         genes: pd.DataFrame,
         windows: pd.DataFrame,
         cds: Sequence[tuple[str, str, list[tuple[int, int]]]] = (),
+        cds_genes: Sequence[str] = (),
     ):
-        """Assign expressed genes of the layout's conditions and MANE CDS to windows."""
+        """Assign expressed genes of the layout's conditions and MANE CDS to windows.
+
+        ``cds_genes[i]`` is the gene_id of ``cds[i]``; a channel's frame counts use only CDS of
+        genes expressed in its condition.
+        """
         self.layout = layout
         self.windows = windows.reset_index(drop=True)
         conditions = {c for c, _, _ in layout}
@@ -112,6 +141,13 @@ class ChannelMetrics:
         self.pred_totals = np.zeros((len(self.genes), n_channels))
         self.kls: list[np.ndarray] = []
         self.cds = list(cds)
+        if len(cds_genes) != len(self.cds):
+            raise ValueError(f"{len(self.cds)} CDS but {len(cds_genes)} cds_genes")
+        expressed = self.genes.groupby("condition").gene_id.agg(set).to_dict()
+        self._cds_ok = {
+            c: np.array([g in expressed.get(c, set()) for g in cds_genes], dtype=bool)
+            for c in conditions
+        }
         spans = pd.DataFrame(
             [(c, min(s for s, _ in iv), max(e for _, e in iv)) for c, _, iv in self.cds],
             columns=["chrom", "start", "end"],
@@ -133,10 +169,11 @@ class ChannelMetrics:
         if cds_rows is None:
             return
         chrom = self.windows.chrom.iloc[index]
-        for c, (_, library, strand) in enumerate(self.layout):
+        for c, (condition, library, strand) in enumerate(self.layout):
             if library != "chx":
                 continue
-            cds = [self.cds[i] for i in cds_rows if self.cds[i][1] == strand]
+            ok = self._cds_ok[condition]
+            cds = [self.cds[i] for i in cds_rows if self.cds[i][1] == strand and ok[i]]
             if not cds:
                 continue
             for k, track in enumerate((pred, obs)):
@@ -237,6 +274,7 @@ def evaluate_checkpoint(
     tracks_dir: str | Path,
     genes: pd.DataFrame,
     cds: Sequence[tuple[str, str, list[tuple[int, int]]]] = (),
+    cds_genes: Sequence[str] = (),
     predict_fn: Callable[[dict], np.ndarray] | None = None,
     base_checkpoint: str | Path | None = None,
     head_kind: str = "mlp",
@@ -254,7 +292,7 @@ def evaluate_checkpoint(
         )
     windows = windows.reset_index(drop=True)
     genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
-    metrics = ChannelMetrics(channel_layout(conditions), genes, windows, cds)
+    metrics = ChannelMetrics(channel_layout(conditions), genes, windows, cds, cds_genes)
     batches = iterate(
         windows,
         fasta=fasta,
@@ -275,27 +313,54 @@ def evaluate_checkpoint(
     return metrics.table()
 
 
-def output_paths(out_dir: str | Path, arm: str | None, split: str) -> dict[str, Path]:
-    """``{"model": <arm>_<split>.tsv, "ceiling": ceiling_<split>.tsv}`` under ``out_dir``."""
+def output_paths(
+    out_dir: str | Path, arm: str | None, split: str, max_windows: int | None = None
+) -> dict[str, Path]:
+    """``{"model": <arm>_<split>.tsv, "ceiling": ceiling_<split>.tsv}`` under ``out_dir``.
+
+    With ``max_windows`` both names gain ``_max<N>`` so truncated runs never take the full names.
+    """
     out_dir = Path(out_dir)
-    paths = {"ceiling": out_dir / f"ceiling_{split}.tsv"}
+    suffix = f"{split}_max{max_windows}" if max_windows is not None else split
+    paths = {"ceiling": out_dir / f"ceiling_{suffix}.tsv"}
     if arm is not None:
-        paths["model"] = out_dir / f"{arm.replace(':', '_').lower()}_{split}.tsv"
+        paths["model"] = out_dir / f"{arm.replace(':', '_').lower()}_{suffix}.tsv"
     return paths
 
 
-def head_kind_of(checkpoint: Path) -> str:
-    """Head kind recorded in the run's ``run.json`` next to ``best/``/``last/``; else mlp."""
+def run_args(checkpoint: Path) -> dict:
+    """``args`` of the run's ``run.json`` next to ``best/``/``last/``; empty if absent."""
     run = Path(checkpoint).parent / "run.json"
-    if run.exists():
-        return json.loads(run.read_text()).get("args", {}).get("head", "mlp")
-    return "mlp"
+    return json.loads(run.read_text()).get("args", {}) if run.exists() else {}
+
+
+def head_kind_of(checkpoint: Path) -> str:
+    """Head kind recorded in the run's ``run.json``; else mlp."""
+    return run_args(checkpoint).get("head") or "mlp"
+
+
+def tracks_dir_of(checkpoint: Path | None) -> Path:
+    """Tracks directory the run trained on (``run.json``); else ``data/p6/tracks``."""
+    recorded = run_args(checkpoint).get("tracks_dir") if checkpoint is not None else None
+    return Path(recorded) if recorded else DEFAULT_TRACKS
+
+
+def ceiling_mismatch(path: Path, n_windows: int, tracks_dir: Path) -> str | None:
+    """Why the existing ceiling at ``path`` cannot be reused for this run, or ``None``."""
+    table = pd.read_csv(path, sep="\t")
+    counts = set(table["windows"]) if "windows" in table else set()
+    if counts != {n_windows}:
+        return f"{path} was computed on {sorted(counts) or 'unknown'} windows, not {n_windows}"
+    recorded = set(table["tracks_dir"]) if "tracks_dir" in table else set()
+    if {str(Path(t).resolve()) for t in recorded} != {str(Path(tracks_dir).resolve())}:
+        return f"{path} was computed from tracks {sorted(recorded)}, not {tracks_dir}"
+    return None
 
 
 def write_tsv(table: pd.DataFrame, path: Path) -> None:
     """Write ``table`` to ``path`` through a sibling temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     table.to_csv(tmp, sep="\t", index=False)
     os.replace(tmp, path)
 
@@ -312,7 +377,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--expression", type=Path, default=Path("data/p6/expression/expression.parquet")
     )
-    ap.add_argument("--tracks-dir", type=Path, default=Path("data/p6/tracks"))
+    ap.add_argument(
+        "--tracks-dir",
+        type=Path,
+        default=None,
+        help="default: the run's run.json tracks_dir, else data/p6/tracks",
+    )
     ap.add_argument("--out-dir", type=Path, default=Path("data/p6/eval"))
     ap.add_argument("--max-windows", type=int, default=None, help="first N windows (smoke)")
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
@@ -320,7 +390,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--base-checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
     ap.add_argument("--head", choices=("mlp", "conv"), default=None, help="default: run.json")
     ap.add_argument("--prefetch", type=int, default=4)
-    ap.add_argument("--overwrite", action="store_true", help="replace existing output TSVs")
+    ap.add_argument(
+        "--overwrite", action="store_true", help="replace existing output TSVs (recomputes ceiling)"
+    )
     return ap
 
 
@@ -337,7 +409,8 @@ def main() -> None:
             parse_arm(args.arm)
         except ValueError as exc:
             ap.error(str(exc))
-    paths = output_paths(args.out_dir, None if args.ceiling_only else args.arm, args.split)
+    arm = None if args.ceiling_only else args.arm
+    paths = output_paths(args.out_dir, arm, args.split, args.max_windows)
     target = paths["ceiling"] if args.ceiling_only else paths["model"]
     if target.exists() and not args.overwrite:
         ap.error(f"{target} exists; pass --overwrite to replace it")
@@ -350,12 +423,18 @@ def main() -> None:
     if args.max_windows is not None:
         windows = windows.iloc[: args.max_windows]
     windows = windows.reset_index(drop=True)
-    genes = pd.read_parquet(args.expression)
-    meta = {"split": args.split, "windows": len(windows)}
+    tracks_dir = args.tracks_dir or tracks_dir_of(None if args.ceiling_only else args.checkpoint)
+    reuse = paths["ceiling"].exists() and not args.overwrite
+    if reuse:
+        why = ceiling_mismatch(paths["ceiling"], len(windows), tracks_dir)
+        if why:
+            ap.error(f"{why}; pass --overwrite to recompute it")
+    genes = pd.read_parquet(args.expression).reset_index(drop=True)
+    meta = {"split": args.split, "windows": len(windows), "tracks_dir": str(tracks_dir)}
 
-    if args.overwrite or not paths["ceiling"].exists():
+    if not reuse:
         t0 = time.time()
-        ceiling = ceiling_metrics(args.tracks_dir, CONDITIONS, genes, windows)
+        ceiling = ceiling_metrics(tracks_dir, CONDITIONS, genes, windows)
         write_tsv(ceiling.assign(source="ceiling", **meta), paths["ceiling"])
         print(f"ceiling {time.time() - t0:.0f}s -> {paths['ceiling']}", flush=True)
     else:
@@ -364,15 +443,16 @@ def main() -> None:
         return
 
     t0 = time.time()
-    _, cds = load_mane(args.gtf)
+    cds, cds_genes = load_mane_cds(args.gtf)
     table = evaluate_checkpoint(
         args.checkpoint,
         args.arm,
         windows,
         fasta=args.genome,
-        tracks_dir=args.tracks_dir,
+        tracks_dir=tracks_dir,
         genes=genes,
         cds=cds,
+        cds_genes=cds_genes,
         base_checkpoint=args.base_checkpoint,
         head_kind=args.head or head_kind_of(args.checkpoint),
         prefetch=args.prefetch,

@@ -3,6 +3,7 @@
 import math
 import sys
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -137,7 +138,8 @@ def world(tmp_path):
     chx = {("chr7", "+"): Counter({p: 3 for p in range(60, 90, 3)}), ("chr7", "-"): minus}
     write_bigwigs(chx, SIZES, track_prefix(tracks, "HeLa", "chx", "pooled"))
     cds = [("chr7", "+", [(60, 90)]), ("chr7", "-", [(160, 190)]), ("chr7", "+", [(40, 160)])]
-    return dict(fasta=str(fasta), tracks_dir=tracks, genes=_genes(), cds=cds)
+    cds_genes = ["G2", "G6", "G4"]
+    return dict(fasta=str(fasta), tracks_dir=tracks, genes=_genes(), cds=cds, cds_genes=cds_genes)
 
 
 def test_evaluate_checkpoint_perfect_fake_model(world):
@@ -154,6 +156,7 @@ def test_evaluate_checkpoint_perfect_fake_model(world):
         tracks_dir=world["tracks_dir"],
         genes=world["genes"],
         cds=world["cds"],
+        cds_genes=world["cds_genes"],
         predict_fn=oracle,
     )
     assert len(table) == len(layout)
@@ -181,6 +184,7 @@ def test_evaluate_checkpoint_flat_model_is_worse(world):
         tracks_dir=world["tracks_dir"],
         genes=world["genes"],
         cds=world["cds"],
+        cds_genes=world["cds_genes"],
         predict_fn=flat,
     )
     assert (table.profile_kl > 0.1).all()
@@ -271,3 +275,129 @@ def test_head_kind_read_from_run_json(tmp_path):
     assert evaluate.head_kind_of(tmp_path / "best") == "mlp"
     (tmp_path / "run.json").write_text('{"args": {"head": "conv"}}')
     assert evaluate.head_kind_of(tmp_path / "best") == "conv"
+
+
+def test_frame0_only_counts_cds_of_expressed_genes(world):
+    # Same CDS, but the + CDS now belongs to the unexpressed G5: it must drop out of both
+    # predicted and observed frame-0 for the + channel.
+    table = evaluate_checkpoint(
+        None,
+        "condition:HeLa",
+        WINDOWS,
+        fasta=world["fasta"],
+        tracks_dir=world["tracks_dir"],
+        genes=world["genes"],
+        cds=world["cds"],
+        cds_genes=["G5", "G6", "G4"],
+        predict_fn=lambda batch: batch["targets"],
+    )
+    chx = table[table.library == "chx"].set_index("strand")
+    assert chx.loc["+", "frame0_cds"] == 0
+    assert np.isnan(chx.loc["+", "frame0_obs"]) and np.isnan(chx.loc["+", "frame0_pred"])
+    assert chx.loc["-", "frame0_cds"] == 1
+
+
+def test_channel_metrics_rejects_cds_without_genes():
+    with pytest.raises(ValueError, match="cds_genes"):
+        evaluate.ChannelMetrics(channel_layout(["HeLa"]), _genes(), WINDOWS, [("chr7", "+", [])])
+
+
+def test_load_mane_cds_returns_gene_ids(tmp_path):
+    gtf = tmp_path / "g.gtf"
+    tag = 'tag "MANE_Select";'
+    gtf.write_text(
+        f'chr7\tH\tCDS\t11\t20\t.\t+\t0\tgene_id "G1.2"; transcript_id "T1.1"; {tag}\n'
+        f'chr7\tH\tCDS\t31\t40\t.\t+\t0\tgene_id "G1.2"; transcript_id "T1.1"; {tag}\n'
+        f'chr7\tH\texon\t1\t50\t.\t+\t.\tgene_id "G1.2"; transcript_id "T1.1"; {tag}\n'
+        'chr7\tH\tCDS\t5\t9\t.\t-\t0\tgene_id "G2.1"; transcript_id "T2.1";\n'
+    )
+    cds, genes = evaluate.load_mane_cds(gtf)
+    assert cds == [("chr7", "+", [(10, 20), (30, 40)])]
+    assert genes == ["G1.2"]
+
+
+@pytest.fixture
+def cli_world(tmp_path, monkeypatch):
+    from tisiago.seq2func.samples import CONDITIONS
+
+    tracks = tmp_path / "tracks"
+    for k, condition in enumerate(CONDITIONS):
+        _write(tracks, condition, 1, seed=k)
+        _write(tracks, condition, 2, seed=k + 50)
+    (tmp_path / "windows").mkdir()
+    WINDOWS.to_parquet(tmp_path / "windows" / "val.parquet")
+    expression = tmp_path / "expression.parquet"
+    pd.concat([_genes(c) for c in CONDITIONS], ignore_index=True).to_parquet(expression)
+    base = [
+        "evaluate",
+        "--split",
+        "val",
+        "--windows-dir",
+        str(tmp_path / "windows"),
+        "--expression",
+        str(expression),
+        "--out-dir",
+        str(tmp_path / "eval"),
+    ]
+
+    def run(*extra):
+        monkeypatch.setattr(sys, "argv", [*base, *extra])
+        evaluate.main()
+
+    return dict(run=run, out=tmp_path / "eval", tracks=tracks, root=tmp_path)
+
+
+def test_max_windows_ceiling_never_takes_the_shared_name(cli_world):
+    cli_world["run"](
+        "--ceiling-only", "--max-windows", "2", "--tracks-dir", str(cli_world["tracks"])
+    )
+    out = cli_world["out"]
+    assert sorted(p.name for p in out.iterdir()) == ["ceiling_val_max2.tsv"]
+    table = pd.read_csv(out / "ceiling_val_max2.tsv", sep="\t")
+    assert set(table.windows) == {2}
+    assert set(table.tracks_dir) == {str(cli_world["tracks"])}
+    assert len(table) == 36
+
+
+def test_reused_ceiling_must_match_window_count(cli_world, capsys):
+    out = cli_world["out"]
+    cli_world["run"]("--ceiling-only", "--tracks-dir", str(cli_world["tracks"]))
+    full = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
+    assert set(full.windows) == {3}
+    full.assign(windows=2).to_csv(out / "ceiling_val.tsv", sep="\t", index=False)
+    model = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    fakes = ["--genome", "g.fa", "--gtf", "g.gtf", "--base-checkpoint", "w"]
+    with pytest.raises(SystemExit) as exc:
+        cli_world["run"](*model, *fakes, "--tracks-dir", str(cli_world["tracks"]))
+    assert exc.value.code != 0
+    assert "computed on [2] windows, not 3" in capsys.readouterr().err
+    assert not (out / "condition_hela_val.tsv").exists()
+    # --overwrite recomputes it
+    cli_world["run"]("--ceiling-only", "--overwrite", "--tracks-dir", str(cli_world["tracks"]))
+    assert set(pd.read_csv(out / "ceiling_val.tsv", sep="\t").windows) == {3}
+
+
+def test_reused_ceiling_must_match_tracks_dir(cli_world, capsys):
+    cli_world["run"]("--ceiling-only", "--tracks-dir", str(cli_world["tracks"]))
+    model = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    fakes = ["--genome", "g.fa", "--gtf", "g.gtf", "--base-checkpoint", "w"]
+    with pytest.raises(SystemExit):
+        cli_world["run"](*model, *fakes, "--tracks-dir", str(cli_world["root"] / "other"))
+    assert "computed from tracks" in capsys.readouterr().err
+
+
+def test_tracks_dir_defaults_to_run_json(tmp_path):
+    (tmp_path / "best").mkdir()
+    assert evaluate.tracks_dir_of(tmp_path / "best") == Path("data/p6/tracks")
+    assert evaluate.tracks_dir_of(None) == Path("data/p6/tracks")
+    (tmp_path / "run.json").write_text('{"args": {"tracks_dir": "/ssd/p6_tracks"}}')
+    assert evaluate.tracks_dir_of(tmp_path / "best") == Path("/ssd/p6_tracks")
+
+
+def test_write_tsv_temp_name_is_per_process(tmp_path, monkeypatch):
+    seen = []
+    real = evaluate.os.replace
+    monkeypatch.setattr(evaluate.os, "replace", lambda a, b: (seen.append(str(a)), real(a, b)))
+    evaluate.write_tsv(pd.DataFrame({"a": [1]}), tmp_path / "x.tsv")
+    assert seen and f".{evaluate.os.getpid()}." in seen[0]
+    assert (tmp_path / "x.tsv").read_text() == "a\n1\n"
