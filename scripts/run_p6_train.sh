@@ -11,6 +11,7 @@
 #
 # Usage (from the repo root):
 #   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_p6_train.sh --arm condition:HeLa \
+#       --steps 20000 --eval-every 1000 --eval-windows 100 \
 #       --out data/p6/runs/hela
 
 set -euo pipefail

@@ -1,6 +1,7 @@
 import inspect
 import json
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -212,3 +213,60 @@ def test_cli_defaults_are_primary_config():
     assert str(args.tracks_dir) == "data/p6/tracks"
     frozen = train.build_parser().parse_args(["--arm", "shared", "--heads-only"])
     assert frozen.train_backbone is False
+
+
+def test_save_dir_atomic_rolls_back_when_swap_fails(tmp_path, monkeypatch):
+    dest = tmp_path / "last"
+    dest.mkdir()
+    (dest / "x.txt").write_text("old")
+    real_replace = train.os.replace
+
+    def flaky_replace(src, dst):
+        if str(src).endswith(".tmp"):
+            raise OSError("swap failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(train.os, "replace", flaky_replace)
+
+    def write(path):
+        (path / "x.txt").write_text("new")
+
+    with pytest.raises(OSError, match="swap failed"):
+        save_dir_atomic(write, dest)
+    assert (dest / "x.txt").read_text() == "old"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["last"]
+
+
+@pytest.mark.parametrize("record", ["log.jsonl", "run.json", "best", "last"])
+def test_existing_run_records_detected(tmp_path, record):
+    assert train.existing_run_records(tmp_path) == []
+    target = tmp_path / record
+    target.mkdir() if "." not in record else target.write_text("{}")
+    assert train.existing_run_records(tmp_path) == [record]
+    with pytest.raises(ValueError, match="--overwrite"):
+        train.check_out_dir(tmp_path, overwrite=False)
+    train.check_out_dir(tmp_path, overwrite=True)
+    assert target.exists()
+
+
+def test_cli_refuses_existing_run_and_deletes_nothing(tmp_path, monkeypatch):
+    out = tmp_path / "run"
+    out.mkdir()
+    (out / "log.jsonl").write_text('{"step": 1}\n')
+    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--out", str(out)])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert (out / "log.jsonl").read_text() == '{"step": 1}\n'
+    assert sorted(p.name for p in out.iterdir()) == ["log.jsonl"]
+
+
+def test_default_out_separates_frozen_baseline():
+    assert train.default_out("condition:HeLa", train_backbone=True) == Path(
+        "data/p6/runs/condition_hela"
+    )
+    assert train.default_out("condition:HeLa", train_backbone=False) == Path(
+        "data/p6/runs/condition_hela_frozen"
+    )
+    assert train.default_out("shared", True) != train.default_out("shared", False)

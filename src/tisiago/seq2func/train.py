@@ -32,6 +32,7 @@ from tisiago.seq2func.samples import CONDITIONS
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
 SELECTION_KEY = "val_profile_kl"
+RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
 def parse_arm(arm: str) -> tuple[str, tuple[str, ...]]:
@@ -63,7 +64,7 @@ def mean_window_kl(values: Iterable[float]) -> float:
 def save_dir_atomic(write: Callable[[Path], None], dest: Path) -> None:
     """Call ``write(tmp)`` on a sibling temp dir, then swap it into ``dest``.
 
-    On failure the previous ``dest`` is left untouched and the temp dir is removed.
+    On failure the previous ``dest`` is restored and the temp dir is removed.
     """
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -77,9 +78,31 @@ def save_dir_atomic(write: Callable[[Path], None], dest: Path) -> None:
             os.replace(dest, old)
         os.replace(tmp, dest)
     except BaseException:
+        if old.exists() and not dest.exists():
+            os.replace(old, dest)
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     shutil.rmtree(old, ignore_errors=True)
+
+
+def default_out(arm: str, train_backbone: bool) -> Path:
+    """``data/p6/runs/<arm>``, with a ``_frozen`` suffix for the heads-only baseline."""
+    name = arm.replace(":", "_").lower()
+    return Path("data/p6/runs") / (name if train_backbone else f"{name}_frozen")
+
+
+def existing_run_records(out: Path) -> list[str]:
+    """Names in ``RUN_RECORDS`` already present in ``out``."""
+    return [name for name in RUN_RECORDS if (Path(out) / name).exists()]
+
+
+def check_out_dir(out: Path, overwrite: bool) -> None:
+    """Raise ``ValueError`` if ``out`` holds an earlier run's records and not ``overwrite``."""
+    found = existing_run_records(out)
+    if found and not overwrite:
+        raise ValueError(
+            f"{out} already holds run records {found}; choose another --out or pass --overwrite"
+        )
 
 
 def train_loop(
@@ -164,7 +187,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--eval-every", type=int, default=1_000)
     ap.add_argument("--eval-windows", type=int, default=100)
-    ap.add_argument("--out", type=Path, default=None, help="default data/p6/runs/<arm>")
+    ap.add_argument("--out", type=Path, default=None, help="default data/p6/runs/<arm>[_frozen]")
     ap.add_argument("--windows-dir", type=Path, default=Path("data/p6/windows"))
     ap.add_argument(
         "--expression", type=Path, default=Path("data/p6/expression/expression.parquet")
@@ -187,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="frozen-backbone baseline (default trains the backbone)",
     )
+    ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="allow replacing log.jsonl/run.json/best/last of an earlier run in --out",
+    )
     return ap
 
 
@@ -202,7 +230,11 @@ def main() -> None:
         head, conditions = parse_arm(args.arm)
     except ValueError as exc:
         ap.error(str(exc))
-    out = args.out or Path("data/p6/runs") / args.arm.replace(":", "_").lower()
+    out = args.out or default_out(args.arm, args.train_backbone)
+    try:
+        check_out_dir(out, args.overwrite)
+    except ValueError as exc:
+        ap.error(str(exc))
     out.mkdir(parents=True, exist_ok=True)
 
     import jax
@@ -299,7 +331,8 @@ def main() -> None:
         print(f"step {step}: new best -> {out / 'best'}", flush=True)
 
     log_path = out / "log.jsonl"
-    log_path.unlink(missing_ok=True)
+    if args.overwrite:
+        log_path.unlink(missing_ok=True)
     batches = iterate(
         train_windows,
         seed=args.seed,
