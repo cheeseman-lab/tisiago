@@ -10,7 +10,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pyBigWig
-import pysam
 
 from tisiago.seq2func.psite import psite, rna_end5
 from tisiago.seq2func.samples import load_samples, parse_para
@@ -25,6 +24,8 @@ def track_prefix(out_dir: str | Path, condition: str, library: str, rep: int | s
 
 def count_positions(bam_path: str | Path, position_fn: Callable) -> dict[tuple[str, str], Counter]:
     """Count reads per (chrom, strand) at the position returned by ``position_fn``."""
+    import pysam
+
     counts: dict[tuple[str, str], Counter] = {}
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         for read in bam.fetch(until_eof=True):
@@ -78,6 +79,8 @@ def read_bigwig_counts(path: str | Path) -> dict[str, Counter]:
 
 
 def _chrom_sizes(bam_path: str | Path) -> list[tuple[str, int]]:
+    import pysam
+
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         return list(zip(bam.references, bam.lengths, strict=True))
 

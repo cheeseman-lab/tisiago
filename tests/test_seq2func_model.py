@@ -50,3 +50,15 @@ def test_write_json_atomic(tmp_path):
     write_json_atomic({"reduction": 0.95}, out)
     assert out.read_text().count("0.95") == 1
     assert [p.name for p in out.parent.iterdir()] == ["x.json"]
+
+
+def test_targets_and_overfit_import_without_pysam():
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; sys.modules['pysam'] = None; "
+        "import tisiago.seq2func.targets, tisiago.seq2func.overfit"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
