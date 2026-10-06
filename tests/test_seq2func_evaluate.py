@@ -17,7 +17,11 @@ from tisiago.seq2func.evaluate import (
     assign_spans,
     ceiling_metrics,
     evaluate_checkpoint,
+    smooth_profile,
+    uniform_metrics,
 )
+from tisiago.seq2func.masking import expression_mask
+from tisiago.seq2func.metrics import profile_kl
 from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.targets import channel_layout
 from tisiago.seq2func.tracks import track_prefix, write_bigwigs
@@ -66,13 +70,31 @@ def test_assign_spans_nearest_centre_and_excluded():
     assert assign_spans(far, WINDOWS.iloc[2:]).tolist() == [OUTSIDE, OUTSIDE]
 
 
-def test_ceiling_identical_replicates_is_perfect(tmp_path):
+def test_ceiling_identical_replicates(tmp_path):
     tracks = tmp_path / "tracks"
     _write(tracks, "HeLa", 1, seed=0)
     _write(tracks, "HeLa", 2, seed=0)
     table = ceiling_metrics(tracks, ["HeLa"], _genes(), WINDOWS)
     assert len(table) == len(channel_layout(["HeLa"]))
-    assert np.allclose(table.profile_kl, 0.0, atol=1e-9)
+    # profile prediction = smoothed rep2 (+ pseudocount): KL against rep1 is the per-window mean
+    # of profile_kl(smooth(rep), rep, mask), finite and > 0 even for identical replicates
+    layout = channel_layout(["HeLa"])
+    reader = evaluate.TrackReader(tracks, ["HeLa"], rep=1)
+    expected = np.mean(
+        [
+            profile_kl(
+                smooth_profile(track := reader.read("chr7", w.start, w.end)),
+                track,
+                expression_mask(layout, _genes(), "chr7", w.start, w.end),
+            )
+            for w in WINDOWS.itertuples()
+        ],
+        axis=0,
+    )
+    np.testing.assert_allclose(table.profile_kl, expected, rtol=1e-12)
+    assert (table.profile_kl > 0).all()
+    assert (table.ceiling_smooth_bp == 5).all() and (table.ceiling_pseudocount == 1e-3).all()
+    assert (table.ceiling_version == evaluate.REFERENCE_VERSION).all()
     plus = table[table.strand == "+"]
     assert np.allclose(plus.log_pearson, 1.0)
     # G1, G2, G3, G7 are + expressed genes fully inside a window; G4 is excluded and counted
@@ -218,6 +240,7 @@ def test_ceiling_only_refuses_existing_ceiling(tmp_path, monkeypatch):
     out = tmp_path / "eval"
     out.mkdir()
     (out / "ceiling_val.tsv").write_text("x\n")
+    (out / "uniform_val.tsv").write_text("x\n")
     argv = ["evaluate", "--ceiling-only", "--split", "val", "--out-dir", str(out)]
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit) as exc:
@@ -324,6 +347,11 @@ def cli_world(tmp_path, monkeypatch):
     for k, condition in enumerate(CONDITIONS):
         _write(tracks, condition, 1, seed=k)
         _write(tracks, condition, 2, seed=k + 50)
+        _write(tracks, condition, "pooled", seed=k + 100)
+    gtf = tmp_path / "g.gtf"
+    gtf.write_text(
+        'chr7\tH\tCDS\t61\t90\t.\t+\t0\tgene_id "G2"; transcript_id "T2"; tag "MANE_Select";\n'
+    )
     (tmp_path / "windows").mkdir()
     WINDOWS.to_parquet(tmp_path / "windows" / "val.parquet")
     expression = tmp_path / "expression.parquet"
@@ -338,6 +366,8 @@ def cli_world(tmp_path, monkeypatch):
         str(expression),
         "--out-dir",
         str(tmp_path / "eval"),
+        "--gtf",
+        str(gtf),
     ]
 
     def run(*extra):
@@ -352,11 +382,17 @@ def test_max_windows_ceiling_never_takes_the_shared_name(cli_world):
         "--ceiling-only", "--max-windows", "2", "--tracks-dir", str(cli_world["tracks"])
     )
     out = cli_world["out"]
-    assert sorted(p.name for p in out.iterdir()) == ["ceiling_val_max2.tsv"]
-    table = pd.read_csv(out / "ceiling_val_max2.tsv", sep="\t")
-    assert set(table.windows) == {2}
-    assert set(table.tracks_dir) == {str(cli_world["tracks"])}
-    assert len(table) == 36
+    assert sorted(p.name for p in out.iterdir()) == ["ceiling_val_max2.tsv", "uniform_val_max2.tsv"]
+    for kind in ("ceiling", "uniform"):
+        table = pd.read_csv(out / f"{kind}_val_max2.tsv", sep="\t")
+        assert set(table.windows) == {2}
+        assert set(table.tracks_dir) == {str(cli_world["tracks"])}
+        assert set(table.source) == {kind}
+        assert len(table) == 36
+        chx = table[(table.library == "chx") & (table.strand == "+")]
+        assert (chx.frame0_cds == 1).all() and chx.frame0_obs.notna().all()
+        assert chx.frame0_pred.notna().all()
+    assert pd.read_csv(out / "uniform_val_max2.tsv", sep="\t").log_pearson.isna().all()
 
 
 def test_reused_ceiling_must_match_window_count(cli_world, capsys):
@@ -401,3 +437,60 @@ def test_write_tsv_temp_name_is_per_process(tmp_path, monkeypatch):
     evaluate.write_tsv(pd.DataFrame({"a": [1]}), tmp_path / "x.tsv")
     assert seen and f".{evaluate.os.getpid()}." in seen[0]
     assert (tmp_path / "x.tsv").read_text() == "a\n1\n"
+
+
+def test_smooth_profile_centred_boxcar_plus_pseudocount():
+    track = np.zeros((8, 2))
+    track[3, 0] = 5.0
+    track[0, 1] = 10.0
+    out = smooth_profile(track)
+    np.testing.assert_allclose(out[:, 0], [1e-3, 1.001, 1.001, 1.001, 1.001, 1.001, 1e-3, 1e-3])
+    # edges: mode="same" zero-pads, so a spike at 0 spreads to positions 0..2 only
+    np.testing.assert_allclose(out[:, 1], [2.001, 2.001, 2.001, 1e-3, 1e-3, 1e-3, 1e-3, 1e-3])
+
+
+def test_uniform_kl_matches_closed_form(tmp_path):
+    # KL(p || uniform over n unmasked bases) = sum p log p + log n
+    tracks = tmp_path / "tracks"
+    counts = {("chr7", "+"): Counter({10: 1, 20: 3}), ("chr7", "-"): Counter({31: 2, 41: 2})}
+    for library in ("tis", "chx", "rna"):
+        write_bigwigs(counts, SIZES, track_prefix(tracks, "HeLa", library, "pooled"))
+    genes = _genes().iloc[[0]].assign(start=0, end=100)  # one expressed + gene: no masking
+    window = WINDOWS.iloc[[0]]
+    table = uniform_metrics(tracks, ["HeLa"], genes, window)
+    p_plus, p_minus = np.array([0.25, 0.75]), np.array([0.5, 0.5])
+    plus = (p_plus * np.log(p_plus)).sum() + np.log(100)
+    minus = (p_minus * np.log(p_minus)).sum() + np.log(100)
+    np.testing.assert_allclose(table.profile_kl, [plus, minus] * 3, rtol=1e-6)
+    assert table.log_pearson.isna().all()
+    assert (table.ceiling_version == evaluate.REFERENCE_VERSION).all()
+
+
+@pytest.mark.parametrize("version", [None, 1])
+def test_old_or_unversioned_ceiling_is_refused(cli_world, capsys, version):
+    out = cli_world["out"]
+    tracks = ["--tracks-dir", str(cli_world["tracks"])]
+    cli_world["run"]("--ceiling-only", *tracks)
+    table = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
+    if version is None:
+        table = table.drop(columns="ceiling_version")
+    else:
+        table = table.assign(ceiling_version=version)
+    table.to_csv(out / "ceiling_val.tsv", sep="\t", index=False)
+    # a model run would reuse it
+    model = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    fakes = ["--genome", "g.fa", "--base-checkpoint", "w"]
+    with pytest.raises(SystemExit) as exc:
+        cli_world["run"](*model, *fakes, *tracks)
+    assert exc.value.code != 0
+    assert "ceiling_version" in capsys.readouterr().err
+    assert not (out / "condition_hela_val.tsv").exists()
+    # a ceiling-only run that only needs to add the uniform reference also refuses the old one
+    (out / "uniform_val.tsv").unlink()
+    with pytest.raises(SystemExit):
+        cli_world["run"]("--ceiling-only", *tracks)
+    assert "ceiling_version" in capsys.readouterr().err
+    assert not (out / "uniform_val.tsv").exists()
+    cli_world["run"]("--ceiling-only", "--overwrite", *tracks)
+    fresh = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
+    assert set(fresh.ceiling_version) == {evaluate.REFERENCE_VERSION}

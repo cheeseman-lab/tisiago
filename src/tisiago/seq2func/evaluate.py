@@ -9,15 +9,17 @@ Usage::
         --split test --i-am-final
 
 Writes one row per channel to ``data/p6/eval/<arm>_<split>.tsv`` (model prediction vs pooled
-targets) and ``data/p6/eval/ceiling_<split>.tsv`` (replicate 2 used as the prediction of
-replicate 1). Metrics: mean masked ``profile_kl`` over windows (NaN windows skipped and
+targets), ``data/p6/eval/ceiling_<split>.tsv`` (replicate 1 observed; the profile prediction is
+replicate 2 smoothed by a centred 5-bp boxcar plus 1e-3 per position, gene totals use raw
+replicate 2) and ``data/p6/eval/uniform_<split>.tsv`` (a flat prediction of the pooled targets:
+the KL floor). Metrics: mean masked ``profile_kl`` over windows (NaN windows skipped and
 counted); gene-level ``log_pearson`` over the channel's expressed same-strand genes, each gene
 totalled once in the window that contains it whose centre is nearest the gene centre (genes
 never fully inside a window are excluded and counted); and, for CHX channels, the frame-0
 fraction over MANE CDS of genes expressed in the channel's condition, assigned to windows
 the same way (canonical P-sites, no shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a
-truncated ceiling never stands in for the full one; a reused ceiling must match the window
-count and tracks directory.
+truncated reference never stands in for the full one; a reused reference must match the
+``ceiling_version``, window count and tracks directory.
 """
 
 from __future__ import annotations
@@ -46,6 +48,10 @@ EXCLUDED = -1
 OUTSIDE = -2
 SPLIT_FILES = {"val": "val.parquet", "test": "test.parquet"}
 DEFAULT_TRACKS = Path("data/p6/tracks")
+REFERENCES = ("ceiling", "uniform")
+REFERENCE_VERSION = 2
+CEILING_SMOOTH_BP = 5
+CEILING_PSEUDOCOUNT = 1e-3
 _GENE_ID = re.compile(r'gene_id "([^"]+)"')
 _TRANSCRIPT_ID = re.compile(r'transcript_id "([^"]+)"')
 
@@ -156,15 +162,26 @@ class ChannelMetrics:
         self.frame = np.zeros((n_channels, 4))  # pred in-frame, pred total, obs in, obs total
         self.frame_cds = np.zeros(n_channels, dtype=np.int64)
 
-    def add(self, index: int, pred: np.ndarray, obs: np.ndarray, mask: np.ndarray) -> None:
-        """Add window ``index`` (position in ``windows``): ``(S, C)`` prediction, target, mask."""
+    def add(
+        self,
+        index: int,
+        pred: np.ndarray,
+        obs: np.ndarray,
+        mask: np.ndarray,
+        pred_totals: np.ndarray | None = None,
+    ) -> None:
+        """Add window ``index`` (position in ``windows``): ``(S, C)`` prediction, target, mask.
+
+        ``pred_totals`` replaces ``pred`` for the gene totals only (default ``pred``).
+        """
         self.kls.append(profile_kl(pred, obs, mask))
         start = int(self.windows.start.iloc[index])
         rows = self._genes_by_window.get(index)
         if rows is not None:
             sub = self.genes.iloc[rows]
             self.obs_totals[rows] = gene_totals(obs, sub, start)
-            self.pred_totals[rows] = gene_totals(pred, sub, start)
+            totals_from = pred if pred_totals is None else pred_totals
+            self.pred_totals[rows] = gene_totals(totals_from, sub, start)
         cds_rows = self._cds_by_window.get(index)
         if cds_rows is None:
             return
@@ -219,28 +236,85 @@ def _group(where: np.ndarray) -> dict[int, np.ndarray]:
     return {int(w): np.flatnonzero(where == w) for w in np.unique(where[where >= 0])}
 
 
+def smooth_profile(
+    track: np.ndarray, width: int = CEILING_SMOOTH_BP, pseudocount: float = CEILING_PSEUDOCOUNT
+) -> np.ndarray:
+    """Per-channel centred boxcar mean of ``(S, C)`` ``track`` plus ``pseudocount``."""
+    kernel = np.ones(width) / width
+    out = np.empty(track.shape, dtype=np.float64)
+    for c in range(track.shape[1]):
+        out[:, c] = np.convolve(track[:, c].astype(np.float64), kernel, mode="same")
+    return out + pseudocount
+
+
+def reference_metrics(
+    kind: str,
+    tracks_dir: str | Path,
+    conditions: Sequence[str],
+    genes: pd.DataFrame,
+    windows: pd.DataFrame,
+    cds: Sequence[tuple[str, str, list[tuple[int, int]]]] = (),
+    cds_genes: Sequence[str] = (),
+) -> pd.DataFrame:
+    """Reference rows for ``kind``.
+
+    ``"ceiling"``: rep1 observed; profile prediction = :func:`smooth_profile` of rep2, gene
+    totals from raw rep2. ``"uniform"``: pooled observed, flat prediction; no gene Pearson.
+    """
+    if kind not in REFERENCES:
+        raise ValueError(f"unknown reference {kind!r}")
+    layout = channel_layout(conditions)
+    windows = windows.reset_index(drop=True)
+    metrics = ChannelMetrics(layout, genes, windows, cds, cds_genes)
+    readers = [
+        TrackReader(tracks_dir, conditions, rep=r)
+        for r in ((1, 2) if kind == "ceiling" else ("pooled",))
+    ]
+    try:
+        for i, row in enumerate(windows.itertuples(index=False)):
+            start, end = int(row.start), int(row.end)
+            obs = readers[0].read(row.chrom, start, end)
+            mask = expression_mask(layout, genes, row.chrom, start, end)
+            if kind == "ceiling":
+                raw = readers[1].read(row.chrom, start, end)
+                metrics.add(i, smooth_profile(raw), obs, mask, pred_totals=raw)
+            else:
+                metrics.add(i, np.ones_like(obs, dtype=np.float64), obs, mask)
+    finally:
+        for reader in readers:
+            reader.close()
+    table = metrics.table()
+    if kind == "uniform":
+        table["log_pearson"] = np.nan
+    else:
+        table["ceiling_smooth_bp"] = CEILING_SMOOTH_BP
+        table["ceiling_pseudocount"] = CEILING_PSEUDOCOUNT
+    table["ceiling_version"] = REFERENCE_VERSION
+    return table
+
+
 def ceiling_metrics(
     tracks_dir: str | Path,
     conditions: Sequence[str],
     genes: pd.DataFrame,
     windows: pd.DataFrame,
+    cds: Sequence[tuple[str, str, list[tuple[int, int]]]] = (),
+    cds_genes: Sequence[str] = (),
 ) -> pd.DataFrame:
-    """Replicate ceiling: rep1 targets as observed, rep2 targets as the prediction."""
-    layout = channel_layout(conditions)
-    windows = windows.reset_index(drop=True)
-    metrics = ChannelMetrics(layout, genes, windows)
-    rep1 = TrackReader(tracks_dir, conditions, rep=1)
-    rep2 = TrackReader(tracks_dir, conditions, rep=2)
-    try:
-        for i, row in enumerate(windows.itertuples(index=False)):
-            start, end = int(row.start), int(row.end)
-            obs = rep1.read(row.chrom, start, end)
-            pred = rep2.read(row.chrom, start, end)
-            metrics.add(i, pred, obs, expression_mask(layout, genes, row.chrom, start, end))
-    finally:
-        rep1.close()
-        rep2.close()
-    return metrics.table()
+    """Replicate ceiling: rep1 observed vs smoothed rep2 (profile) and raw rep2 (genes)."""
+    return reference_metrics("ceiling", tracks_dir, conditions, genes, windows, cds, cds_genes)
+
+
+def uniform_metrics(
+    tracks_dir: str | Path,
+    conditions: Sequence[str],
+    genes: pd.DataFrame,
+    windows: pd.DataFrame,
+    cds: Sequence[tuple[str, str, list[tuple[int, int]]]] = (),
+    cds_genes: Sequence[str] = (),
+) -> pd.DataFrame:
+    """KL floor: a flat prediction of the pooled targets."""
+    return reference_metrics("uniform", tracks_dir, conditions, genes, windows, cds, cds_genes)
 
 
 def load_predict_fn(
@@ -316,13 +390,13 @@ def evaluate_checkpoint(
 def output_paths(
     out_dir: str | Path, arm: str | None, split: str, max_windows: int | None = None
 ) -> dict[str, Path]:
-    """``{"model": <arm>_<split>.tsv, "ceiling": ceiling_<split>.tsv}`` under ``out_dir``.
+    """``{"model": <arm>_<split>.tsv, "ceiling"|"uniform": <kind>_<split>.tsv}`` in ``out_dir``.
 
     With ``max_windows`` both names gain ``_max<N>`` so truncated runs never take the full names.
     """
     out_dir = Path(out_dir)
     suffix = f"{split}_max{max_windows}" if max_windows is not None else split
-    paths = {"ceiling": out_dir / f"ceiling_{suffix}.tsv"}
+    paths = {kind: out_dir / f"{kind}_{suffix}.tsv" for kind in REFERENCES}
     if arm is not None:
         paths["model"] = out_dir / f"{arm.replace(':', '_').lower()}_{suffix}.tsv"
     return paths
@@ -346,8 +420,13 @@ def tracks_dir_of(checkpoint: Path | None) -> Path:
 
 
 def ceiling_mismatch(path: Path, n_windows: int, tracks_dir: Path) -> str | None:
-    """Why the existing ceiling at ``path`` cannot be reused for this run, or ``None``."""
+    """Why the existing reference at ``path`` cannot be reused for this run, or ``None``."""
     table = pd.read_csv(path, sep="\t")
+    versions = set(table["ceiling_version"]) if "ceiling_version" in table else set()
+    if versions != {REFERENCE_VERSION}:
+        return (
+            f"{path} has ceiling_version {sorted(versions) or 'missing'}, not {REFERENCE_VERSION}"
+        )
     counts = set(table["windows"]) if "windows" in table else set()
     if counts != {n_windows}:
         return f"{path} was computed on {sorted(counts) or 'unknown'} windows, not {n_windows}"
@@ -372,7 +451,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--arm", help="'shared' or 'condition:<C>'")
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
-    ap.add_argument("--ceiling-only", action="store_true", help="CPU replicate ceiling only")
+    ap.add_argument(
+        "--ceiling-only", action="store_true", help="CPU references only (ceiling + uniform)"
+    )
     ap.add_argument("--windows-dir", type=Path, default=Path("data/p6/windows"))
     ap.add_argument(
         "--expression", type=Path, default=Path("data/p6/expression/expression.parquet")
@@ -397,7 +478,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """CLI: evaluate one checkpoint on a split and write the replicate ceiling if missing."""
+    """CLI: evaluate one checkpoint on a split; write the ceiling and uniform refs if missing."""
     ap = build_parser()
     args = ap.parse_args()
     if args.split == "test" and not args.i_am_final:
@@ -411,39 +492,40 @@ def main() -> None:
             ap.error(str(exc))
     arm = None if args.ceiling_only else args.arm
     paths = output_paths(args.out_dir, arm, args.split, args.max_windows)
-    target = paths["ceiling"] if args.ceiling_only else paths["model"]
-    if target.exists() and not args.overwrite:
-        ap.error(f"{target} exists; pass --overwrite to replace it")
-    if not args.ceiling_only:
-        for flag in ("genome", "gtf", "base_checkpoint"):
-            if not getattr(args, flag):
-                ap.error(f"--{flag.replace('_', '-')} is required (or set it in .env)")
+    targets = [paths[k] for k in REFERENCES] if args.ceiling_only else [paths["model"]]
+    if all(t.exists() for t in targets) and not args.overwrite:
+        ap.error(f"{', '.join(map(str, targets))} exist; pass --overwrite to replace")
+    required = ("gtf",) if args.ceiling_only else ("genome", "gtf", "base_checkpoint")
+    for flag in required:
+        if not getattr(args, flag):
+            ap.error(f"--{flag.replace('_', '-')} is required (or set it in .env)")
 
     windows = pd.read_parquet(args.windows_dir / SPLIT_FILES[args.split])
     if args.max_windows is not None:
         windows = windows.iloc[: args.max_windows]
     windows = windows.reset_index(drop=True)
     tracks_dir = args.tracks_dir or tracks_dir_of(None if args.ceiling_only else args.checkpoint)
-    reuse = paths["ceiling"].exists() and not args.overwrite
-    if reuse:
-        why = ceiling_mismatch(paths["ceiling"], len(windows), tracks_dir)
+    reuse = {k: paths[k].exists() and not args.overwrite for k in REFERENCES}
+    for kind in REFERENCES:
+        why = reuse[kind] and ceiling_mismatch(paths[kind], len(windows), tracks_dir)
         if why:
             ap.error(f"{why}; pass --overwrite to recompute it")
     genes = pd.read_parquet(args.expression).reset_index(drop=True)
     meta = {"split": args.split, "windows": len(windows), "tracks_dir": str(tracks_dir)}
+    cds, cds_genes = load_mane_cds(args.gtf)
 
-    if not reuse:
+    for kind in REFERENCES:
+        if reuse[kind]:
+            print(f"keeping existing {paths[kind]}", flush=True)
+            continue
         t0 = time.time()
-        ceiling = ceiling_metrics(tracks_dir, CONDITIONS, genes, windows)
-        write_tsv(ceiling.assign(source="ceiling", **meta), paths["ceiling"])
-        print(f"ceiling {time.time() - t0:.0f}s -> {paths['ceiling']}", flush=True)
-    else:
-        print(f"keeping existing {paths['ceiling']}", flush=True)
+        table = reference_metrics(kind, tracks_dir, CONDITIONS, genes, windows, cds, cds_genes)
+        write_tsv(table.assign(source=kind, **meta), paths[kind])
+        print(f"{kind} {time.time() - t0:.0f}s -> {paths[kind]}", flush=True)
     if args.ceiling_only:
         return
 
     t0 = time.time()
-    cds, cds_genes = load_mane_cds(args.gtf)
     table = evaluate_checkpoint(
         args.checkpoint,
         args.arm,
