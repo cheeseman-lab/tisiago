@@ -1,6 +1,7 @@
 """Tests for the per-condition expressed-gene table."""
 
 import pandas as pd
+import pytest
 
 from tisiago.seq2func.expression import expression_table, read_counts, read_gene_spans
 
@@ -27,6 +28,12 @@ def test_read_counts_drops_htseq_summary(tmp_path):
     path = tmp_path / "c.txt"
     path.write_text("G1.1\t3\nG2.3\t0\n__no_feature\t99\n")
     assert read_counts(path).to_dict() == {"G1.1": 3, "G2.3": 0}
+
+
+def test_read_counts_raises_on_missing_file(tmp_path):
+    path = tmp_path / "missing.txt"
+    with pytest.raises(FileNotFoundError):
+        read_counts(path)
 
 
 def test_expression_table_sums_replicates_and_thresholds(tmp_path, monkeypatch):

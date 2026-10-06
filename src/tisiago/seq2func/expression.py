@@ -36,10 +36,6 @@ def read_gene_spans(gtf: str | Path) -> pd.DataFrame:
 
 def read_counts(path: str | Path) -> pd.Series:
     """htseq-count gene counts, summary lines (``__*``) dropped."""
-    path = Path(path)
-    if not path.exists():
-        # If exact file doesn't exist, return empty Series
-        return pd.Series(dtype=int)
     table = pd.read_csv(path, sep="\t", header=None, names=["gene_id", "count"])
     table = table[~table.gene_id.str.startswith("__")]
     return table.set_index("gene_id")["count"].astype(int)
