@@ -21,9 +21,11 @@ def predict_command(
     fasta: str | Path,
     output: str | Path,
     estimate: str | Path,
+    nproc: int = 1,
 ) -> list[str]:
     """Jimmy's pooled ``ribotish predict``; ``estimate`` isolates the background file."""
     join = lambda paths: ",".join(str(p) for p in paths)  # noqa: E731
+    threads = ["-p", str(nproc)] if nproc > 1 else []
     return [
         str(ribotish),
         "predict",
@@ -49,6 +51,7 @@ def predict_command(
         "--seq",
         "--aaseq",
         "--verbose",
+        *threads,
     ]
 
 

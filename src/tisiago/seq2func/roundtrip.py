@@ -1,4 +1,4 @@
-"""Round-trip contract: observed tracks -> synthetic BAMs -> Jimmy's Ribo-TISH -> his calls."""
+"""Round-trip contract: observed tracks -> synthetic BAMs -> Ribo-TISH fork -> real-BAM calls."""
 
 from __future__ import annotations
 
@@ -37,11 +37,33 @@ def prepare_inputs(condition: str, tracks_dir: Path, work_dir: Path) -> dict[str
     return inputs
 
 
+def ribotish_version(ribotish: str) -> str:
+    """First line of ``<ribotish> --version`` (stdout or stderr)."""
+    done = subprocess.run([str(ribotish), "--version"], capture_output=True, text=True)
+    lines = (done.stdout + done.stderr).strip().splitlines()
+    return lines[0] if lines else "unknown"
+
+
 def run_condition(
-    condition: str, tracks_dir: Path, work_dir: Path, atis_root: Path, ribotish: str
+    condition: str,
+    tracks_dir: Path,
+    work_dir: Path,
+    reference_all: Path,
+    ribotish: str,
+    nproc: int = 1,
+    gtf: Path | None = None,
+    fasta: Path | None = None,
 ) -> dict:
-    """Run Jimmy's Ribo-TISH on synthetic BAMs and compare with his pooled calls."""
-    work_dir, atis_root = Path(work_dir).resolve(), Path(atis_root).resolve()
+    """Run Ribo-TISH on synthetic BAMs and compare with the fork's real-BAM pooled calls."""
+    reference_all = Path(reference_all).resolve()
+    if not reference_all.is_file():
+        raise FileNotFoundError(f"reference candidates table not found: {reference_all}")
+    gtf = gtf or os.environ.get("TISIAGO_GTF")
+    fasta = fasta or os.environ.get("TISIAGO_GENOME")
+    if not gtf or not fasta:
+        raise ValueError("GTF and FASTA are required (or set TISIAGO_GTF / TISIAGO_GENOME)")
+    gtf, fasta = Path(gtf).resolve(), Path(fasta).resolve()
+    work_dir = Path(work_dir).resolve()
     inputs = prepare_inputs(condition, Path(tracks_dir).resolve(), work_dir)
     output = work_dir / f"{condition}_TIS_predict.txt"
     argv = predict_command(
@@ -50,19 +72,20 @@ def run_condition(
         inputs["chx_bams"],
         inputs["tis_paras"],
         inputs["chx_paras"],
-        atis_root / "reference" / "gencode.v49.primary_assembly.annotation.gtf",
-        atis_root / "reference" / "Gencode_v49_GRCh38.primary_assembly.genome.fa",
+        gtf,
+        fasta,
         output,
         work_dir / "tisBackground.txt",
+        nproc=nproc,
     )
     subprocess.run(argv, check=True, cwd=work_dir)
     ours = pd.read_csv(work_dir / f"{condition}_TIS_predict_all.txt", sep="\t")
-    jimmy = pd.read_csv(
-        atis_root / "ribotish" / "combined" / f"{condition}_TIS_predict_all.txt", sep="\t"
-    )
+    reference = pd.read_csv(reference_all, sep="\t")
     report = {
         "condition": condition,
-        **compare_calls(filter_predictions(ours), filter_predictions(jimmy)),
+        "ribotish_version": ribotish_version(ribotish),
+        "reference": str(reference_all),
+        **compare_calls(filter_predictions(ours), filter_predictions(reference)),
     }
     report["passed"] = report["jaccard"] >= PASS_JACCARD
     return report
@@ -73,15 +96,20 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--condition", required=True)
     ap.add_argument("--tracks-dir", default="data/p6/tracks")
-    ap.add_argument("--out-dir", default="data/p6/roundtrip")
-    ap.add_argument("--atis-root", default=os.environ.get("TISIAGO_ATIS_DATA"))
+    ap.add_argument("--out-dir", default="data/p6/roundtrip_fork")
+    ap.add_argument("--reference-run", default=os.environ.get("TISIAGO_RIBOTISH_RUN"))
     ap.add_argument("--ribotish", default=os.environ.get("TISIAGO_RIBOTISH", "ribotish"))
+    ap.add_argument("--nproc", type=int, default=int(os.environ.get("SLURM_CPUS_PER_TASK", 1)))
     args = ap.parse_args()
-    if not args.atis_root:
-        ap.error("--atis-root is required (or set TISIAGO_ATIS_DATA)")
-    work_dir = Path(args.out_dir) / args.condition
+    if not args.reference_run:
+        ap.error("--reference-run is required (or set TISIAGO_RIBOTISH_RUN)")
+    c = args.condition
+    reference = Path(args.reference_run) / c / "pooled" / f"{c}_pooled.candidates.tsv"
+    if not reference.is_file():
+        ap.error(f"reference candidates table not found: {reference}")
+    work_dir = Path(args.out_dir) / c
     report = run_condition(
-        args.condition, Path(args.tracks_dir), work_dir, Path(args.atis_root), args.ribotish
+        c, Path(args.tracks_dir), work_dir, reference, args.ribotish, nproc=args.nproc
     )
     (work_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
