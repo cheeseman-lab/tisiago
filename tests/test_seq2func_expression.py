@@ -3,7 +3,7 @@
 import pandas as pd
 import pytest
 
-from tisiago.seq2func.expression import expression_table, read_counts, read_gene_spans
+from tisiago.seq2func.expression import counts_path, expression_table, read_counts, read_gene_spans
 
 
 def _gtf(tmp_path):
@@ -34,6 +34,37 @@ def test_read_counts_raises_on_missing_file(tmp_path):
     path = tmp_path / "missing.txt"
     with pytest.raises(FileNotFoundError):
         read_counts(path)
+
+
+def test_counts_path_exact_match(tmp_path):
+    counts = tmp_path / "counts"
+    counts.mkdir()
+    (counts / "sample1_htseqcount.txt").write_text("G1\t10\n")
+    assert counts_path(tmp_path, "sample1") == counts / "sample1_htseqcount.txt"
+
+
+def test_counts_path_lane_fallback(tmp_path):
+    counts = tmp_path / "counts"
+    counts.mkdir()
+    (counts / "713_S10_L002_htseqcount.txt").write_text("G1\t10\n")
+    # Try to find by lane-stripped name (L001 missing, should fall back to L002)
+    assert counts_path(tmp_path, "713_S10_L001") == counts / "713_S10_L002_htseqcount.txt"
+
+
+def test_counts_path_missing_raises_file_not_found(tmp_path):
+    counts = tmp_path / "counts"
+    counts.mkdir()
+    with pytest.raises(FileNotFoundError):
+        counts_path(tmp_path, "nonexistent_S1_L001")
+
+
+def test_counts_path_multiple_lanes_raises_value_error(tmp_path):
+    counts = tmp_path / "counts"
+    counts.mkdir()
+    (counts / "sample_S1_L001_htseqcount.txt").write_text("G1\t10\n")
+    (counts / "sample_S1_L002_htseqcount.txt").write_text("G1\t20\n")
+    with pytest.raises(ValueError, match="multiple lane variants"):
+        counts_path(tmp_path, "sample_S1_L003")
 
 
 def test_expression_table_sums_replicates_and_thresholds(tmp_path, monkeypatch):
