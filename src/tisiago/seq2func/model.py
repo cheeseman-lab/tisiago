@@ -97,7 +97,7 @@ def register_track_head(name: str, num_tracks: int, kind: str = "mlp") -> None:
     _REGISTERED_KINDS[name] = kind
 
 
-def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True):
+def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True, device=None):
     """Load the local all-folds checkpoint with one registered custom head (no downloads)."""
     return create_model_with_heads(
         "all_folds",
@@ -105,6 +105,7 @@ def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True):
         checkpoint_path=checkpoint,
         organism_settings={ORGANISM: dna_model.OrganismSettings()},
         detach_backbone=detach_backbone,
+        device=device,
     )
 
 
@@ -116,6 +117,7 @@ def load_finetuned(
     kind: str = "mlp",
     *,
     detach_backbone: bool = True,
+    device=None,
 ):
     """Rebuild the training model and restore a ``save_checkpoint(save_full_model=True)`` dir.
 
@@ -129,7 +131,7 @@ def load_finetuned(
 
     path = Path(checkpoint_dir).resolve() / "checkpoint"
     register_track_head(head, num_tracks, kind=kind)
-    model = load_model(base_checkpoint, head, detach_backbone=detach_backbone)
+    model = load_model(base_checkpoint, head, detach_backbone=detach_backbone, device=device)
     template = (model._params, model._state)
     check_restorable(tree_leaf_shapes(template), saved_leaf_shapes(path))
     target = jax.tree_util.tree_map(
