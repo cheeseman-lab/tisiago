@@ -259,36 +259,29 @@ def test_mean_kl_skips_nan_windows():
     assert math.isnan(evaluate.channel_kl(np.full((2, 1), np.nan))[0][0])
 
 
-def test_load_predict_fn_registers_head_then_loads_checkpoint(monkeypatch, tmp_path):
-    agft = pytest.importorskip("alphagenome_ft")
+def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp_path):
+    pytest.importorskip("alphagenome_ft")
     model_mod = pytest.importorskip("tisiago.seq2func.model")
     calls = {}
 
     class FakeModel:
         _params, _state = "params", "state"
 
-    def fake_register(name, num_tracks, kind="mlp"):
-        calls["register"] = (name, num_tracks, kind)
-
-    def fake_load(checkpoint, **kwargs):
-        assert "register" in calls, "head must be registered before load_checkpoint"
-        calls["load"] = (checkpoint, kwargs)
+    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind):
+        calls["load"] = (checkpoint, base, head, num_tracks, kind)
         return FakeModel()
 
     def fake_make_predict(model, head):
         calls["head"] = head
         return lambda params, state, seq: np.zeros((1, seq.shape[1], 6)) + (params == "params")
 
-    monkeypatch.setattr(agft, "load_checkpoint", fake_load)
-    monkeypatch.setattr(model_mod, "register_track_head", fake_register)
+    monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
     monkeypatch.setattr(model_mod, "make_predict", fake_make_predict)
     predict = evaluate.load_predict_fn(
         tmp_path, "condition:HeLa", base_checkpoint="weights", head_kind="conv"
     )
-    assert calls["register"] == ("p6_hela", 6, "conv")
+    assert calls["load"] == (str(tmp_path), "weights", "p6_hela", 6, "conv")
     assert calls["head"] == "p6_hela"
-    assert calls["load"][1]["base_checkpoint_path"] == "weights"
-    assert list(calls["load"][1]["organism_settings"]) == [model_mod.ORGANISM]
     out = predict({"sequences": np.zeros((1, 8, 4), np.float32)})
     assert out.shape == (1, 8, 6) and (out == 1).all()
 

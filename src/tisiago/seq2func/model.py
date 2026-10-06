@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -104,6 +106,38 @@ def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True):
         organism_settings={ORGANISM: dna_model.OrganismSettings()},
         detach_backbone=detach_backbone,
     )
+
+
+def load_finetuned(
+    checkpoint_dir: str,
+    base_checkpoint: str,
+    head: str,
+    num_tracks: int,
+    kind: str = "mlp",
+    *,
+    detach_backbone: bool = True,
+):
+    """Rebuild the training model and restore a ``save_checkpoint(save_full_model=True)`` dir.
+
+    agft 0.1.12 ``load_checkpoint`` wraps full-model checkpoints with the base model's forward,
+    which has no custom heads, so the model is rebuilt with :func:`load_model` instead and every
+    saved ``(params, state)`` leaf is checked against it before the restore.
+    """
+    import orbax.checkpoint as ocp
+
+    from tisiago.seq2func.checkpoint import check_restorable, saved_leaf_shapes, tree_leaf_shapes
+
+    path = Path(checkpoint_dir).resolve() / "checkpoint"
+    register_track_head(head, num_tracks, kind=kind)
+    model = load_model(base_checkpoint, head, detach_backbone=detach_backbone)
+    template = (model._params, model._state)
+    check_restorable(tree_leaf_shapes(template), saved_leaf_shapes(path))
+    target = jax.tree_util.tree_map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), template
+    )
+    params, state = ocp.StandardCheckpointer().restore(str(path), target=target)
+    model._params, model._state = params, state
+    return model
 
 
 def make_predict(model, head: str):

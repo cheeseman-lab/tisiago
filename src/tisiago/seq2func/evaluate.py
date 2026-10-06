@@ -323,25 +323,13 @@ def load_predict_fn(
 ) -> Callable[[dict], np.ndarray]:
     """``predict(batch) -> (1, S, C)`` from a ``save_checkpoint(save_full_model=True)`` dir."""
     import jax.numpy as jnp
-    from alphagenome_ft import load_checkpoint
-    from alphagenome_research.model import dna_model
 
-    from tisiago.seq2func.model import ORGANISM, make_predict, register_track_head
+    from tisiago.seq2func.model import load_finetuned, make_predict
 
     head, conditions = parse_arm(arm)
-    register_track_head(head, len(channel_layout(conditions)), kind=head_kind)
-    # agft 0.1.12 calls create_from_kaggle for full-model checkpoints before honouring
-    # base_checkpoint_path; route that call to the local weights instead of a Kaggle login.
-    from_kaggle = dna_model.create_from_kaggle
-    dna_model.create_from_kaggle = lambda *_, **kw: dna_model.create(base_checkpoint, **kw)
-    try:
-        model = load_checkpoint(
-            checkpoint,
-            base_checkpoint_path=base_checkpoint,
-            organism_settings={ORGANISM: dna_model.OrganismSettings()},
-        )
-    finally:
-        dna_model.create_from_kaggle = from_kaggle
+    model = load_finetuned(
+        str(checkpoint), str(base_checkpoint), head, len(channel_layout(conditions)), head_kind
+    )
     predict = make_predict(model, head)
     params, state = model._params, model._state
     return lambda batch: np.asarray(predict(params, state, jnp.asarray(batch["sequences"])))
