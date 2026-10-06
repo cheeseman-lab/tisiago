@@ -95,6 +95,9 @@ def main() -> None:
         default=None,
         help="backbone AdamW lr with --train-backbone (default: --learning-rate / 100)",
     )
+    ap.add_argument("--schedule", choices=("constant", "cosine"), default="constant")
+    ap.add_argument("--warmup-steps", type=int, default=0)
+    ap.add_argument("--clip-norm", type=float, default=None)
     args = ap.parse_args()
     if not args.checkpoint:
         ap.error("--checkpoint is required (or set ALPHAGENOME_WEIGHTS_PATH)")
@@ -137,6 +140,9 @@ def main() -> None:
         weight_decay=args.weight_decay,
         heads_only=not args.train_backbone,
         backbone_learning_rate=backbone_lr,
+        total_steps=args.steps if args.schedule == "cosine" else None,
+        warmup_steps=args.warmup_steps,
+        clip_norm=args.clip_norm,
     )
     params, state = model._params, model._state
 
@@ -158,6 +164,8 @@ def main() -> None:
     initial, final = losses[0], losses[-1]
     passed = passes_gate(initial, final)
     final_multinomial = multinomials[-1]
+    finite_multinomials = [v for v in multinomials if math.isfinite(v)]
+    best_multinomial = min(finite_multinomials) if finite_multinomials else math.nan
     passed_profile = passes_profile(final_multinomial)
     reduction = 1.0 - final / initial if initial != 0 else math.nan
     payload = {
@@ -180,13 +188,17 @@ def main() -> None:
         "final": finite_or_none(final),
         "reduction": finite_or_none(reduction),
         "passed": passed,
+        "schedule": args.schedule,
+        "warmup_steps": args.warmup_steps,
+        "clip_norm": args.clip_norm,
         "final_multinomial": finite_or_none(final_multinomial),
+        "best_multinomial": finite_or_none(best_multinomial),
         "passed_profile": passed_profile,
     }
     write_json_atomic(payload, out)
     print(
         f"initial {initial:.4f} final {final:.4f} reduction {reduction:.4f} "
-        f"profile KL {final_multinomial:.4f} "
+        f"profile KL {final_multinomial:.4f} (best {best_multinomial:.4f}) "
         f"step {payload['step_seconds']:.3f}s peak {payload['peak_gib']:.2f} GiB -> {out}"
     )
     if not (passed and passed_profile):

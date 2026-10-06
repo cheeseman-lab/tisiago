@@ -224,3 +224,94 @@ def test_write_json_atomic_rejects_nan(tmp_path):
     with pytest.raises(ValueError):
         write_json_atomic({"reduction": float("nan")}, tmp_path / "y.json")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json"]
+
+
+def test_make_schedule_warmup_peak_and_floor():
+    from tisiago.seq2func.model import make_schedule
+
+    sched = make_schedule(1e-2, total_steps=100, warmup_steps=10)
+    assert float(sched(0)) == 0.0
+    assert float(sched(10)) == pytest.approx(1e-2, rel=1e-5)
+    assert float(sched(100)) == pytest.approx(1e-4, rel=1e-4)
+    assert make_schedule(1e-2, total_steps=None, warmup_steps=0) == 1e-2
+
+
+def test_make_optimizer_schedule_scales_full_step_updates():
+    params = _fake_params()
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    opt = make_optimizer(
+        params,
+        "h",
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=False,
+        backbone_learning_rate=1e-4,
+        total_steps=100,
+        warmup_steps=10,
+    )
+    state = opt.init(params)
+    updates, state = opt.update(grads, state, params)
+    assert float(jnp.abs(updates["head/h/~predict/hidden"]["w"]).max()) == 0.0
+    for _ in range(9):
+        updates, state = opt.update(grads, state, params)
+    updates, state = opt.update(grads, state, params)  # count 10 = peak
+    assert float(jnp.abs(updates["head/h/~predict/hidden"]["w"]).mean()) == pytest.approx(
+        1e-2, rel=1e-2
+    )
+    assert float(jnp.abs(updates["alphagenome/sequence_encoder/conv"]["w"]).mean()) == (
+        pytest.approx(1e-4, rel=1e-2)
+    )
+
+
+def test_make_optimizer_heads_only_with_schedule_keeps_backbone_zero():
+    params = _fake_params()
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    opt = make_optimizer(
+        params,
+        "h",
+        learning_rate=1e-2,
+        weight_decay=0.1,
+        heads_only=True,
+        total_steps=50,
+        warmup_steps=5,
+        clip_norm=1.0,
+    )
+    state = opt.init(params)
+    for _ in range(8):
+        updates, state = opt.update(grads, state, params)
+        assert float(jnp.abs(updates["alphagenome/sequence_encoder/conv"]["w"]).max()) == 0.0
+        assert float(jnp.abs(updates["alphagenome/head/rna_seq/output"]["w"]).max()) == 0.0
+    assert float(jnp.abs(updates["head/h/~predict/hidden"]["w"]).mean()) > 0
+
+
+@pytest.mark.parametrize("heads_only", [True, False])
+def test_clip_norm_bounds_huge_gradient_updates(heads_only):
+    params = _fake_params()
+    huge = jax.tree_util.tree_map(lambda p: jnp.full_like(p, 1e6), params)
+    opt = make_optimizer(
+        params, "h", learning_rate=1e-2, weight_decay=0.0, heads_only=heads_only, clip_norm=1.0
+    )
+    updates, _ = opt.update(huge, opt.init(params), params)
+    leaves = jax.tree_util.tree_leaves(updates)
+    assert all(bool(jnp.isfinite(x).all()) for x in leaves)
+    assert max(float(jnp.abs(x).max()) for x in leaves) <= 1e-2 * 1.01
+
+
+def test_clip_norm_limits_spike_damage_and_leaves_small_gradients_alone():
+    key = "head/h/~predict/hidden"
+    params = {key: {"w": jnp.ones((4,))}}
+    steady = {key: {"w": jnp.full((4,), 0.01)}}
+    spike = {key: {"w": jnp.full((4,), 1e6)}}
+
+    def run(clip_norm, grads_seq):
+        opt = make_optimizer(params, "h", learning_rate=1e-2, weight_decay=0.0, clip_norm=clip_norm)
+        state = opt.init(params)
+        for g in grads_seq:
+            updates, state = opt.update(g, state, params)
+        return float(jnp.abs(updates[key]["w"]).max())
+
+    # Below the threshold clipping is the identity.
+    assert run(1.0, [steady] * 5) == pytest.approx(run(None, [steady] * 5), rel=1e-6)
+    # A spike inflates Adam's second moment; clipping keeps later steady steps from stalling.
+    after = [steady] * 20 + [spike] + [steady] * 20
+    assert run(1.0, after) > 2 * run(None, after)

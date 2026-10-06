@@ -115,6 +115,19 @@ def label_backbone_params(params, head: str):
     return jax.tree_util.tree_map_with_path(label, params)
 
 
+def make_schedule(learning_rate: float, total_steps: int | None, warmup_steps: int = 0):
+    """Constant ``learning_rate``, or warmup-cosine decaying to ``learning_rate / 100``."""
+    if total_steps is None:
+        return learning_rate
+    return optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=learning_rate,
+        warmup_steps=warmup_steps,
+        decay_steps=total_steps,
+        end_value=learning_rate * 0.01,
+    )
+
+
 def make_optimizer(
     params,
     head: str,
@@ -123,25 +136,40 @@ def make_optimizer(
     weight_decay: float,
     heads_only: bool = True,
     backbone_learning_rate: float | None = None,
+    total_steps: int | None = None,
+    warmup_steps: int = 0,
+    clip_norm: float | None = None,
 ) -> optax.GradientTransformation:
-    """AdamW on the head only, or on head + backbone with a separate backbone learning rate."""
+    """AdamW on the head only, or on head + backbone with a separate backbone learning rate.
+
+    ``total_steps`` switches every learning rate to a warmup-cosine schedule; ``clip_norm``
+    clips the global gradient norm before the optimizer.
+    """
+    head_lr = make_schedule(learning_rate, total_steps, warmup_steps)
     if heads_only:
         return create_optimizer(
             params,
             trainable_head_names=(head,),
-            learning_rate=learning_rate,
+            learning_rate=head_lr,
             weight_decay=weight_decay,
             heads_only=True,
+            gradient_clip_global_norm=clip_norm,
         )
     if backbone_learning_rate is None:
         backbone_learning_rate = learning_rate / 100
-    return optax.multi_transform(
+    inner = optax.multi_transform(
         {
-            "head": optax.adamw(learning_rate, weight_decay=weight_decay),
-            "backbone": optax.adamw(backbone_learning_rate, weight_decay=weight_decay),
+            "head": optax.adamw(head_lr, weight_decay=weight_decay),
+            "backbone": optax.adamw(
+                make_schedule(backbone_learning_rate, total_steps, warmup_steps),
+                weight_decay=weight_decay,
+            ),
         },
         label_backbone_params(params, head),
     )
+    if clip_norm is None:
+        return inner
+    return optax.chain(optax.clip_by_global_norm(clip_norm), inner)
 
 
 def make_train_step(
@@ -152,6 +180,9 @@ def make_train_step(
     weight_decay: float,
     heads_only: bool = True,
     backbone_learning_rate: float | None = None,
+    total_steps: int | None = None,
+    warmup_steps: int = 0,
+    clip_norm: float | None = None,
 ):
     """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
 
@@ -164,6 +195,9 @@ def make_train_step(
         weight_decay=weight_decay,
         heads_only=heads_only,
         backbone_learning_rate=backbone_learning_rate,
+        total_steps=total_steps,
+        warmup_steps=warmup_steps,
+        clip_norm=clip_norm,
     )
     opt_state = opt.init(model._params)
     loss_fn = model.create_loss_fn_for_head(head)
