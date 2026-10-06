@@ -1,9 +1,11 @@
-"""One-window overfit of the heads-only track head (P6.1 training-core check).
+"""One-window overfit of the track head, optionally with the backbone (P6.1 training-core check).
 
 Usage::
 
     python -m tisiago.seq2func.overfit --condition HeLa --chrom chr12 --center 6536000 \
         --steps 300 --out data/p6/overfit/HeLa.json
+    python -m tisiago.seq2func.overfit --condition HeLa --head conv --train-backbone \
+        --backbone-learning-rate 1e-5 --steps 3000 --out data/p6/overfit/HeLa_conv_ft.json
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import numpy as np
 HEAD = "p6_overfit"
 WINDOW = 131_072
 TIMING_SKIP = 2
+PROFILE_KL_MAX = 1.0
 
 
 def fetch_onehot(genome: str, chrom: str, start: int, end: int) -> np.ndarray:
@@ -48,6 +51,11 @@ def passes_gate(initial: float, final: float, threshold: float = 0.9) -> bool:
     return 1.0 - final / initial >= threshold
 
 
+def passes_profile(final_multinomial: float, threshold: float = PROFILE_KL_MAX) -> bool:
+    """True only for a finite final multinomial (profile KL) ``<= threshold``."""
+    return math.isfinite(final_multinomial) and final_multinomial <= threshold
+
+
 def finite_or_none(value: float) -> float | None:
     """``value`` if finite, else ``None`` (serialised as JSON ``null``)."""
     return value if math.isfinite(value) else None
@@ -67,7 +75,7 @@ def write_json_atomic(payload: dict, out: Path) -> None:
 
 
 def main() -> None:
-    """CLI: overfit one window and exit non-zero unless the loss falls by >= 90%."""
+    """CLI: overfit one window; exit non-zero unless loss falls >= 90% and profile KL <= 1."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--condition", required=True)
     ap.add_argument("--chrom", default="chr12")
@@ -79,6 +87,14 @@ def main() -> None:
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
+    ap.add_argument("--head", choices=("mlp", "conv"), default="mlp")
+    ap.add_argument("--train-backbone", action="store_true")
+    ap.add_argument(
+        "--backbone-learning-rate",
+        type=float,
+        default=None,
+        help="backbone AdamW lr with --train-backbone (default: --learning-rate / 100)",
+    )
     args = ap.parse_args()
     if not args.checkpoint:
         ap.error("--checkpoint is required (or set ALPHAGENOME_WEIGHTS_PATH)")
@@ -105,31 +121,44 @@ def main() -> None:
     }
     print(f"window {args.chrom}:{start}-{end} targets {targets.shape} sums {targets.sum(0)}")
 
-    register_track_head(HEAD, num_tracks)
+    register_track_head(HEAD, num_tracks, kind=args.head)
     t0 = time.time()
-    model = load_model(args.checkpoint, HEAD, detach_backbone=True)
+    model = load_model(args.checkpoint, HEAD, detach_backbone=not args.train_backbone)
     print(f"model load {time.time() - t0:.1f}s", flush=True)
+    backbone_lr = None
+    if args.train_backbone:
+        backbone_lr = args.backbone_learning_rate
+        if backbone_lr is None:
+            backbone_lr = args.learning_rate / 100
     step, opt_state = make_train_step(
-        model, HEAD, learning_rate=args.learning_rate, weight_decay=args.weight_decay
+        model,
+        HEAD,
+        learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        heads_only=not args.train_backbone,
+        backbone_learning_rate=backbone_lr,
     )
     params, state = model._params, model._state
 
-    losses, times = [], []
+    losses, multinomials, times = [], [], []
     for i in range(args.steps):
         t = time.time()
         params, opt_state, aux = step(params, state, opt_state, batch)
         losses.append(float(aux["loss"]))
+        multinomials.append(float(aux["multinomial"]))
         times.append(time.time() - t)
         if i < 3 or i % 25 == 0 or i == args.steps - 1:
             print(
                 f"step {i:4d} loss {losses[-1]:.5f} poisson {float(aux['poisson']):.5f} "
-                f"multinomial {float(aux['multinomial']):.5f} dt {times[-1]:.3f}s",
+                f"multinomial {multinomials[-1]:.5f} dt {times[-1]:.3f}s",
                 flush=True,
             )
 
     stats = jax.local_devices()[0].memory_stats() or {}
     initial, final = losses[0], losses[-1]
     passed = passes_gate(initial, final)
+    final_multinomial = multinomials[-1]
+    passed_profile = passes_profile(final_multinomial)
     reduction = 1.0 - final / initial if initial != 0 else math.nan
     payload = {
         "condition": args.condition,
@@ -137,8 +166,11 @@ def main() -> None:
         "start": start,
         "end": end,
         "num_tracks": num_tracks,
+        "head": args.head,
+        "train_backbone": args.train_backbone,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
+        "backbone_learning_rate": backbone_lr,
         "losses": [finite_or_none(v) for v in losses],
         "non_finite_steps": [i for i, v in enumerate(losses) if not math.isfinite(v)],
         "compile_seconds": times[:TIMING_SKIP],
@@ -148,13 +180,16 @@ def main() -> None:
         "final": finite_or_none(final),
         "reduction": finite_or_none(reduction),
         "passed": passed,
+        "final_multinomial": finite_or_none(final_multinomial),
+        "passed_profile": passed_profile,
     }
     write_json_atomic(payload, out)
     print(
         f"initial {initial:.4f} final {final:.4f} reduction {reduction:.4f} "
+        f"profile KL {final_multinomial:.4f} "
         f"step {payload['step_seconds']:.3f}s peak {payload['peak_gib']:.2f} GiB -> {out}"
     )
-    if not passed:
+    if not (passed and passed_profile):
         sys.exit(1)
 
 

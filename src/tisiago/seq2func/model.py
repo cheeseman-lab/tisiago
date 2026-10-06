@@ -1,4 +1,4 @@
-"""Custom 1-bp track head on AlphaGenome and a heads-only JAX train step (alphagenome-ft)."""
+"""Custom 1-bp track heads on AlphaGenome and a JAX train step (alphagenome-ft)."""
 
 from __future__ import annotations
 
@@ -17,11 +17,13 @@ from alphagenome_ft import (
     register_custom_head,
 )
 from alphagenome_ft.custom_heads import get_custom_head_config
+from alphagenome_ft.optimizer_utils import is_trainable_head_path, parameter_path_to_str
 from alphagenome_research.model import dna_model
 
 from tisiago.seq2func.loss import poisson_multinomial
 
 ORGANISM = Organism.HOMO_SAPIENS
+CONV_WIDTH = 31
 
 
 class TrackHead(CustomHead):
@@ -40,8 +42,34 @@ class TrackHead(CustomHead):
         return poisson_multinomial(predictions, batch["targets"], batch["mask"])
 
 
-def register_track_head(name: str, num_tracks: int) -> None:
-    """Register a :class:`TrackHead`; idempotent for the same ``(name, num_tracks)``."""
+class ConvTrackHead(TrackHead):
+    """concat(1-bp embeddings, optional one-hot) -> Conv1D(256, 31) -> relu -> Conv1D(C, 1).
+
+    agft 0.1.12 calls custom heads as ``head(embeddings, organism_index)`` and does not forward
+    the input sequence, so in practice the head sees embeddings only; ``kwargs["sequence"]`` is
+    concatenated when a caller provides it.
+    """
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
+        x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
+        sequence = kwargs.get("sequence")
+        if sequence is not None:
+            x = jnp.concatenate([x, sequence.astype(jnp.float32)], axis=-1)
+        x = hk.Conv1D(256, kernel_shape=CONV_WIDTH, padding="SAME", name="hidden")(x)
+        x = jax.nn.relu(x)
+        x = hk.Conv1D(self._num_tracks, kernel_shape=1, name="output")(x)
+        return jax.nn.softplus(x.astype(jnp.float32))
+
+
+HEAD_KINDS = {"mlp": TrackHead, "conv": ConvTrackHead}
+_REGISTERED_KINDS: dict[str, str] = {}
+
+
+def register_track_head(name: str, num_tracks: int, kind: str = "mlp") -> None:
+    """Register a track head of ``kind``; idempotent for the same ``(name, num_tracks, kind)``."""
+    if kind not in HEAD_KINDS:
+        raise ValueError(f"unknown head kind {kind!r}; expected one of {sorted(HEAD_KINDS)}")
     existing = get_custom_head_config(name)
     if existing is not None:
         if existing.num_tracks != num_tracks:
@@ -49,16 +77,22 @@ def register_track_head(name: str, num_tracks: int) -> None:
                 f"head {name!r} already registered with num_tracks={existing.num_tracks}, "
                 f"not {num_tracks}"
             )
+        previous = _REGISTERED_KINDS.get(name, kind)
+        if previous != kind:
+            raise ValueError(
+                f"head {name!r} already registered with kind={previous!r}, not {kind!r}"
+            )
         return
     register_custom_head(
         name,
-        TrackHead,
+        HEAD_KINDS[kind],
         CustomHeadConfig(
             type=CustomHeadType.GENOME_TRACKS,
             output_type=dna_output.OutputType.RNA_SEQ,
             num_tracks=num_tracks,
         ),
     )
+    _REGISTERED_KINDS[name] = kind
 
 
 def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True):
@@ -72,6 +106,44 @@ def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True):
     )
 
 
+def label_backbone_params(params, head: str):
+    """Label leaves under ``head/<head>/`` as ``"head"`` and every other leaf ``"backbone"``."""
+
+    def label(path, _value):
+        return "head" if is_trainable_head_path(parameter_path_to_str(path), {head}) else "backbone"
+
+    return jax.tree_util.tree_map_with_path(label, params)
+
+
+def make_optimizer(
+    params,
+    head: str,
+    *,
+    learning_rate: float,
+    weight_decay: float,
+    heads_only: bool = True,
+    backbone_learning_rate: float | None = None,
+) -> optax.GradientTransformation:
+    """AdamW on the head only, or on head + backbone with a separate backbone learning rate."""
+    if heads_only:
+        return create_optimizer(
+            params,
+            trainable_head_names=(head,),
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            heads_only=True,
+        )
+    if backbone_learning_rate is None:
+        backbone_learning_rate = learning_rate / 100
+    return optax.multi_transform(
+        {
+            "head": optax.adamw(learning_rate, weight_decay=weight_decay),
+            "backbone": optax.adamw(backbone_learning_rate, weight_decay=weight_decay),
+        },
+        label_backbone_params(params, head),
+    )
+
+
 def make_train_step(
     model,
     head: str,
@@ -79,14 +151,19 @@ def make_train_step(
     learning_rate: float,
     weight_decay: float,
     heads_only: bool = True,
+    backbone_learning_rate: float | None = None,
 ):
-    """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``."""
-    opt = create_optimizer(
+    """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
+
+    ``heads_only=False`` also trains the backbone; load the model with ``detach_backbone=False``.
+    """
+    opt = make_optimizer(
         model._params,
-        trainable_head_names=(head,),
+        head,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         heads_only=heads_only,
+        backbone_learning_rate=backbone_learning_rate,
     )
     opt_state = opt.init(model._params)
     loss_fn = model.create_loss_fn_for_head(head)
