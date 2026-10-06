@@ -330,11 +330,18 @@ def load_predict_fn(
 
     head, conditions = parse_arm(arm)
     register_track_head(head, len(channel_layout(conditions)), kind=head_kind)
-    model = load_checkpoint(
-        checkpoint,
-        base_checkpoint_path=base_checkpoint,
-        organism_settings={ORGANISM: dna_model.OrganismSettings()},
-    )
+    # agft 0.1.12 calls create_from_kaggle for full-model checkpoints before honouring
+    # base_checkpoint_path; route that call to the local weights instead of a Kaggle login.
+    from_kaggle = dna_model.create_from_kaggle
+    dna_model.create_from_kaggle = lambda *_, **kw: dna_model.create(base_checkpoint, **kw)
+    try:
+        model = load_checkpoint(
+            checkpoint,
+            base_checkpoint_path=base_checkpoint,
+            organism_settings={ORGANISM: dna_model.OrganismSettings()},
+        )
+    finally:
+        dna_model.create_from_kaggle = from_kaggle
     predict = make_predict(model, head)
     params, state = model._params, model._state
     return lambda batch: np.asarray(predict(params, state, jnp.asarray(batch["sequences"])))
