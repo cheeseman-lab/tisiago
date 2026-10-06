@@ -125,3 +125,26 @@ def test_iterate_worker_error_raised_in_consumer(world, tmp_path):
     it = iterate(world["windows"], **kwargs(world), seed=0, augment_examples=False)
     with pytest.raises(Exception):
         next(it)
+
+
+def test_track_reader_matches_load_targets(world):
+    from tisiago.seq2func.data import TrackReader
+    from tisiago.seq2func.targets import load_targets
+
+    reader = TrackReader(world["tracks_dir"], world["conditions"])
+    try:
+        for start, end in [(0, 32), (-4, 20), (50, 70)]:
+            expected = load_targets(world["tracks_dir"], world["conditions"], "chr1", start, end)
+            assert np.array_equal(reader.read("chr1", start, end), expected)
+    finally:
+        reader.close()
+
+
+def test_iterate_multi_worker_loop_and_error(world, tmp_path):
+    it = iterate(world["windows"], **kwargs(world), seed=0, augment_examples=True, workers=2)
+    assert all(next(it)["targets"].shape == (1, 32, 6) for _ in range(9))
+    it.close()
+    (tmp_path / "tracks" / "HeLa" / "chx_reppooled.minus.bw").unlink()
+    it = iterate(world["windows"], **kwargs(world), seed=0, augment_examples=False, workers=2)
+    with pytest.raises(Exception):
+        next(it)

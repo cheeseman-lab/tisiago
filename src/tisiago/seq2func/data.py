@@ -12,7 +12,9 @@ import pandas as pd
 
 from tisiago.seq2func.augment import reverse_complement, shift
 from tisiago.seq2func.masking import expression_mask
-from tisiago.seq2func.targets import channel_layout, load_targets, strand_pairs
+from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
+from tisiago.seq2func.targets import STRAND_FILES, channel_layout, strand_pairs
+from tisiago.seq2func.tracks import track_prefix
 
 _LOOKUP = np.zeros((256, 4), dtype=np.float32)
 for _i, _base in enumerate("ACGT"):
@@ -41,6 +43,52 @@ def fetch_sequence(fasta, chrom: str, start: int, end: int) -> str:
     return "N" * (lo - start) + body + "N" * (end - hi)
 
 
+class TrackReader:
+    """Reads :func:`tisiago.seq2func.targets.load_targets` windows from cached bigWig handles."""
+
+    def __init__(
+        self, tracks_dir: str | Path, conditions: Sequence[str], rep: int | str = "pooled"
+    ):
+        """Resolve the per-channel paths; handles are opened lazily on first read."""
+        self.channels = []
+        for condition, library, strand in channel_layout(conditions):
+            prefix = track_prefix(tracks_dir, condition, library, rep)
+            shift_ = RIBOTISH_MINUS_SHIFT if strand == "-" and library != "rna" else 0
+            self.channels.append((f"{prefix}.{STRAND_FILES[strand]}.bw", shift_))
+        self._handles: dict[str, object] = {}
+
+    def _handle(self, path: str):
+        if path not in self._handles:
+            import pyBigWig
+
+            bw = pyBigWig.open(path)
+            if bw is None:
+                raise FileNotFoundError(path)
+            self._handles[path] = bw
+        return self._handles[path]
+
+    def read(self, chrom: str, start: int, end: int) -> np.ndarray:
+        """Targets ``(end - start, C)``, identical to ``load_targets``."""
+        columns = []
+        for path, offset in self.channels:
+            lo_req, hi_req = start + offset, end + offset
+            out = np.zeros(end - start, dtype=np.float32)
+            bw = self._handle(path)
+            size = bw.chroms().get(chrom, 0)
+            lo, hi = max(lo_req, 0), min(hi_req, size)
+            if hi > lo:
+                values = np.asarray(bw.values(chrom, lo, hi), dtype=np.float32)
+                out[lo - lo_req : hi - lo_req] = np.nan_to_num(values)
+            columns.append(out)
+        return np.stack(columns, axis=1)
+
+    def close(self) -> None:
+        """Close all open handles."""
+        for bw in self._handles.values():
+            bw.close()
+        self._handles.clear()
+
+
 def make_example(
     fasta: str | Path | object,
     tracks_dir: str | Path,
@@ -49,8 +97,12 @@ def make_example(
     chrom: str,
     start: int,
     end: int,
+    reader: TrackReader | None = None,
 ) -> dict[str, np.ndarray]:
-    """One window: ``sequences (S, 4)``, ``targets (S, C)``, ``mask (S, C)``."""
+    """One window: ``sequences (S, 4)``, ``targets (S, C)``, ``mask (S, C)``.
+
+    Pass ``reader`` to reuse open bigWig handles across calls.
+    """
     if isinstance(fasta, (str, Path)):
         from pyfaidx import Fasta
 
@@ -62,9 +114,17 @@ def make_example(
     else:
         seq = fetch_sequence(fasta, chrom, start, end)
     layout = channel_layout(conditions)
+    if reader is None:
+        reader = TrackReader(tracks_dir, conditions)
+        try:
+            targets = reader.read(chrom, start, end)
+        finally:
+            reader.close()
+    else:
+        targets = reader.read(chrom, start, end)
     return {
         "sequences": one_hot(seq),
-        "targets": load_targets(tracks_dir, conditions, chrom, start, end),
+        "targets": targets,
         "mask": expression_mask(layout, genes, chrom, start, end),
     }
 
@@ -74,38 +134,65 @@ def augment(example: dict, rng, pairs, max_shift: int = 3) -> dict[str, np.ndarr
     onehot, targets, mask = example["sequences"], example["targets"], example["mask"]
     if rng.random() < 0.5:
         onehot, targets, mask = reverse_complement(onehot, targets, mask, pairs)
-    onehot, targets, mask = shift(
-        onehot, targets, mask, int(rng.integers(-max_shift, max_shift + 1))
-    )
+    offset = int(rng.integers(-max_shift, max_shift + 1))
+    onehot, targets, mask = shift(onehot, targets, mask, offset)
     return {"sequences": onehot, "targets": targets, "mask": mask}
 
 
-def _produce(out, windows, fasta, tracks_dir, conditions, genes, seed, augment_examples, loop):
+def _put(out: queue.Queue, item, stop: threading.Event) -> bool:
+    while not stop.is_set():
+        try:
+            out.put(item, timeout=0.1)
+            return True
+        except queue.Full:
+            continue
+    return False
+
+
+def _produce(out, stop, worker, workers, windows, cfg, seed, augment_examples, loop):
     from pyfaidx import Fasta
 
+    reader = handle = None
     try:
+        fasta, tracks_dir, conditions, genes = cfg
         handle = Fasta(str(fasta), as_raw=True)
+        reader = TrackReader(tracks_dir, conditions)
         pairs = strand_pairs(channel_layout(conditions))
-        rng = np.random.default_rng(seed)
+        rng = np.random.default_rng([seed, worker])
         epoch = 0
-        while True:
+        while not stop.is_set():
             order = np.arange(len(windows))
             if loop:
                 order = np.random.default_rng(seed + epoch).permutation(order)
-            for i in order:
+            for i in order[worker::workers]:
+                if stop.is_set():
+                    return
                 row = windows.iloc[i]
                 example = make_example(
-                    handle, tracks_dir, conditions, genes, row.chrom, int(row.start), int(row.end)
+                    handle,
+                    tracks_dir,
+                    conditions,
+                    genes,
+                    row.chrom,
+                    int(row.start),
+                    int(row.end),
+                    reader=reader,
                 )
                 if augment_examples:
                     example = augment(example, rng, pairs)
-                out.put({k: v[None] for k, v in example.items()})
+                if not _put(out, {k: v[None] for k, v in example.items()}, stop):
+                    return
             if not loop:
                 break
             epoch += 1
-        out.put(_DONE)
+        _put(out, _DONE, stop)
     except BaseException as exc:  # noqa: BLE001 - re-raised in the consumer
-        out.put(_WorkerError(exc))
+        _put(out, _WorkerError(exc), stop)
+    finally:
+        if reader is not None:
+            reader.close()
+        if handle is not None:
+            handle.close()
 
 
 def iterate(
@@ -119,23 +206,38 @@ def iterate(
     augment_examples: bool,
     prefetch: int = 4,
     loop: bool = True,
+    workers: int = 4,
 ) -> Iterator[dict[str, np.ndarray]]:
-    """Yield batch-1 dicts (leading axis 1); a daemon thread prefetches into a bounded queue.
+    """Yield batch-1 dicts (leading axis 1) prefetched by daemon threads into a bounded queue.
 
-    ``loop=True`` reshuffles each epoch with ``default_rng(seed + epoch)`` and never ends;
-    ``loop=False`` yields each window once, in order. Worker errors are re-raised here.
+    ``loop=True`` reshuffles each epoch with ``default_rng(seed + epoch)``, splits it across
+    ``workers`` threads (each with its own handle cache and rng stream) and never ends; order
+    is not preserved. ``loop=False`` uses one worker and yields each window once, in order.
+    Worker errors are re-raised here; closing the generator stops and joins the workers.
     """
+    workers = max(1, workers) if loop else 1
     out: queue.Queue = queue.Queue(maxsize=prefetch)
-    thread = threading.Thread(
-        target=_produce,
-        args=(out, windows, fasta, tracks_dir, conditions, genes, seed, augment_examples, loop),
-        daemon=True,
-    )
-    thread.start()
-    while True:
-        item = out.get()
-        if item is _DONE:
-            return
-        if isinstance(item, _WorkerError):
-            raise item.exc
-        yield item
+    stop = threading.Event()
+    cfg = (fasta, tracks_dir, conditions, genes)
+    threads = [
+        threading.Thread(
+            target=_produce,
+            args=(out, stop, k, workers, windows, cfg, seed, augment_examples, loop),
+            daemon=True,
+        )
+        for k in range(workers)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        while True:
+            item = out.get()
+            if item is _DONE:
+                return
+            if isinstance(item, _WorkerError):
+                raise item.exc
+            yield item
+    finally:
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=5)
