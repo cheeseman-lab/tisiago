@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import tempfile
@@ -31,11 +32,25 @@ def fetch_onehot(genome: str, chrom: str, start: int, end: int) -> np.ndarray:
     fa = Fasta(genome, as_raw=True, sequence_always_upper=True)
     try:
         size = len(fa[chrom])
-        lo, hi = max(start, 0), min(end, size)
-        seq = "N" * (lo - start) + fa[chrom][lo:hi] + "N" * (end - hi)
+        lo = min(max(start, 0), end)
+        hi = max(min(end, size), lo)
+        body = fa[chrom][lo:hi] if hi > lo else ""
+        seq = "N" * (lo - start) + body + "N" * (end - hi)
     finally:
         fa.close()
     return DNAOneHotEncoder(dtype=np.float32).encode(seq)
+
+
+def passes_gate(initial: float, final: float, threshold: float = 0.9) -> bool:
+    """True only for finite losses, ``initial > 0`` and ``1 - final / initial >= threshold``."""
+    if not (math.isfinite(initial) and math.isfinite(final) and initial > 0):
+        return False
+    return 1.0 - final / initial >= threshold
+
+
+def finite_or_none(value: float) -> float | None:
+    """``value`` if finite, else ``None`` (serialised as JSON ``null``)."""
+    return value if math.isfinite(value) else None
 
 
 def write_json_atomic(payload: dict, out: Path) -> None:
@@ -44,7 +59,7 @@ def write_json_atomic(payload: dict, out: Path) -> None:
     fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump(payload, fh, indent=2)
+            json.dump(payload, fh, indent=2, allow_nan=False)
         os.replace(tmp, out)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -114,7 +129,8 @@ def main() -> None:
 
     stats = jax.local_devices()[0].memory_stats() or {}
     initial, final = losses[0], losses[-1]
-    reduction = 1.0 - final / initial
+    passed = passes_gate(initial, final)
+    reduction = 1.0 - final / initial if initial != 0 else math.nan
     payload = {
         "condition": args.condition,
         "chrom": args.chrom,
@@ -123,20 +139,22 @@ def main() -> None:
         "num_tracks": num_tracks,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
-        "losses": losses,
+        "losses": [finite_or_none(v) for v in losses],
+        "non_finite_steps": [i for i, v in enumerate(losses) if not math.isfinite(v)],
         "compile_seconds": times[:TIMING_SKIP],
         "step_seconds": float(np.mean(times[TIMING_SKIP:])),
         "peak_gib": stats.get("peak_bytes_in_use", 0) / 2**30,
-        "initial": initial,
-        "final": final,
-        "reduction": reduction,
+        "initial": finite_or_none(initial),
+        "final": finite_or_none(final),
+        "reduction": finite_or_none(reduction),
+        "passed": passed,
     }
     write_json_atomic(payload, out)
     print(
         f"initial {initial:.4f} final {final:.4f} reduction {reduction:.4f} "
         f"step {payload['step_seconds']:.3f}s peak {payload['peak_gib']:.2f} GiB -> {out}"
     )
-    if reduction < 0.9:
+    if not passed:
         sys.exit(1)
 
 

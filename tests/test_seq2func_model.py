@@ -62,3 +62,40 @@ def test_targets_and_overfit_import_without_pysam():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_fetch_onehot_window_entirely_past_chromosome_end(tmp_path):
+    from tisiago.seq2func.overfit import fetch_onehot
+
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(">c\nACGTacgt\n")
+    onehot = fetch_onehot(str(fasta), "c", 20, 26)
+    assert onehot.shape == (6, 4)
+    assert onehot.sum() == 0
+
+
+@pytest.mark.parametrize(
+    ("initial", "final", "expected"),
+    [
+        (float("nan"), 1.0, False),
+        (10.0, float("nan"), False),
+        (0.0, 0.0, False),
+        (10.0, 0.5, True),
+        (10.0, 5.0, False),
+    ],
+)
+def test_passes_gate(initial, final, expected):
+    from tisiago.seq2func.overfit import passes_gate
+
+    assert passes_gate(initial, final) is expected
+
+
+def test_write_json_atomic_rejects_nan(tmp_path):
+    from tisiago.seq2func.overfit import finite_or_none, write_json_atomic
+
+    out = tmp_path / "x.json"
+    write_json_atomic({"losses": [finite_or_none(float("nan")), finite_or_none(1.0)]}, out)
+    assert '"losses": [\n    null,\n    1.0\n  ]' in out.read_text()
+    with pytest.raises(ValueError):
+        write_json_atomic({"reduction": float("nan")}, tmp_path / "y.json")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json"]
