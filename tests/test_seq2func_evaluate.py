@@ -494,3 +494,25 @@ def test_old_or_unversioned_ceiling_is_refused(cli_world, capsys, version):
     cli_world["run"]("--ceiling-only", "--overwrite", *tracks)
     fresh = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
     assert set(fresh.ceiling_version) == {evaluate.REFERENCE_VERSION}
+
+
+def test_ceiling_frame0_pred_uses_raw_rep2_not_smoothed(tmp_path):
+    # rep2 CHX + track: 3 reads on each codon first base of CDS [60, 90) plus 1 off-frame read;
+    # raw frame-0 = 30 / 31. The 5-bp boxcar would blur it to ~1/3.
+    tracks = tmp_path / "tracks"
+    periodic = Counter({p: 3 for p in range(60, 90, 3)})
+    periodic[61] = 1
+    for rep in (1, 2):
+        _write(tracks, "HeLa", rep, seed=0)
+        write_bigwigs(
+            {("chr7", "+"): periodic, ("chr7", "-"): Counter({5: 1})},
+            SIZES,
+            track_prefix(tracks, "HeLa", "chx", rep),
+        )
+    table = ceiling_metrics(
+        tracks, ["HeLa"], _genes(), WINDOWS, cds=[("chr7", "+", [(60, 90)])], cds_genes=["G2"]
+    )
+    chx = table[(table.library == "chx") & (table.strand == "+")].iloc[0]
+    assert chx.frame0_cds == 1
+    assert chx.frame0_pred == pytest.approx(30 / 31)
+    assert chx.frame0_obs == pytest.approx(30 / 31)

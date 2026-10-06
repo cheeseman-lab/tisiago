@@ -10,14 +10,14 @@ Usage::
 
 Writes one row per channel to ``data/p6/eval/<arm>_<split>.tsv`` (model prediction vs pooled
 targets), ``data/p6/eval/ceiling_<split>.tsv`` (replicate 1 observed; the profile prediction is
-replicate 2 smoothed by a centred 5-bp boxcar plus 1e-3 per position, gene totals use raw
-replicate 2) and ``data/p6/eval/uniform_<split>.tsv`` (a flat prediction of the pooled targets:
-the KL floor). Metrics: mean masked ``profile_kl`` over windows (NaN windows skipped and
-counted); gene-level ``log_pearson`` over the channel's expressed same-strand genes, each gene
-totalled once in the window that contains it whose centre is nearest the gene centre (genes
+replicate 2 smoothed by a centred 5-bp boxcar plus 1e-3 per position, gene totals and CHX frame
+use raw replicate 2) and ``data/p6/eval/uniform_<split>.tsv`` (a flat prediction of the pooled
+targets: the KL floor). Metrics: mean masked ``profile_kl`` over windows (NaN windows skipped
+and counted); gene-level ``log_pearson`` over the channel's expressed same-strand genes, each
+gene totalled once in the window that contains it whose centre is nearest the gene centre (genes
 never fully inside a window are excluded and counted); and, for CHX channels, the frame-0
-fraction over MANE CDS of genes expressed in the channel's condition, assigned to windows
-the same way (canonical P-sites, no shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a
+fraction over MANE CDS of genes expressed in the channel's condition, assigned to windows the
+same way (canonical P-sites, no shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a
 truncated reference never stands in for the full one; a reused reference must match the
 ``ceiling_version``, window count and tracks directory.
 """
@@ -172,15 +172,15 @@ class ChannelMetrics:
     ) -> None:
         """Add window ``index`` (position in ``windows``): ``(S, C)`` prediction, target, mask.
 
-        ``pred_totals`` replaces ``pred`` for the gene totals only (default ``pred``).
+        ``pred_totals`` replaces ``pred`` for gene totals and CHX frame counts (default ``pred``).
         """
         self.kls.append(profile_kl(pred, obs, mask))
+        totals_from = pred if pred_totals is None else pred_totals
         start = int(self.windows.start.iloc[index])
         rows = self._genes_by_window.get(index)
         if rows is not None:
             sub = self.genes.iloc[rows]
             self.obs_totals[rows] = gene_totals(obs, sub, start)
-            totals_from = pred if pred_totals is None else pred_totals
             self.pred_totals[rows] = gene_totals(totals_from, sub, start)
         cds_rows = self._cds_by_window.get(index)
         if cds_rows is None:
@@ -193,7 +193,7 @@ class ChannelMetrics:
             cds = [self.cds[i] for i in cds_rows if self.cds[i][1] == strand and ok[i]]
             if not cds:
                 continue
-            for k, track in enumerate((pred, obs)):
+            for k, track in enumerate((totals_from, obs)):
                 counts = {chrom: _Column(track[:, c], start)}
                 self.frame[c, 2 * k : 2 * k + 2] += _frame_counts(counts, cds, shift=0)
             self.frame_cds[c] += len(cds)
@@ -258,8 +258,9 @@ def reference_metrics(
 ) -> pd.DataFrame:
     """Reference rows for ``kind``.
 
-    ``"ceiling"``: rep1 observed; profile prediction = :func:`smooth_profile` of rep2, gene
-    totals from raw rep2. ``"uniform"``: pooled observed, flat prediction; no gene Pearson.
+    ``"ceiling"``: rep1 observed; profile prediction = :func:`smooth_profile` of rep2; gene
+    totals and CHX frame counts from raw rep2. ``"uniform"``: pooled observed, flat
+    prediction; no gene Pearson.
     """
     if kind not in REFERENCES:
         raise ValueError(f"unknown reference {kind!r}")
@@ -301,7 +302,7 @@ def ceiling_metrics(
     cds: Sequence[tuple[str, str, list[tuple[int, int]]]] = (),
     cds_genes: Sequence[str] = (),
 ) -> pd.DataFrame:
-    """Replicate ceiling: rep1 observed vs smoothed rep2 (profile) and raw rep2 (genes)."""
+    """Replicate ceiling: rep1 observed vs smoothed rep2 (profile), raw rep2 (genes, frame)."""
     return reference_metrics("ceiling", tracks_dir, conditions, genes, windows, cds, cds_genes)
 
 
