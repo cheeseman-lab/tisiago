@@ -64,6 +64,46 @@ def test_train_loop_selects_best_and_logs(tmp_path):
     assert best["step"] == 20 and best["val_profile_kl"] == 2.0
 
 
+def test_train_loop_logs_loss_components(tmp_path):
+    def step(params, state, opt_state, batch):
+        aux = {"loss": 10.0, "poisson": 6.0, "multinomial": 0.5, "frame": float(params)}
+        return params - 1, opt_state, aux
+
+    eval_fn, _ = scripted_eval([1.0, 0.5])
+    log = tmp_path / "log.jsonl"
+    train_loop(
+        step,
+        4,
+        None,
+        0,
+        batches(),
+        steps=4,
+        eval_every=2,
+        eval_fn=eval_fn,
+        on_improve=lambda p, s: None,
+        on_checkpoint=lambda p, o, s: None,
+        log_path=log,
+    )
+    lines = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [r["train_frame"] for r in lines] == [3.5, 1.5]
+    assert lines[0]["train_poisson"] == 6.0 and lines[0]["train_multinomial"] == 0.5
+
+
+def test_window_frame_kl_matches_loss_definition():
+    obs = np.zeros((60, 2))
+    obs[0::3, 1] = 4.0
+    obs[1::3, 1] = 1.0
+    mask = np.ones_like(obs, bool)
+    num, den = train.window_frame_kl(2 * obs, obs, mask, (1,), 10)
+    assert num == pytest.approx(0.0, abs=1e-9) and den == obs.sum()
+    shifted = np.roll(obs, 1, axis=0)
+    assert train.window_frame_kl(shifted, obs, mask, (1,), 10)[0] > 0
+    assert train.window_frame_kl(shifted, obs, mask, (0,), 10) == (0.0, 0.0)
+    mask[5, 1] = False  # kills the first block only
+    num_masked, den_masked = train.window_frame_kl(shifted, obs, mask, (1,), 10)
+    assert den_masked == pytest.approx(den / 2)
+
+
 def test_train_loop_evaluates_final_partial_interval(tmp_path):
     eval_fn, eval_calls = scripted_eval([1.0, 0.5])
     best = train_loop(

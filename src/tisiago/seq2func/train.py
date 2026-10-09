@@ -7,6 +7,8 @@ Usage::
     python -m tisiago.seq2func.train --arm shared --heads-only --out data/p6/runs/shared_frozen
 
 Model selection reads only ``val.parquet`` (chr7); the held-out test split is never loaded.
+``best/`` is selected on ``val_profile_kl``; ``val_frame`` (the codon-phase block KL on CHX
+channels) and the per-component train losses are logged, not selected on.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from tisiago.seq2func.samples import CONDITIONS
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
 SELECTION_KEY = "val_profile_kl"
+LOSS_COMPONENTS = ("poisson", "multinomial", "frame")
 RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
@@ -49,6 +52,35 @@ def window_profile_kl(pred: np.ndarray, target: np.ndarray, mask: np.ndarray) ->
     """Mean over channels of the masked ``profile_kl`` of one window; NaN if no channel counts."""
     kl = profile_kl(pred, target, mask)
     return float(np.nanmean(kl)) if np.isfinite(kl).any() else math.nan
+
+
+def window_frame_kl(
+    pred: np.ndarray, target: np.ndarray, mask: np.ndarray, channels, block: int
+) -> tuple[float, float]:
+    """``(sum n * KL, sum n)`` of one ``(S, C)`` window's block phase composition (as the loss).
+
+    Same definition as ``loss.codon_phase_multinomial``: blocks of ``block`` codons on the
+    window's grid, skipped when any position is masked or nothing is observed.
+    """
+    channels = list(channels)
+    size = 3 * block
+    n = (len(target) // size) * size
+    if not channels or n == 0:
+        return 0.0, 0.0
+    shape = (n // size, block, 3, len(channels))
+    p = np.asarray(pred, np.float64)[:n][:, channels].reshape(shape).sum(axis=1)
+    t = np.maximum(np.asarray(target, np.float64)[:n][:, channels], 0).reshape(shape).sum(axis=1)
+    keep = np.asarray(mask)[:n][:, channels].reshape(shape).all(axis=(1, 2))
+    total = t.sum(axis=1)
+    keep &= total > 0
+    if not keep.any():
+        return 0.0, 0.0
+    qt = t / np.maximum(total[:, None, :], 1e-7)
+    qp = p / np.maximum(p.sum(axis=1, keepdims=True), 1e-7)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        terms = np.where(qt > 0, qt * (np.log(qt) - np.log(np.maximum(qp, 1e-7))), 0.0)
+    kl = terms.sum(axis=1)
+    return float((total * kl)[keep].sum()), float(total[keep].sum())
 
 
 def mean_window_kl(values: Iterable[float]) -> float:
@@ -121,7 +153,8 @@ def train_loop(
 ) -> dict | None:
     """Run ``steps`` updates, evaluating every ``eval_every`` steps and after the last step.
 
-    Each eval appends one flushed JSON line (step, mean train loss since the previous eval,
+    Each eval appends one flushed JSON line (step, mean train loss and ``train_<component>``
+    for each :data:`LOSS_COMPONENTS` entry in the step's aux since the previous eval,
     ``eval_fn(params)`` metrics, ``improved``, elapsed seconds) to ``log_path``, then calls
     ``on_checkpoint(params, opt_state, step)`` and, when the finite ``val_profile_kl`` beats
     the best so far, ``on_improve(params, step)``. Exceptions propagate after the completed
@@ -137,12 +170,16 @@ def train_loop(
     best = None
     best_kl = math.inf
     losses = []
+    components: dict[str, list] = {}
     t0 = time.time()
     iterator = iter(batches)
     with open(log_path, "a") as fh:
         for step in range(1, steps + 1):
             params, opt_state, aux = step_fn(params, state, opt_state, next(iterator))
             losses.append(aux["loss"])
+            for key in LOSS_COMPONENTS:
+                if key in aux:
+                    components.setdefault(key, []).append(aux[key])
             if step % eval_every and step != steps:
                 continue
             metrics = eval_fn(params)
@@ -151,11 +188,15 @@ def train_loop(
             record = {
                 "step": step,
                 "train_loss": finite_or_none(float(np.mean([float(v) for v in losses]))),
+                **{
+                    f"train_{k}": finite_or_none(float(np.mean([float(v) for v in vals])))
+                    for k, vals in components.items()
+                },
                 **{k: finite_or_none(float(v)) for k, v in metrics.items()},
                 "improved": improved,
                 "elapsed_seconds": time.time() - t0,
             }
-            losses = []
+            losses, components = [], {}
             fh.write(json.dumps(record, allow_nan=False) + "\n")
             fh.flush()
             on_checkpoint(params, opt_state, step)
@@ -310,13 +351,18 @@ def main() -> None:
     def eval_fn(params) -> dict:
         t = time.time()
         kls = []
+        frame_num = frame_den = 0.0
         for batch in iterate(
             val_windows, seed=args.seed, augment_examples=False, loop=False, **data_kwargs
         ):
             pred = np.asarray(predict(params, state, jnp.asarray(batch["sequences"])))
-            kls.append(window_profile_kl(pred[0], batch["targets"][0], batch["mask"][0]))
+            target, mask = batch["targets"][0], batch["mask"][0]
+            kls.append(window_profile_kl(pred[0], target, mask))
+            num, den = window_frame_kl(pred[0], target, mask, frame_channels, args.frame_block)
+            frame_num, frame_den = frame_num + num, frame_den + den
         return {
             SELECTION_KEY: mean_window_kl(kls),
+            "val_frame": frame_num / frame_den if frame_den else math.nan,
             "val_finite_windows": int(np.isfinite(kls).sum()),
             "eval_seconds": time.time() - t,
         }
