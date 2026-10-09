@@ -211,6 +211,8 @@ def test_cli_defaults_are_primary_config():
     assert args.head == "mlp"
     assert args.workers == 4
     assert str(args.tracks_dir) == "data/p6/tracks"
+    assert args.frame_weight == 0.0
+    assert args.frame_block == 10
     frozen = train.build_parser().parse_args(["--arm", "shared", "--heads-only"])
     assert frozen.train_backbone is False
 
@@ -260,6 +262,23 @@ def test_cli_refuses_existing_run_and_deletes_nothing(tmp_path, monkeypatch):
     assert exc.value.code != 0
     assert (out / "log.jsonl").read_text() == '{"step": 1}\n'
     assert sorted(p.name for p in out.iterdir()) == ["log.jsonl"]
+
+
+def test_cli_frame_options_parse():
+    args = train.build_parser().parse_args(
+        ["--arm", "shared", "--frame-weight", "0.5", "--frame-block", "4"]
+    )
+    assert (args.frame_weight, args.frame_block) == (0.5, 4)
+
+
+def test_cli_rejects_bad_frame_options(tmp_path, monkeypatch):
+    for bad in (["--frame-weight", "-1"], ["--frame-block", "0"]):
+        argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+        monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), *bad])
+        with pytest.raises(SystemExit) as exc:
+            train.main()
+        assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()
 
 
 def test_default_out_separates_frozen_baseline():

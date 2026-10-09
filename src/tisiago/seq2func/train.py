@@ -205,6 +205,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--warmup-steps", type=int, default=300)
     ap.add_argument("--clip-norm", type=float, default=1.0)
     ap.add_argument(
+        "--frame-weight",
+        type=float,
+        default=0.0,
+        help="weight of the annotation-free codon-phase loss on CHX channels (0 = off)",
+    )
+    ap.add_argument(
+        "--frame-block", type=int, default=10, help="codons per phase-composition block"
+    )
+    ap.add_argument(
         "--heads-only",
         dest="train_backbone",
         action="store_false",
@@ -230,6 +239,8 @@ def main() -> None:
         head, conditions = parse_arm(args.arm)
     except ValueError as exc:
         ap.error(str(exc))
+    if args.frame_weight < 0 or args.frame_block < 1:
+        ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     out = args.out or default_out(args.arm, args.train_backbone)
     try:
         check_out_dir(out, args.overwrite)
@@ -248,19 +259,22 @@ def main() -> None:
         make_train_step,
         register_track_head,
     )
-    from tisiago.seq2func.targets import channel_layout
+    from tisiago.seq2func.targets import channel_layout, library_channels
 
     train_windows = pd.read_parquet(args.windows_dir / TRAIN_WINDOWS)
     val_windows = pd.read_parquet(args.windows_dir / VAL_WINDOWS).iloc[: args.eval_windows]
     expression = pd.read_parquet(args.expression)
     genes = expression[expression.condition.isin(conditions)].reset_index(drop=True)
-    num_tracks = len(channel_layout(conditions))
+    layout = channel_layout(conditions)
+    num_tracks = len(layout)
+    frame_channels = library_channels(layout, "chx")
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),
         "head_name": head,
         "conditions": list(conditions),
         "num_tracks": num_tracks,
+        "frame_channels": list(frame_channels),
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
         "jax_devices": [str(d) for d in jax.devices()],
@@ -282,6 +296,9 @@ def main() -> None:
         total_steps=args.steps,
         warmup_steps=args.warmup_steps,
         clip_norm=args.clip_norm,
+        frame_weight=args.frame_weight,
+        frame_channels=frame_channels,
+        frame_block=args.frame_block,
     )
     params, state = model._params, model._state
     predict = make_predict(model, head)

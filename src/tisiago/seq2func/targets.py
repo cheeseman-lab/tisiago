@@ -20,6 +20,11 @@ def channel_layout(conditions: Sequence[str]) -> list[tuple[str, str, str]]:
     return [(c, lib, s) for c in conditions for lib in LIBRARIES for s in ("+", "-")]
 
 
+def library_channels(layout: list[tuple[str, str, str]], library: str) -> tuple[int, ...]:
+    """Indices of ``library``'s channels in ``layout``."""
+    return tuple(i for i, (_, lib, _) in enumerate(layout) if lib == library)
+
+
 def strand_pairs(layout: list[tuple[str, str, str]]) -> list[tuple[int, int]]:
     """Index pairs (plus, minus) for each condition/library."""
     index = {channel: i for i, channel in enumerate(layout)}

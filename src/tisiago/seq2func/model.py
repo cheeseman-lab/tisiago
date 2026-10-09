@@ -40,8 +40,19 @@ class TrackHead(CustomHead):
         return jax.nn.softplus(x.astype(jnp.float32))
 
     def loss(self, predictions, batch):
-        """Masked Poisson-multinomial on ``batch["targets"]`` / ``batch["mask"]``."""
-        return poisson_multinomial(predictions, batch["targets"], batch["mask"])
+        """Masked Poisson-multinomial on ``batch["targets"]`` / ``batch["mask"]``.
+
+        Optional static ``frame_weight`` / ``frame_channels`` / ``frame_block`` batch entries
+        add the codon-phase term (absent: weight 0, no channels).
+        """
+        return poisson_multinomial(
+            predictions,
+            batch["targets"],
+            batch["mask"],
+            frame_weight=batch.get("frame_weight", 0.0),
+            frame_channels=batch.get("frame_channels", ()),
+            frame_block=batch.get("frame_block", 10),
+        )
 
 
 class ConvTrackHead(TrackHead):
@@ -240,10 +251,14 @@ def make_train_step(
     total_steps: int | None = None,
     warmup_steps: int = 0,
     clip_norm: float | None = None,
+    frame_weight: float = 0.0,
+    frame_channels: tuple[int, ...] = (),
+    frame_block: int = 10,
 ):
     """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
 
     ``heads_only=False`` also trains the backbone; load the model with ``detach_backbone=False``.
+    ``frame_weight`` adds the codon-phase term on ``frame_channels`` (see ``loss.py``).
     """
     opt = make_optimizer(
         model._params,
@@ -258,6 +273,11 @@ def make_train_step(
     )
     opt_state = opt.init(model._params)
     loss_fn = model.create_loss_fn_for_head(head)
+    frame = {
+        "frame_weight": float(frame_weight),
+        "frame_channels": tuple(frame_channels),
+        "frame_block": int(frame_block),
+    }
     strand_reindexing = model._metadata[ORGANISM].strand_reindexing
     org_index = dna_model.convert_to_organism_index(ORGANISM)
 
@@ -274,7 +294,13 @@ def make_train_step(
             strand_reindexing=strand_reindexing,
         )[head]
         out = loss_fn(
-            preds, {"targets": batch["targets"], "mask": batch["mask"], "organism_index": org}
+            preds,
+            {
+                "targets": batch["targets"],
+                "mask": batch["mask"],
+                "organism_index": org,
+                **frame,
+            },
         )
         return out["loss"], out
 

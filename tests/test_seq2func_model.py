@@ -28,6 +28,29 @@ def test_head_loss_is_zero_at_target():
     assert float(out["loss"]) == pytest.approx(0.0, abs=1e-5)
 
 
+def test_head_loss_reads_frame_settings_from_batch():
+    from tisiago.seq2func.loss import poisson_multinomial
+
+    def forward(pred, target, **frame):
+        head = TrackHead(name="t", output_type=None, num_tracks=2)
+        return head.loss(pred, {"targets": target, "mask": jnp.ones(target.shape, bool), **frame})
+
+    fn = hk.without_apply_rng(hk.transform(forward))
+    rng = np.random.default_rng(0)
+    y = jnp.asarray(rng.poisson(3, (1, 30, 2)).astype(np.float32))
+    pred = jnp.asarray(rng.uniform(1, 4, (1, 30, 2)).astype(np.float32))
+    params = fn.init(None, pred, y)
+    plain = fn.apply(params, pred, y)
+    assert float(plain["frame"]) == 0.0
+    frame = {"frame_weight": 2.0, "frame_channels": (1,), "frame_block": 5}
+    out = fn.apply(params, pred, y, **frame)
+    mask = jnp.ones(y.shape, bool)
+    expected = poisson_multinomial(pred, y, mask, **frame)
+    assert float(out["frame"]) == pytest.approx(float(expected["frame"]))
+    assert float(out["frame"]) > 0
+    assert float(out["loss"]) == pytest.approx(float(plain["loss"]) + 2.0 * float(out["frame"]))
+
+
 def test_register_is_idempotent():
     register_track_head("p6_test_head", 6)
     register_track_head("p6_test_head", 6)
