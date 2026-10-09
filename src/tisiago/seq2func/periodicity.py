@@ -5,6 +5,7 @@ Usage::
     python -m tisiago.seq2func.periodicity --checkpoint data/p6/runs/condition_hela/best
     python -m tisiago.seq2func.periodicity --checkpoint data/p6/runs/condition_hela/best \
         --max-windows 10 --run-name smoke
+    python -m tisiago.seq2func.periodicity --reference replicate --arm condition:HeLa
 
 Ribosome footprints are codon-quantized, but out-of-frame reads are real (uORFs, overlapping
 ORFs, alternative frames), so the primary metrics are frame-agnostic and local: period-3
@@ -19,6 +20,9 @@ need ``--min-utr-counts`` observed counts. CDS rows come per segment: ``all``, `
 (single-exon CDS), ``first`` (first CDS exon) and ``rest`` (later exons). Phase blocks use each
 segment's own grid. Writes ``regions.tsv`` (one row per channel x region x segment) and
 ``summary.md`` to ``data/p6/periodicity/<run_name>/``. Runs on CPU by default.
+Dominant-phase metrics use blocks with at least ``--min-block-counts`` observed counts.
+``--reference replicate`` writes the same rows for raw replicate 2 scored against replicate 1
+(``*_replicate`` files, no model): the ceiling the model rows are read against.
 """
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ import numpy as np
 import pandas as pd
 
 from tisiago.seq2func.evaluate import (
+    EXCLUDED,
+    OUTSIDE,
     SPLIT_FILES,
     _group,
     assign_spans,
@@ -48,6 +54,9 @@ from tisiago.seq2func.targets import channel_layout
 from tisiago.seq2func.train import parse_arm
 
 DEFAULT_BLOCK = 10
+DEFAULT_MIN_BLOCK_COUNTS = 10.0
+DEFAULT_MIN_UTR_COUNTS = 10.0
+REFERENCES = ("replicate",)
 HF_MAX_PERIOD = 10
 _GENE_ID = re.compile(r'gene_id "([^"]+)"')
 _TRANSCRIPT_ID = re.compile(r'transcript_id "([^"]+)"')
@@ -108,11 +117,13 @@ def high_freq_power(values: np.ndarray, max_period: int = HF_MAX_PERIOD) -> floa
 
 
 def dominant_phases(values: np.ndarray, block: int, min_counts: float = 0.0) -> np.ndarray:
-    """Dominant phase per block; -1 where the block total is <= ``min_counts`` or tied."""
+    """Dominant phase per block; -1 where the block total is below ``min_counts`` or tied."""
     counts = phase_counts(values, block)
     top = counts.max(axis=1)
     unique = (counts == top[:, None]).sum(axis=1) == 1
-    return np.where(unique & (counts.sum(axis=1) > min_counts), counts.argmax(axis=1), -1)
+    return np.where(
+        unique & (counts.sum(axis=1) >= min_counts) & (top > 0), counts.argmax(axis=1), -1
+    )
 
 
 def block_ranks(ranks: np.ndarray, block: int) -> tuple[np.ndarray, np.ndarray]:
@@ -149,16 +160,19 @@ def segment_metrics(
     ranks: np.ndarray,
     block: int = DEFAULT_BLOCK,
     cds_offset: int | None = None,
+    min_block_counts: float = DEFAULT_MIN_BLOCK_COUNTS,
 ) -> dict:
     """Frame-agnostic metrics of one transcript-ordered segment; ``annot_*`` when ``cds_offset``.
 
-    Predicted switch rates use the blocks where the observed dominant phase is defined, so both
-    rates count the same block pairs. ``cds_offset`` is the segment's first position within the
+    Dominant-phase agreement and switch rates use only blocks whose observed total is at least
+    ``min_block_counts`` (a shot-noise floor; ``dom_obs_blocks`` counts them). Predicted switch
+    rates use the blocks where the observed dominant phase is defined, so both rates count the
+    same block pairs. ``cds_offset`` is the segment's first position within the
     CDS (annotated frame = index % 3).
     """
     pred, obs = np.asarray(pred, np.float64), np.asarray(obs, np.float64)
     kl_num, kl_den = block_phase_kl(pred, obs, block)
-    dom_obs = dominant_phases(obs, block)
+    dom_obs = dominant_phases(obs, block, min_block_counts)
     dom_pred = dominant_phases(pred, block)
     both = (dom_obs >= 0) & (dom_pred >= 0)
     first, last = block_ranks(ranks, block)
@@ -176,6 +190,8 @@ def segment_metrics(
         "block_kl_den": kl_den,
         "dom_agree": int((dom_obs[both] == dom_pred[both]).sum()),
         "dom_blocks": int(both.sum()),
+        "dom_obs_blocks": int((dom_obs >= 0).sum()),
+        "min_block_counts": min_block_counts,
         "switch_obs_within": sw_obs[0],
         "pairs_obs_within": sw_obs[1],
         "switch_obs_junction": sw_obs[2],
@@ -253,14 +269,21 @@ class PeriodicityAccumulator:
         regions: pd.DataFrame,
         *,
         block: int = DEFAULT_BLOCK,
-        min_utr_counts: float = 1.0,
+        min_utr_counts: float = DEFAULT_MIN_UTR_COUNTS,
+        min_block_counts: float = DEFAULT_MIN_BLOCK_COUNTS,
     ):
-        """``regions``: :func:`region_table` rows (``region`` in ``cds``/``utr5``)."""
+        """``regions``: :func:`region_table` rows (``region`` in ``cds``/``utr5``).
+
+        ``not_in_one_window`` counts regions that overlap a window but lie inside none;
+        ``outside_windows`` counts regions that overlap no window.
+        """
         self.layout, self.block, self.min_utr_counts = layout, block, min_utr_counts
+        self.min_block_counts = min_block_counts
         self.windows = windows.reset_index(drop=True)
         self.regions = regions.reset_index(drop=True)
         where = assign_spans(self.regions, self.windows)
-        self.skipped = int((where < 0).sum())
+        self.not_in_one_window = int((where == EXCLUDED).sum())
+        self.outside_windows = int((where == OUTSIDE).sum())
         self._by_window = _group(where)
         expressed = genes[genes.expressed.astype(bool)]
         self._expressed = expressed.groupby("condition").gene_id.agg(set).to_dict()
@@ -303,7 +326,9 @@ class PeriodicityAccumulator:
                 }
                 for segment, sl in self._segments(region.region, ranks):
                     offset = sl.start if region.region == "cds" else None
-                    metrics = segment_metrics(p[sl], o[sl], ranks[sl], self.block, offset)
+                    metrics = segment_metrics(
+                        p[sl], o[sl], ranks[sl], self.block, offset, self.min_block_counts
+                    )
                     self.rows.append({**base, "segment": segment, **metrics})
 
     @staticmethod
@@ -357,6 +382,7 @@ def _pooled(rows: pd.DataFrame) -> dict:
         "hf_ratio_median": hf.median(),
         "block_kl": ratio("block_kl_num", "block_kl_den"),
         "dom_agree": ratio("dom_agree", "dom_blocks"),
+        "dom_blocks": rows.dom_blocks.sum(),
         "switch_obs_within": ratio("switch_obs_within", "pairs_obs_within"),
         "switch_pred_within": ratio("switch_pred_within", "pairs_pred_within"),
         "switch_obs_junction": ratio("switch_obs_junction", "pairs_obs_junction"),
@@ -410,16 +436,38 @@ def summary_markdown(summary: pd.DataFrame, meta: dict) -> str:
         "",
         "Primary (frame-agnostic): `p3_*_median` = median fraction of non-DC power at period 3;",
         "`block_kl` = counts-weighted KL of per-block phase composition (the training loss);",
-        "`dom_agree` = predicted dominant phase equals observed per block (chance 1/3);",
-        "`switch_*` = rate the dominant phase changes between consecutive informative blocks,",
+        "`dom_agree` = predicted dominant phase equals observed per block (chance 1/3) over",
+        "`dom_blocks` blocks with >= `min_block_counts` observed counts;",
+        "`switch_*` = rate the dominant phase changes between consecutive such blocks,",
         "within exons vs across a splice junction; `hf_ratio_median` = predicted / observed",
         f"power at periods < {HF_MAX_PERIOD} nt (unit-sum profiles; observed includes shot noise).",
         "Secondary (annotation-anchored, CDS only): `annot_frame0_*`.",
+        "Read model rows against the replicate reference (`--reference replicate`: raw rep2",
+        "scored as the prediction of rep1), which shows what the data allow.",
         "",
         markdown_table(summary),
         "",
     ]
     return "\n".join(lines)
+
+
+def _accumulator(arm, windows, genes, regions, block, min_utr_counts, min_block_counts):
+    _, conditions = parse_arm(arm)
+    genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
+    acc = PeriodicityAccumulator(
+        channel_layout(conditions),
+        genes,
+        windows.reset_index(drop=True),
+        regions,
+        block=block,
+        min_utr_counts=min_utr_counts,
+        min_block_counts=min_block_counts,
+    )
+    return acc, conditions, genes
+
+
+def _counts(acc: PeriodicityAccumulator) -> dict[str, int]:
+    return {"not_in_one_window": acc.not_in_one_window, "outside_windows": acc.outside_windows}
 
 
 def run_periodicity(
@@ -432,22 +480,16 @@ def run_periodicity(
     genes: pd.DataFrame,
     regions: pd.DataFrame,
     block: int = DEFAULT_BLOCK,
-    min_utr_counts: float = 1.0,
+    min_utr_counts: float = DEFAULT_MIN_UTR_COUNTS,
+    min_block_counts: float = DEFAULT_MIN_BLOCK_COUNTS,
     prefetch: int = 4,
-) -> tuple[pd.DataFrame, int]:
-    """Region rows for the arm's predictions vs pooled targets, and the skipped-region count."""
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Region rows for the arm's predictions vs pooled targets, and unassigned-region counts."""
     from tisiago.seq2func.data import iterate
 
-    _, conditions = parse_arm(arm)
     windows = windows.reset_index(drop=True)
-    genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
-    acc = PeriodicityAccumulator(
-        channel_layout(conditions),
-        genes,
-        windows,
-        regions,
-        block=block,
-        min_utr_counts=min_utr_counts,
+    acc, conditions, genes = _accumulator(
+        arm, windows, genes, regions, block, min_utr_counts, min_block_counts
     )
     batches = iterate(
         windows,
@@ -466,17 +508,75 @@ def run_periodicity(
             acc.add(i, pred, np.asarray(batch["targets"][0], dtype=np.float64))
     finally:
         batches.close()
-    return acc.table(), acc.skipped
+    return acc.table(), _counts(acc)
+
+
+def run_reference(
+    arm: str,
+    windows: pd.DataFrame,
+    *,
+    tracks_dir: str | Path,
+    genes: pd.DataFrame,
+    regions: pd.DataFrame,
+    block: int = DEFAULT_BLOCK,
+    min_utr_counts: float = DEFAULT_MIN_UTR_COUNTS,
+    min_block_counts: float = DEFAULT_MIN_BLOCK_COUNTS,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Replicate reference: raw replicate 2 scored as the prediction of replicate 1.
+
+    Same regions, filters and metrics as :func:`run_periodicity`, so model rows can be read
+    against what two independent samples of the same library agree on (no model, CPU only).
+    """
+    from tisiago.seq2func.data import TrackReader
+
+    windows = windows.reset_index(drop=True)
+    acc, conditions, _ = _accumulator(
+        arm, windows, genes, regions, block, min_utr_counts, min_block_counts
+    )
+    rep1, rep2 = (TrackReader(tracks_dir, conditions, rep=r) for r in (1, 2))
+    try:
+        for i, row in enumerate(windows.itertuples(index=False)):
+            if i not in acc._by_window:
+                continue
+            start, end = int(row.start), int(row.end)
+            obs = np.asarray(rep1.read(row.chrom, start, end), dtype=np.float64)
+            pred = np.asarray(rep2.read(row.chrom, start, end), dtype=np.float64)
+            acc.add(i, pred, obs)
+    finally:
+        rep1.close()
+        rep2.close()
+    return acc.table(), _counts(acc)
+
+
+def output_paths(
+    out_dir: Path, run_name: str, split: str, max_windows: int | None, reference: str | None
+) -> tuple[Path, Path]:
+    """``(regions TSV, summary markdown)``; ``_max<N>`` and ``_<reference>`` suffixes."""
+    suffix = f"{split}_max{max_windows}" if max_windows else split
+    if reference:
+        suffix = f"{suffix}_{reference}"
+    out = Path(out_dir) / run_name
+    return out / f"regions_{suffix}.tsv", out / f"summary_{suffix}.md"
 
 
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, required=True, help="run's best/ or last/")
+    ap.add_argument("--checkpoint", type=Path, default=None, help="run's best/ or last/")
+    ap.add_argument(
+        "--reference",
+        choices=REFERENCES,
+        default=None,
+        help="score raw rep2 against rep1 instead of a checkpoint (needs --arm)",
+    )
     ap.add_argument("--arm", default=None, help="default: the run's run.json arm")
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
-    ap.add_argument("--run-name", default=None, help="default: the run directory's name")
+    ap.add_argument(
+        "--run-name",
+        default=None,
+        help="default: the run directory's name, or reference_<arm> with --reference",
+    )
     ap.add_argument("--out-dir", type=Path, default=Path("data/p6/periodicity"))
     ap.add_argument("--windows-dir", type=Path, default=Path("data/p6/windows"))
     ap.add_argument(
@@ -485,7 +585,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--tracks-dir", type=Path, default=None, help="default: run.json")
     ap.add_argument("--max-windows", type=int, default=None, help="first N windows (smoke)")
     ap.add_argument("--block", type=int, default=DEFAULT_BLOCK, help="codons per phase block")
-    ap.add_argument("--min-utr-counts", type=float, default=1.0)
+    ap.add_argument(
+        "--min-block-counts",
+        type=float,
+        default=DEFAULT_MIN_BLOCK_COUNTS,
+        help="observed counts a block needs for dominant-phase agreement / switch metrics",
+    )
+    ap.add_argument("--min-utr-counts", type=float, default=DEFAULT_MIN_UTR_COUNTS)
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
     ap.add_argument("--gtf", default=os.environ.get("TISIAGO_GTF"), help="MANE_Select GTF")
     ap.add_argument("--base-checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
@@ -497,12 +603,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """CLI: periodicity diagnostic of one checkpoint on a split."""
+    """CLI: periodicity diagnostic of one checkpoint (or the replicate reference) on a split."""
     ap = build_parser()
     args = ap.parse_args()
     if args.split == "test" and not args.i_am_final:
         ap.error("--split test reads the held-out chromosomes; pass --i-am-final to confirm")
-    arm = args.arm or run_args(args.checkpoint).get("arm")
+    if (args.checkpoint is None) == (args.reference is None):
+        ap.error("pass exactly one of --checkpoint or --reference")
+    arm = args.arm or (run_args(args.checkpoint).get("arm") if args.checkpoint else None)
     if not arm:
         ap.error("--arm is required (no run.json next to the checkpoint)")
     try:
@@ -511,19 +619,19 @@ def main() -> None:
         ap.error(str(exc))
     if args.block < 1:
         ap.error("--block must be >= 1")
-    for flag in ("genome", "gtf", "base_checkpoint"):
+    required = ("gtf",) if args.reference else ("genome", "gtf", "base_checkpoint")
+    for flag in required:
         if not getattr(args, flag):
             ap.error(f"--{flag.replace('_', '-')} is required (or set it in .env)")
-    run_name = args.run_name or Path(args.checkpoint).resolve().parent.name
-    suffix = f"{args.split}_max{args.max_windows}" if args.max_windows else args.split
-    out = args.out_dir / run_name
-    tsv, md = out / f"regions_{suffix}.tsv", out / f"summary_{suffix}.md"
+    if args.run_name:
+        run_name = args.run_name
+    elif args.reference:
+        run_name = f"reference_{arm.replace(':', '_').lower()}"
+    else:
+        run_name = Path(args.checkpoint).resolve().parent.name
+    tsv, md = output_paths(args.out_dir, run_name, args.split, args.max_windows, args.reference)
     if tsv.exists() and not args.overwrite:
         ap.error(f"{tsv} exists; pass --overwrite to replace")
-
-    if args.device == "cpu":
-        os.environ.setdefault("JAX_PLATFORMS", "cpu")  # no CUDA probing on a CPU node
-    import jax
 
     windows = pd.read_parquet(args.windows_dir / SPLIT_FILES[args.split])
     if args.max_windows is not None:
@@ -537,41 +645,56 @@ def main() -> None:
         ignore_index=True,
     )
     regions = regions[regions.chrom.isin(set(windows.chrom))].reset_index(drop=True)
-    device = jax.devices(args.device)[0]
-    t0 = time.time()
-    predict_fn = load_predict_fn(
-        args.checkpoint,
-        arm,
-        base_checkpoint=args.base_checkpoint,
-        head_kind=args.head or head_kind_of(args.checkpoint),
-        device=device,
-    )
-    print(f"model load {time.time() - t0:.0f}s on {device}", flush=True)
-    table, skipped = run_periodicity(
-        predict_fn,
-        arm,
-        windows,
-        fasta=args.genome,
-        tracks_dir=tracks_dir,
+    settings = dict(
         genes=genes,
         regions=regions,
         block=args.block,
         min_utr_counts=args.min_utr_counts,
-        prefetch=args.prefetch,
+        min_block_counts=args.min_block_counts,
     )
+    t0 = time.time()
+    if args.reference:
+        table, counts = run_reference(arm, windows, tracks_dir=tracks_dir, **settings)
+        source = f"{args.reference}: rep2 raw vs rep1"
+    else:
+        if args.device == "cpu":
+            os.environ.setdefault("JAX_PLATFORMS", "cpu")  # no CUDA probing on a CPU node
+        import jax
+
+        device = jax.devices(args.device)[0]
+        predict_fn = load_predict_fn(
+            args.checkpoint,
+            arm,
+            base_checkpoint=args.base_checkpoint,
+            head_kind=args.head or head_kind_of(args.checkpoint),
+            device=device,
+        )
+        print(f"model load {time.time() - t0:.0f}s on {device}", flush=True)
+        table, counts = run_periodicity(
+            predict_fn,
+            arm,
+            windows,
+            fasta=args.genome,
+            tracks_dir=tracks_dir,
+            prefetch=args.prefetch,
+            **settings,
+        )
+        source = str(args.checkpoint)
     meta = {
         "run_name": run_name,
-        "checkpoint": str(args.checkpoint),
+        "source": source,
         "arm": arm,
         "split": args.split,
         "windows": len(windows),
         "block_codons": args.block,
-        "regions_not_in_one_window": skipped,
+        "min_block_counts": args.min_block_counts,
+        "min_utr_counts": args.min_utr_counts,
+        "regions_not_in_one_window": counts["not_in_one_window"],
+        "regions_outside_windows": counts["outside_windows"],
         "tracks_dir": str(tracks_dir),
     }
-    write_tsv(table.assign(checkpoint=str(args.checkpoint), split=args.split), tsv)
+    write_tsv(table.assign(source=source, split=args.split), tsv)
     summary = summarize(table) if not table.empty else pd.DataFrame()
-    out.mkdir(parents=True, exist_ok=True)
     md.write_text(summary_markdown(summary, meta))
     print(f"periodicity {time.time() - t0:.0f}s -> {tsv}, {md}", flush=True)
     print(summary.to_string(index=False), flush=True)

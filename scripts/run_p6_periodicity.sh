@@ -11,6 +11,9 @@
 # Usage (from the repo root; CPU by default):
 #   sbatch --partition="$TISIAGO_CPU_PARTITION" scripts/run_p6_periodicity.sh \
 #       --checkpoint data/p6/runs/condition_hela/best --max-windows 100
+#   # replicate reference (raw rep2 vs rep1; no model) for the same windows:
+#   sbatch --partition="$TISIAGO_CPU_PARTITION" scripts/run_p6_periodicity.sh \
+#       --reference replicate --arm condition:HeLa --max-windows 100
 #   # on a GPU node instead:
 #   sbatch --partition="$TISIAGO_AGFT_PARTITION" --gres=gpu:1 scripts/run_p6_periodicity.sh \
 #       --checkpoint data/p6/runs/condition_hela/best --device gpu

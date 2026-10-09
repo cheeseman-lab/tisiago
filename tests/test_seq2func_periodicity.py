@@ -25,6 +25,7 @@ from tisiago.seq2func.periodicity import (
     switch_counts,
 )
 from tisiago.seq2func.targets import channel_layout
+from tisiago.seq2func.tracks import track_prefix, write_bigwigs
 
 
 def _periodic(length=300, phase=0, weights=(6.0, 1.0, 1.0)):
@@ -203,7 +204,7 @@ def test_accumulator_rows_segments_and_filters():
     acc.add(0, obs * 2, obs)
     acc.add(1, np.zeros((300, len(layout))), np.zeros((300, len(layout))))
     table = acc.table()
-    assert acc.skipped == 1
+    assert (acc.not_in_one_window, acc.outside_windows) == (1, 0)
     assert set(table.gene_id) == {"G1", "G2"}  # G3 unexpressed
     cds1 = table[(table.region == "cds") & (table.gene_id == "G1")]
     assert cds1.segment.tolist() == ["all", "first", "rest"]
@@ -279,7 +280,7 @@ def test_run_periodicity_oracle_and_flat_models(world):  # noqa: F811
     oracle, skipped = periodicity.run_periodicity(
         lambda b: b["targets"], "condition:HeLa", WINDOWS, **kwargs
     )
-    assert skipped == 1  # the + CDS [40, 160) is never inside one window
+    assert skipped == {"not_in_one_window": 1, "outside_windows": 0}  # + CDS [40, 160)
     full = oracle[oracle.segment == "all"].set_index("strand")
     assert full.loc["+", "annot_f0_obs"] == full.loc["+", "annot_f0_pred"] == 30
     assert full.loc["+", "p3_obs"] == pytest.approx(1.0)
@@ -288,3 +289,103 @@ def test_run_periodicity_oracle_and_flat_models(world):  # noqa: F811
         lambda b: np.ones_like(b["targets"]), "condition:HeLa", WINDOWS, **kwargs
     )
     assert (flat.p3_pred == 0.0).all() and (flat.block_kl_num > 0).all()
+
+
+def test_dominant_phases_count_floor_applies_to_block_total():
+    values = np.concatenate([_periodic(30, weights=(2.0, 1.0, 0.0)), _periodic(30)])
+    # block totals 30 and 80
+    assert dominant_phases(values, 10, min_counts=30).tolist() == [0, 0]
+    assert dominant_phases(values, 10, min_counts=31).tolist() == [-1, 0]
+
+
+def test_segment_metrics_min_block_counts_gates_dominant_metrics():
+    obs = np.concatenate([_periodic(150, weights=(0.2, 0.0, 0.0)), _periodic(150)])
+    pred = np.concatenate([_periodic(150, phase=1), _periodic(150)])
+    ranks = np.zeros(300, int)
+    loose = segment_metrics(pred, obs, ranks, block=10, min_block_counts=1)
+    strict = segment_metrics(pred, obs, ranks, block=10, min_block_counts=10)
+    # first 5 blocks hold 2 counts each; the last 5 hold 80
+    assert (loose["dom_obs_blocks"], loose["dom_blocks"], loose["dom_agree"]) == (10, 10, 5)
+    assert (strict["dom_obs_blocks"], strict["dom_blocks"], strict["dom_agree"]) == (5, 5, 5)
+    assert strict["pairs_obs_within"] == 4 and strict["pairs_pred_within"] == 4
+    assert strict["min_block_counts"] == 10
+    # the block KL is not gated (it is counts-weighted)
+    assert strict["block_kl_num"] == loose["block_kl_num"]
+
+
+def test_accumulator_counts_excluded_and_outside_separately():
+    layout = channel_layout(["HeLa"])
+    windows = pd.DataFrame({"chrom": "chr7", "start": [0], "end": [300]})
+    regions = _regions()
+    far = region_table([("chr7", "+", [(900, 930)])], "cds", ["G1"])
+    regions = pd.concat([regions, far], ignore_index=True)
+    acc = PeriodicityAccumulator(layout, _genes(), windows, regions)
+    assert acc.not_in_one_window == 1  # [290, 330) straddles the window end
+    assert acc.outside_windows == 1
+    assert acc.min_utr_counts == 10
+
+
+def _write_reps(tracks, rep1, rep2):
+    from collections import Counter
+
+    filler = {("chr7", s): Counter({0: 1}) for s in "+-"}
+    for rep, chx in ((1, rep1), (2, rep2)):
+        for library in ("tis", "chx", "rna"):
+            counts = {**filler, **chx} if library == "chx" else filler
+            write_bigwigs(counts, [("chr7", 200)], track_prefix(tracks, "HeLa", library, rep))
+
+
+def test_run_reference_replicate_scores_rep2_against_rep1(world, tmp_path):  # noqa: F811
+    from collections import Counter
+
+    tracks = tmp_path / "rep_tracks"
+    plus = Counter({p: 12 for p in range(60, 90, 3)})
+    _write_reps(tracks, {("chr7", "+"): plus}, {("chr7", "+"): plus})
+    regions = region_table(world["cds"], "cds", world["cds_genes"])
+    table, counts = periodicity.run_reference(
+        "condition:HeLa",
+        WINDOWS,
+        tracks_dir=tracks,
+        genes=world["genes"],
+        regions=regions,
+        block=2,
+    )
+    assert counts == {"not_in_one_window": 1, "outside_windows": 0}
+    row = table[(table.segment == "all") & (table.strand == "+")].iloc[0]
+    assert row.block_kl_num == pytest.approx(0.0, abs=1e-9)
+    assert row.dom_agree == row.dom_blocks == 5
+    assert row.p3_obs == pytest.approx(row.p3_pred)
+
+    shifted = Counter({p + 1: 12 for p in range(60, 90, 3)})
+    _write_reps(tracks, {("chr7", "+"): plus}, {("chr7", "+"): shifted})
+    table, _ = periodicity.run_reference(
+        "condition:HeLa",
+        WINDOWS,
+        tracks_dir=tracks,
+        genes=world["genes"],
+        regions=regions,
+        block=2,
+    )
+    row = table[(table.segment == "all") & (table.strand == "+")].iloc[0]
+    assert row.dom_agree == 0 and row.block_kl_num > 0
+
+
+def test_output_paths_separate_reference_rows():
+    from pathlib import Path
+
+    model = periodicity.output_paths(Path("o"), "run", "val", None, None)
+    ref = periodicity.output_paths(Path("o"), "run", "val", 100, "replicate")
+    assert model == (Path("o/run/regions_val.tsv"), Path("o/run/summary_val.md"))
+    assert ref == (
+        Path("o/run/regions_val_max100_replicate.tsv"),
+        Path("o/run/summary_val_max100_replicate.md"),
+    )
+
+
+def test_cli_reference_needs_no_checkpoint_but_needs_arm(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["periodicity", "--reference", "replicate"])
+    with pytest.raises(SystemExit) as exc:
+        periodicity.main()
+    assert exc.value.code != 0
+    args = periodicity.build_parser().parse_args(["--reference", "replicate", "--arm", "x"])
+    assert args.checkpoint is None and args.min_block_counts == 10 and args.min_utr_counts == 10
