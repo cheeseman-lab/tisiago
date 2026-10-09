@@ -30,6 +30,10 @@ def rc(seq: str) -> str:
     return seq[::-1].translate(str.maketrans("ACGTN", "TGCAN"))
 
 
+def scaled(distance: int, cap: int) -> float:
+    return np.log1p(distance) / np.log1p(cap)
+
+
 def reference_strand(seq: str, cap: int) -> np.ndarray:
     """Brute-force (S, 9) plus-strand features: stop dist k0..2, ATG dist k0..2, open k0..2."""
     n = len(seq)
@@ -42,8 +46,8 @@ def reference_strand(seq: str, cap: int) -> np.ndarray:
             in_frame = range(c, -1, -3) if c >= 0 else range(0)
             last_stop = next((j for j in in_frame if j in stops), -1)
             last_atg = next((j for j in in_frame if j in atgs), -1)
-            out[i, k] = np.log1p(min(i - last_stop, cap) if last_stop >= 0 else cap)
-            out[i, 3 + k] = np.log1p(min(i - last_atg, cap) if last_atg >= 0 else cap)
+            out[i, k] = scaled(min(i - last_stop, cap) if last_stop >= 0 else cap, cap)
+            out[i, 3 + k] = scaled(min(i - last_atg, cap) if last_atg >= 0 else cap, cap)
             out[i, 6 + k] = float(last_atg > last_stop)
     return out
 
@@ -70,22 +74,22 @@ def test_hand_written_plus_strand():
     cap = 100
     f = features("ATGAAATAGCCC", cap=cap)
     # i=5, k=2: codon at 3 (AAA); in-frame starts {3, 0}: no stop, ATG at 0 -> open ORF.
-    assert f[5, 2] == pytest.approx(np.log1p(cap))
-    assert f[5, 5] == pytest.approx(np.log1p(5))
+    assert f[5, 2] == pytest.approx(scaled(cap, cap))
+    assert f[5, 5] == pytest.approx(scaled(5, cap))
     assert f[5, 8] == 1.0
     # i=8, k=2: codon at 6 is TAG (stop after the ATG) -> closed.
-    assert f[8, 2] == pytest.approx(np.log1p(2))
-    assert f[8, 5] == pytest.approx(np.log1p(8))
+    assert f[8, 2] == pytest.approx(scaled(2, cap))
+    assert f[8, 5] == pytest.approx(scaled(8, cap))
     assert f[8, 8] == 0.0
     # i=0, k=0: the ATG itself is open; distance 0.
     assert f[0, 3] == pytest.approx(0.0)
     assert f[0, 6] == 1.0
     # i=7, k=0: frame of start 7 (residue 1) has the TGA at 1, no ATG.
-    assert f[7, 0] == pytest.approx(np.log1p(6))
-    assert f[7, 3] == pytest.approx(np.log1p(cap))
+    assert f[7, 0] == pytest.approx(scaled(6, cap))
+    assert f[7, 3] == pytest.approx(scaled(cap, cap))
     assert f[7, 6] == 0.0
     # i < k: the codon would start before the window -> capped, closed.
-    assert f[1, 2] == pytest.approx(np.log1p(cap))
+    assert f[1, 2] == pytest.approx(scaled(cap, cap))
     assert f[1, 8] == 0.0
 
 
@@ -97,24 +101,24 @@ def test_hand_written_minus_strand():
     assert f[11, 9 + 3] == pytest.approx(0.0)
     assert f[11, 9 + 6] == 1.0
     # forward i=6 is minus position 5, k=2: open from the ATG 5 nt upstream on minus.
-    assert f[6, 9 + 5] == pytest.approx(np.log1p(5))
+    assert f[6, 9 + 5] == pytest.approx(scaled(5, cap))
     assert f[6, 9 + 8] == 1.0
     # the plus strand of this sequence has no ATG at all.
-    assert np.allclose(f[:, 3:6], np.log1p(cap))
+    assert np.allclose(f[:, 3:6], scaled(cap, cap))
     assert (f[:, 6:9] == 0).all()
 
 
 def test_distances_are_capped():
     seq = "ATG" + "C" * 40
     f = features(seq, cap=10)
-    assert f[30, 3] == pytest.approx(np.log1p(10))
-    assert f[5, 5] == pytest.approx(np.log1p(5))  # k=2: codon at 3, in frame with the ATG
+    assert f[30, 3] == pytest.approx(scaled(10, 10))
+    assert f[5, 5] == pytest.approx(scaled(5, 10))  # k=2: codon at 3, in frame with the ATG
     assert f[30, 6] == 1.0  # still open: no stop in frame
 
 
 def test_n_bases_make_no_codons():
     f = features("ANG" + "TNA" + "NNN", cap=50)
-    assert np.allclose(f[:, [0, 1, 2, 3, 4, 5]], np.log1p(50))
+    assert np.allclose(f[:, [0, 1, 2, 3, 4, 5]], scaled(50, 50))
     assert (f[:, 6:9] == 0).all()
 
 
@@ -136,6 +140,13 @@ def test_reverse_complement_swaps_strands_and_flips():
     f_rc = np.asarray(orf_features(jnp.asarray(x_rc[None])))[0]
     expected = np.concatenate([f[::-1, 9:], f[::-1, :9]], axis=1)
     np.testing.assert_array_equal(f_rc, expected)
+
+
+def test_features_lie_in_unit_interval():
+    rng = np.random.default_rng(4)
+    f = features("".join(rng.choice(list("ACGTTAGN"), size=500)), cap=60)
+    assert f.min() >= 0.0 and f.max() <= 1.0
+    assert f[:, :6].max() == pytest.approx(1.0)
 
 
 def test_batched_and_jittable():

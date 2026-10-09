@@ -568,3 +568,57 @@ def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatc
     else:
         assert seen == {"free_init": False}
         assert model._predict is sentinel
+
+
+def test_sequence_forward_matches_agft_forward_numerically(monkeypatch):
+    """The forward from agft's create_model_with_heads vs the replicated one (stand-in backbone)."""
+    import types
+
+    from alphagenome_research.model import dna_model
+    from alphagenome_research.model import model as model_lib
+    from alphagenome_research.model.embeddings import Embeddings
+    from alphagenome_research.model.metadata import metadata as metadata_lib
+
+    from tisiago.seq2func import model as model_mod
+
+    class StandInAlphaGenome(hk.Module):
+        def __init__(self, metadata, name="alphagenome"):
+            super().__init__(name=name)
+
+        def __call__(self, dna_sequence, organism_index):
+            x = hk.Linear(8, name="stand_in")(dna_sequence.astype(jnp.float32))
+            return {}, Embeddings(embeddings_1bp=x)
+
+    cpu = jax.devices("cpu")[0]
+    base = types.SimpleNamespace(
+        _device_context=types.SimpleNamespace(_device=cpu),
+        _metadata={},
+        _one_hot_encoder=None,
+        _fasta_extractors=None,
+        _output_metadata_by_organism=None,
+        _variant_scorers=None,
+        _params={},
+        _state={},
+        _predict=None,
+        _predict_variant=None,
+    )
+    monkeypatch.setattr(model_lib, "AlphaGenome", StandInAlphaGenome)
+    monkeypatch.setattr(metadata_lib, "load", lambda organism: None)
+    monkeypatch.setattr(dna_model, "create", lambda *a, **k: base)
+
+    head = "p6_test_agft_equiv"
+    register_track_head(head, 3, kind="mlp")
+    model = model_mod.load_model("ckpt", head, detach_backbone=True)
+    rng = np.random.default_rng(0)
+    seq = _random_onehot(rng, 2, 64)
+    org = jnp.zeros((2,), jnp.int32)
+    kwargs = dict(
+        requested_outputs=(),
+        negative_strand_mask=jnp.zeros((2,), bool),
+        strand_reindexing=None,
+    )
+    agft_out = np.asarray(model._predict(model._params, model._state, seq, org, **kwargs)[head])
+    model_mod.install_sequence_forward(model, [head], detach_backbone=True)
+    ours = np.asarray(model._predict(model._params, model._state, seq, org, **kwargs)[head])
+    assert agft_out.shape == (2, 64, 3) and agft_out.std() > 0
+    np.testing.assert_array_equal(ours, agft_out)

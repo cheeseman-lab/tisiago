@@ -4,8 +4,9 @@ For each strand (minus = computed on the reverse complement, flipped back) and e
 frame k (position i is base k of the codon starting at i - k), over in-frame codon starts
 j <= i - k on that strand:
 
-- ``stop_dist``: log1p(i - j) for the nearest TAA/TAG/TGA, capped at ``cap``;
-- ``atg_dist``: log1p(i - j) for the nearest ATG, capped at ``cap``;
+- ``stop_dist``: log1p(i - j) / log1p(cap) for the nearest TAA/TAG/TGA, distance capped at
+  ``cap`` (so in [0, 1]);
+- ``atg_dist``: the same for the nearest ATG;
 - ``open``: 1 if the nearest in-frame ATG is after the nearest in-frame stop.
 
 A stop codon closes its own positions. Codons that run past the window or contain N are absent,
@@ -67,7 +68,8 @@ def _strand_features(x, cap: int):
     }
 
     def distance(j):
-        return jnp.log1p(jnp.where(j >= 0, jnp.minimum(position - j, cap), cap).astype(jnp.float32))
+        clipped = jnp.where(j >= 0, jnp.minimum(position - j, cap), cap).astype(jnp.float32)
+        return jnp.log1p(clipped) / jnp.log1p(jnp.float32(cap))
 
     columns = [distance(j) for j in shifted["stop"]] + [distance(j) for j in shifted["atg"]]
     columns += [

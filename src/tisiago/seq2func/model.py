@@ -72,11 +72,11 @@ class TrackHead(CustomHead):
 
 
 class ConvTrackHead(TrackHead):
-    """concat(1-bp embeddings, optional one-hot) -> Conv1D(256, 31) -> relu -> Conv1D(C, 1).
+    """concat(1-bp embeddings, optional extra channels) -> Conv1D(256, 31) -> relu -> Conv1D(C, 1).
 
-    agft 0.1.12 calls custom heads as ``head(embeddings, organism_index)`` and does not forward
-    the input sequence, so in practice the head sees embeddings only; ``kwargs["sequence"]`` is
-    concatenated when a caller provides it.
+    Loaded as ``conv``, it runs under agft's forward, which calls ``head(embeddings,
+    organism_index)`` without the sequence, so it sees embeddings only. ``kwargs["sequence"]`` is
+    concatenated when a caller provides it (:class:`SeqConvTrackHead` passes one-hot + features).
     """
 
     def predict(self, embeddings, organism_index, **kwargs):
