@@ -50,6 +50,7 @@ from tisiago.seq2func.evaluate import (
     tracks_dir_of,
     write_tsv,
 )
+from tisiago.seq2func.overfit import HEAD_CHOICES
 from tisiago.seq2func.targets import channel_layout
 from tisiago.seq2func.train import parse_arm
 
@@ -595,7 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
     ap.add_argument("--gtf", default=os.environ.get("TISIAGO_GTF"), help="MANE_Select GTF")
     ap.add_argument("--base-checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
-    ap.add_argument("--head", choices=("mlp", "conv"), default=None, help="default: run.json")
+    ap.add_argument("--head", choices=HEAD_CHOICES, default=None, help="default: run.json")
     ap.add_argument("--device", choices=("cpu", "gpu"), default="cpu")
     ap.add_argument("--prefetch", type=int, default=4)
     ap.add_argument("--overwrite", action="store_true")

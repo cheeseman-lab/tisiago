@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import fields, replace
 from pathlib import Path
 
 import haiku as hk
@@ -18,14 +20,28 @@ from alphagenome_ft import (
     create_optimizer,
     register_custom_head,
 )
-from alphagenome_ft.custom_heads import get_custom_head_config
+from alphagenome_ft.custom_heads import create_registered_head, get_custom_head_config
 from alphagenome_ft.optimizer_utils import is_trainable_head_path, parameter_path_to_str
 from alphagenome_research.model import dna_model
 
 from tisiago.seq2func.loss import poisson_multinomial
+from tisiago.seq2func.orf_features import orf_features
 
 ORGANISM = Organism.HOMO_SAPIENS
 CONV_WIDTH = 31
+INIT_SEQ_LEN = 2**14
+_SEQUENCE_FREE_INIT = False
+
+
+@contextmanager
+def sequence_free_init(enabled: bool = True):
+    """Let sequence heads stand in a zero sequence while agft initialises parameters."""
+    global _SEQUENCE_FREE_INIT
+    previous, _SEQUENCE_FREE_INIT = _SEQUENCE_FREE_INIT, enabled
+    try:
+        yield
+    finally:
+        _SEQUENCE_FREE_INIT = previous
 
 
 class TrackHead(CustomHead):
@@ -75,7 +91,29 @@ class ConvTrackHead(TrackHead):
         return jax.nn.softplus(x.astype(jnp.float32))
 
 
-HEAD_KINDS = {"mlp": TrackHead, "conv": ConvTrackHead}
+class SeqConvTrackHead(ConvTrackHead):
+    """concat(1-bp embeddings, one-hot, open-frame features) -> ConvTrackHead's conv stack.
+
+    Needs ``kwargs["sequence"]`` ``(B, S, 4)``: :func:`load_model` installs a forward that passes
+    the input one-hot (see :func:`install_sequence_forward`). Only inside
+    :func:`sequence_free_init` (agft's parameter init) does a zero sequence stand in.
+    """
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
+        sequence = kwargs.get("sequence")
+        if sequence is None:
+            if not _SEQUENCE_FREE_INIT:
+                raise ValueError("seqconv head needs the input sequence (sequence=...)")
+            x = embeddings.get_sequence_embeddings(resolution=1)
+            sequence = jnp.zeros((*x.shape[:2], 4), jnp.float32)
+        sequence = sequence.astype(jnp.float32)
+        extra = jnp.concatenate([sequence, orf_features(sequence)], axis=-1)
+        return ConvTrackHead.predict(self, embeddings, organism_index, sequence=extra)
+
+
+HEAD_KINDS = {"mlp": TrackHead, "conv": ConvTrackHead, "seqconv": SeqConvTrackHead}
+SEQUENCE_KINDS = frozenset({"seqconv"})
 _REGISTERED_KINDS: dict[str, str] = {}
 
 
@@ -109,15 +147,109 @@ def register_track_head(name: str, num_tracks: int, kind: str = "mlp") -> None:
 
 
 def load_model(checkpoint: str, head: str, *, detach_backbone: bool = True, device=None):
-    """Load the local all-folds checkpoint with one registered custom head (no downloads)."""
-    return create_model_with_heads(
-        "all_folds",
-        heads=[head],
-        checkpoint_path=checkpoint,
-        organism_settings={ORGANISM: dna_model.OrganismSettings()},
-        detach_backbone=detach_backbone,
-        device=device,
+    """Load the local all-folds checkpoint with one registered custom head (no downloads).
+
+    Heads of a :data:`SEQUENCE_KINDS` kind get :func:`install_sequence_forward`.
+    """
+    sequence_head = _REGISTERED_KINDS.get(head) in SEQUENCE_KINDS
+    with sequence_free_init(sequence_head):
+        model = create_model_with_heads(
+            "all_folds",
+            heads=[head],
+            checkpoint_path=checkpoint,
+            organism_settings={ORGANISM: dna_model.OrganismSettings()},
+            detach_backbone=detach_backbone,
+            device=device,
+        )
+    if sequence_head:
+        model = install_sequence_forward(model, [head], detach_backbone=detach_backbone)
+    return model
+
+
+def _alphagenome_backbone():
+    """``backbone(dna_sequence, organism_index) -> Embeddings`` as agft's standard forward."""
+    from alphagenome_research.model import model as model_lib
+    from alphagenome_research.model.metadata import metadata as metadata_lib
+
+    metadata = {organism: metadata_lib.load(organism) for organism in dna_model.Organism}
+
+    def backbone(dna_sequence, organism_index):
+        return model_lib.AlphaGenome(metadata)(dna_sequence, organism_index)[1]
+
+    return backbone
+
+
+def _stop_gradient_embeddings(embeddings):
+    values = {
+        f.name: jax.lax.stop_gradient(getattr(embeddings, f.name))
+        for f in fields(embeddings)
+        if getattr(embeddings, f.name) is not None
+    }
+    return replace(embeddings, **values)
+
+
+def make_sequence_forward(heads, *, detach_backbone: bool, backbone=None):
+    """The standard agft 0.1.12 head forward, with the input one-hot passed as ``sequence=``.
+
+    Same Haiku transform and module names as ``create_model_with_heads`` (``alphagenome/...``
+    backbone, ``head/<name>/...`` heads), so it applies to that model's ``(params, state)``.
+    ``backbone`` (tests) replaces AlphaGenome inside the transform.
+    """
+    backbone = backbone or _alphagenome_backbone()
+    num_organisms = len(dna_model.Organism)
+
+    @hk.transform_with_state
+    def forward(dna_sequence, organism_index):
+        embeddings = backbone(dna_sequence, organism_index)
+        if detach_backbone:
+            embeddings = _stop_gradient_embeddings(embeddings)
+        predictions = {}
+        with hk.name_scope("head"):
+            for name in heads:
+                head = create_registered_head(name, metadata=None, num_organisms=num_organisms)
+                predictions[name] = head(embeddings, organism_index, sequence=dna_sequence)
+        return predictions, embeddings
+
+    return forward
+
+
+def install_sequence_forward(model, heads, *, detach_backbone: bool, backbone=None):
+    """Replace ``model._predict`` with :func:`make_sequence_forward` (agft is not modified).
+
+    The forward's abstract ``(params, state)`` must match the model's leaf for leaf; the new
+    ``_predict`` keeps agft's signature and returns ``{head: predictions}``.
+    """
+    from tisiago.seq2func.checkpoint import check_restorable, tree_leaf_shapes
+
+    forward = make_sequence_forward(heads, detach_backbone=detach_backbone, backbone=backbone)
+    abstract = jax.eval_shape(
+        forward.init,
+        jax.random.PRNGKey(0),
+        jnp.zeros((1, INIT_SEQ_LEN, 4), jnp.bfloat16),
+        jnp.zeros((1,), jnp.int32),
     )
+    check_restorable(tree_leaf_shapes(abstract), tree_leaf_shapes((model._params, model._state)))
+
+    @jax.jit
+    def apply(params, state, rng, sequences, organism_indices):
+        (predictions, _), _ = forward.apply(params, state, rng, sequences, organism_indices)
+        return predictions
+
+    def predict(
+        params,
+        state,
+        sequences,
+        organism_indices,
+        *,
+        requested_outputs=(),
+        negative_strand_mask=None,
+        strand_reindexing=None,
+        rng=None,
+    ):
+        return apply(params, state, rng, sequences, organism_indices)
+
+    model._predict = predict
+    return model
 
 
 def load_finetuned(

@@ -25,6 +25,7 @@ HEAD = "p6_overfit"
 WINDOW = 131_072
 TIMING_SKIP = 2
 PROFILE_KL_MAX = 1.0
+HEAD_CHOICES = ("mlp", "conv", "seqconv")
 
 
 def fetch_onehot(genome: str, chrom: str, start: int, end: int) -> np.ndarray:
@@ -87,7 +88,7 @@ def main() -> None:
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
-    ap.add_argument("--head", choices=("mlp", "conv"), default="mlp")
+    ap.add_argument("--head", choices=HEAD_CHOICES, default="mlp")
     ap.add_argument("--train-backbone", action="store_true")
     ap.add_argument(
         "--backbone-learning-rate",

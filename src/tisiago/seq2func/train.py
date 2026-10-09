@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from tisiago.seq2func.metrics import profile_kl
-from tisiago.seq2func.overfit import finite_or_none, write_json_atomic
+from tisiago.seq2func.overfit import HEAD_CHOICES, finite_or_none, write_json_atomic
 from tisiago.seq2func.samples import CONDITIONS
 
 TRAIN_WINDOWS = "train.parquet"
@@ -239,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
-    ap.add_argument("--head", choices=("mlp", "conv"), default="mlp")
+    ap.add_argument("--head", choices=HEAD_CHOICES, default="mlp")
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--backbone-learning-rate", type=float, default=1e-4)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
