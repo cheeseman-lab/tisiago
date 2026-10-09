@@ -267,8 +267,9 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
     class FakeModel:
         _params, _state = "params", "state"
 
-    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind):
+    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, device=None):
         calls["load"] = (checkpoint, base, head, num_tracks, kind)
+        calls["device"] = device
         return FakeModel()
 
     def fake_make_predict(model, head):
@@ -278,9 +279,10 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
     monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
     monkeypatch.setattr(model_mod, "make_predict", fake_make_predict)
     predict = evaluate.load_predict_fn(
-        tmp_path, "condition:HeLa", base_checkpoint="weights", head_kind="conv"
+        tmp_path, "condition:HeLa", base_checkpoint="weights", head_kind="conv", device="cpu0"
     )
     assert calls["load"] == (str(tmp_path), "weights", "p6_hela", 6, "conv")
+    assert calls["device"] == "cpu0"
     assert calls["head"] == "p6_hela"
     out = predict({"sequences": np.zeros((1, 8, 4), np.float32)})
     assert out.shape == (1, 8, 6) and (out == 1).all()

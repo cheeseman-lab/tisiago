@@ -319,7 +319,12 @@ def uniform_metrics(
 
 
 def load_predict_fn(
-    checkpoint: str | Path, arm: str, *, base_checkpoint: str | Path, head_kind: str = "mlp"
+    checkpoint: str | Path,
+    arm: str,
+    *,
+    base_checkpoint: str | Path,
+    head_kind: str = "mlp",
+    device=None,
 ) -> Callable[[dict], np.ndarray]:
     """``predict(batch) -> (1, S, C)`` from a ``save_checkpoint(save_full_model=True)`` dir."""
     import jax.numpy as jnp
@@ -328,7 +333,12 @@ def load_predict_fn(
 
     head, conditions = parse_arm(arm)
     model = load_finetuned(
-        str(checkpoint), str(base_checkpoint), head, len(channel_layout(conditions)), head_kind
+        str(checkpoint),
+        str(base_checkpoint),
+        head,
+        len(channel_layout(conditions)),
+        head_kind,
+        device=device,
     )
     predict = make_predict(model, head)
     params, state = model._params, model._state
