@@ -25,7 +25,8 @@ HEAD = "p6_overfit"
 WINDOW = 131_072
 TIMING_SKIP = 2
 PROFILE_KL_MAX = 1.0
-HEAD_CHOICES = ("mlp", "conv", "seqconv")
+HEAD_CHOICES = ("mlp", "conv", "seqconv", "seqconv_tx")
+TRANSCRIPT_KINDS = frozenset({"seqconv_tx"})
 
 
 def fetch_onehot(genome: str, chrom: str, start: int, end: int) -> np.ndarray:
@@ -104,6 +105,8 @@ def main() -> None:
         ap.error("--checkpoint is required (or set ALPHAGENOME_WEIGHTS_PATH)")
     if not args.genome:
         ap.error("--genome is required (or set TISIAGO_GENOME)")
+    if args.head in TRANSCRIPT_KINDS:
+        ap.error(f"--head {args.head} needs transcript features; use train.py")
     if args.steps <= TIMING_SKIP:
         ap.error(f"--steps must be > {TIMING_SKIP}")
     out = args.out or Path(f"data/p6/overfit/{args.condition}.json")

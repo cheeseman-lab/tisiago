@@ -511,3 +511,40 @@ def test_ceiling_frame0_pred_uses_raw_rep2_not_smoothed(tmp_path):
     assert chx.frame0_cds == 1
     assert chx.frame0_pred == pytest.approx(30 / 31)
     assert chx.frame0_obs == pytest.approx(30 / 31)
+
+
+def test_evaluate_checkpoint_passes_transcript_features(world):
+    from tisiago.seq2func.tx_features import Transcript, TranscriptFeatures
+
+    transcripts = TranscriptFeatures([Transcript("T", "G", "chr7", "+", ((10, 60), (80, 120)))])
+    widths = []
+
+    def oracle(batch):
+        widths.append(batch["sequences"].shape[-1])
+        assert batch["sequences"][0, 10:60, 4 + 9].all()
+        return batch["targets"]
+
+    evaluate_checkpoint(
+        None,
+        "condition:HeLa",
+        WINDOWS.iloc[:1],
+        fasta=world["fasta"],
+        tracks_dir=world["tracks_dir"],
+        genes=world["genes"],
+        predict_fn=oracle,
+        transcripts=transcripts,
+    )
+    assert widths == [24]
+
+
+def test_load_transcripts_only_for_transcript_heads(tmp_path):
+    gtf = tmp_path / "g.gtf"
+    gtf.write_text(
+        'chr7\tH\texon\t11\t60\t.\t+\t.\tgene_id "G"; transcript_id "T"; tag "MANE_Select";\n'
+    )
+    assert evaluate.load_transcripts("mlp", None) is None
+    assert evaluate.load_transcripts("seqconv", gtf) is None
+    with pytest.raises(ValueError, match="gtf"):
+        evaluate.load_transcripts("seqconv_tx", None)
+    loaded = evaluate.load_transcripts("seqconv_tx", gtf)
+    assert [t.transcript_id for t in loaded.overlapping("chr7", 0, 100)] == ["T"]

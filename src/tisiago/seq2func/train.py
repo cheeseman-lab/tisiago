@@ -9,6 +9,7 @@ Usage::
         --head seqconv --freeze-backbone-steps 1000 --out data/p6/runs/k562_seqconv_2stage
 
 Model selection reads only ``val.parquet`` (chr7); the held-out test split is never loaded.
+``--head seqconv_tx`` adds spliced MANE transcript features (``--gtf``) to the input.
 ``best/`` is selected on ``val_profile_kl``; ``val_frame`` (the codon-phase block KL on CHX
 channels) and the per-component train losses are logged, not selected on. ``--init-from`` starts
 from a finished run's parameters (``init_from`` in ``run.json``).
@@ -31,7 +32,12 @@ from pathlib import Path
 import numpy as np
 
 from tisiago.seq2func.metrics import profile_kl
-from tisiago.seq2func.overfit import HEAD_CHOICES, finite_or_none, write_json_atomic
+from tisiago.seq2func.overfit import (
+    HEAD_CHOICES,
+    TRANSCRIPT_KINDS,
+    finite_or_none,
+    write_json_atomic,
+)
 from tisiago.seq2func.samples import CONDITIONS
 
 TRAIN_WINDOWS = "train.parquet"
@@ -272,6 +278,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
+    ap.add_argument(
+        "--gtf",
+        default=os.environ.get("TISIAGO_GTF"),
+        help="MANE_Select GTF (transcript features of --head seqconv_tx)",
+    )
     ap.add_argument("--head", choices=HEAD_CHOICES, default="mlp")
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--backbone-learning-rate", type=float, default=1e-4)
@@ -325,6 +336,8 @@ def main() -> None:
         head, conditions = parse_arm(args.arm)
     except ValueError as exc:
         ap.error(str(exc))
+    if args.head in TRANSCRIPT_KINDS and not args.gtf:
+        ap.error(f"--head {args.head} needs --gtf (or set TISIAGO_GTF)")
     if args.frame_weight < 0 or args.frame_block < 1:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     if not 0 <= args.freeze_backbone_steps < args.steps:
@@ -411,6 +424,12 @@ def main() -> None:
     data_kwargs = dict(
         fasta=args.genome, tracks_dir=args.tracks_dir, conditions=conditions, genes=genes
     )
+    if args.head in TRANSCRIPT_KINDS:
+        from tisiago.seq2func.tx_features import TranscriptFeatures
+
+        t0 = time.time()
+        data_kwargs["transcripts"] = TranscriptFeatures.from_gtf(args.gtf)
+        print(f"transcript models {time.time() - t0:.1f}s", flush=True)
 
     def eval_fn(params) -> dict:
         t = time.time()

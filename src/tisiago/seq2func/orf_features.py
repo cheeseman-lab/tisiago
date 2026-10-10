@@ -11,13 +11,11 @@ j <= i - k on that strand:
 
 A stop codon closes its own positions. Codons that run past the window or contain N are absent,
 so window edges read as capped distances. :func:`strand_features_np` is the same definition in
-NumPy (one strand of one sequence), for features computed in the data loader.
+NumPy (one strand of one sequence, no JAX import), for features computed in the data loader.
 """
 
 from __future__ import annotations
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
 BASES = "ACGT"
@@ -33,7 +31,13 @@ FEATURE_NAMES = tuple(
 NUM_FEATURES = len(FEATURE_NAMES)
 
 
-def _codon_hits(x, codons, xp=jnp):
+def _jnp():
+    import jax.numpy as jnp
+
+    return jnp
+
+
+def _codon_hits(x, codons, xp):
     """``(B, S)`` bool: a codon from ``codons`` starts at each position."""
     length = x.shape[1]
     padded = xp.pad(x, ((0, 0), (0, 2), (0, 0)))
@@ -46,7 +50,7 @@ def _codon_hits(x, codons, xp=jnp):
     return hits
 
 
-def _last_in_frame(hits, xp=jnp):
+def _last_in_frame(hits, xp):
     """``(B, S)`` int32: last hit index j' <= j with j' = j (mod 3), else -1."""
     batch, length = hits.shape
     padded_length = -(-length // 3) * 3
@@ -56,11 +60,13 @@ def _last_in_frame(hits, xp=jnp):
     if xp is np:
         index = np.maximum.accumulate(index, axis=1)
     else:
+        import jax
+
         index = jax.lax.cummax(index, axis=1)
     return index.reshape(batch, padded_length)[:, :length]
 
 
-def _strand_features(x, cap: int, xp=jnp):
+def _strand_features(x, cap: int, xp):
     """``(B, S, 9)`` features of the plus strand of boolean one-hot ``x``."""
     length = x.shape[1]
     position = xp.arange(length, dtype=xp.int32)
@@ -92,7 +98,8 @@ def strand_features_np(onehot: np.ndarray, cap: int = DEFAULT_CAP) -> np.ndarray
 
 def orf_features(sequence, cap: int = DEFAULT_CAP):
     """``(B, S, 18)`` float32 plus-then-minus open-frame features of one-hot ``(B, S, 4)``."""
+    jnp = _jnp()
     x = sequence > 0.5
-    plus = _strand_features(x, cap)
-    minus = _strand_features(x[:, ::-1, ::-1], cap)[:, ::-1]
+    plus = _strand_features(x, cap, jnp)
+    minus = _strand_features(x[:, ::-1, ::-1], cap, jnp)[:, ::-1]
     return jnp.concatenate([plus, minus], axis=-1)

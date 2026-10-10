@@ -26,6 +26,7 @@ from alphagenome_research.model import dna_model
 
 from tisiago.seq2func.loss import poisson_multinomial
 from tisiago.seq2func.orf_features import orf_features
+from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 
 ORGANISM = Organism.HOMO_SAPIENS
 CONV_WIDTH = 31
@@ -112,8 +113,39 @@ class SeqConvTrackHead(ConvTrackHead):
         return ConvTrackHead.predict(self, embeddings, organism_index, sequence=extra)
 
 
-HEAD_KINDS = {"mlp": TrackHead, "conv": ConvTrackHead, "seqconv": SeqConvTrackHead}
-SEQUENCE_KINDS = frozenset({"seqconv"})
+class SeqConvTxTrackHead(ConvTrackHead):
+    """concat(1-bp embeddings, one-hot, spliced open-frame features) -> ConvTrackHead's stack.
+
+    Needs ``kwargs["sequence"]`` ``(B, S, 4 + 20)``: one-hot plus the transcript-coordinate
+    features of :mod:`tisiago.seq2func.tx_features`, built by the data loader (``iterate(...,
+    transcripts=...)``); the backbone sees only the one-hot (:func:`make_sequence_forward`).
+    """
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
+        width = 4 + NUM_TX_CHANNELS
+        sequence = kwargs.get("sequence")
+        if sequence is None:
+            if not _SEQUENCE_FREE_INIT:
+                raise ValueError("seqconv_tx head needs the input sequence (sequence=...)")
+            x = embeddings.get_sequence_embeddings(resolution=1)
+            sequence = jnp.zeros((*x.shape[:2], width), jnp.float32)
+        if sequence.shape[-1] != width:
+            raise ValueError(
+                f"seqconv_tx head needs sequences with {width} channels (one-hot + transcript "
+                f"features: iterate(..., transcripts=...)), got {sequence.shape[-1]}"
+            )
+        return ConvTrackHead.predict(self, embeddings, organism_index, sequence=sequence)
+
+
+HEAD_KINDS = {
+    "mlp": TrackHead,
+    "conv": ConvTrackHead,
+    "seqconv": SeqConvTrackHead,
+    "seqconv_tx": SeqConvTxTrackHead,
+}
+SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx"})
+SEQUENCE_WIDTHS = {"seqconv_tx": 4 + NUM_TX_CHANNELS}
 _REGISTERED_KINDS: dict[str, str] = {}
 
 
@@ -193,14 +225,15 @@ def make_sequence_forward(heads, *, detach_backbone: bool, backbone=None):
 
     Same Haiku transform and module names as ``create_model_with_heads`` (``alphagenome/...``
     backbone, ``head/<name>/...`` heads), so it applies to that model's ``(params, state)``.
-    ``backbone`` (tests) replaces AlphaGenome inside the transform.
+    ``backbone`` (tests) replaces AlphaGenome inside the transform. The backbone gets
+    ``dna_sequence[..., :4]``; heads get every channel (``seqconv_tx`` adds 20).
     """
     backbone = backbone or _alphagenome_backbone()
     num_organisms = len(dna_model.Organism)
 
     @hk.transform_with_state
     def forward(dna_sequence, organism_index):
-        embeddings = backbone(dna_sequence, organism_index)
+        embeddings = backbone(dna_sequence[..., :4], organism_index)
         if detach_backbone:
             embeddings = _stop_gradient_embeddings(embeddings)
         predictions = {}
@@ -222,10 +255,11 @@ def install_sequence_forward(model, heads, *, detach_backbone: bool, backbone=No
     from tisiago.seq2func.checkpoint import check_restorable, tree_leaf_shapes
 
     forward = make_sequence_forward(heads, detach_backbone=detach_backbone, backbone=backbone)
+    width = max(SEQUENCE_WIDTHS.get(_REGISTERED_KINDS.get(h), 4) for h in heads)
     abstract = jax.eval_shape(
         forward.init,
         jax.random.PRNGKey(0),
-        jnp.zeros((1, INIT_SEQ_LEN, 4), jnp.bfloat16),
+        jnp.zeros((1, INIT_SEQ_LEN, width), jnp.bfloat16),
         jnp.zeros((1,), jnp.int32),
     )
     check_restorable(tree_leaf_shapes(abstract), tree_leaf_shapes((model._params, model._state)))

@@ -46,6 +46,7 @@ from tisiago.seq2func.evaluate import (
     head_kind_of,
     load_mane_cds,
     load_predict_fn,
+    load_transcripts,
     run_args,
     tracks_dir_of,
     write_tsv,
@@ -484,8 +485,12 @@ def run_periodicity(
     min_utr_counts: float = DEFAULT_MIN_UTR_COUNTS,
     min_block_counts: float = DEFAULT_MIN_BLOCK_COUNTS,
     prefetch: int = 4,
+    transcripts=None,
 ) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Region rows for the arm's predictions vs pooled targets, and unassigned-region counts."""
+    """Region rows for the arm's predictions vs pooled targets, and unassigned-region counts.
+
+    ``transcripts`` (``evaluate.load_transcripts``) adds the ``seqconv_tx`` input channels.
+    """
     from tisiago.seq2func.data import iterate
 
     windows = windows.reset_index(drop=True)
@@ -502,6 +507,7 @@ def run_periodicity(
         augment_examples=False,
         loop=False,
         prefetch=prefetch,
+        transcripts=transcripts,
     )
     try:
         for i, batch in enumerate(batches):
@@ -663,11 +669,12 @@ def main() -> None:
         import jax
 
         device = jax.devices(args.device)[0]
+        head_kind = args.head or head_kind_of(args.checkpoint)
         predict_fn = load_predict_fn(
             args.checkpoint,
             arm,
             base_checkpoint=args.base_checkpoint,
-            head_kind=args.head or head_kind_of(args.checkpoint),
+            head_kind=head_kind,
             device=device,
         )
         print(f"model load {time.time() - t0:.0f}s on {device}", flush=True)
@@ -678,6 +685,7 @@ def main() -> None:
             fasta=args.genome,
             tracks_dir=tracks_dir,
             prefetch=args.prefetch,
+            transcripts=load_transcripts(head_kind, args.gtf),
             **settings,
         )
         source = str(args.checkpoint)

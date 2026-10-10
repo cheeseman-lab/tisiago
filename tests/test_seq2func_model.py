@@ -356,13 +356,13 @@ def _fake_backbone(dim=8):
 class _FakeModel:
     """Just enough of CustomAlphaGenomeModel for make_predict / make_train_step."""
 
-    def __init__(self, heads, num_tracks, seq_len=48, kind="seqconv"):
+    def __init__(self, heads, num_tracks, seq_len=48, kind="seqconv", width=4):
         import types
 
         from tisiago.seq2func.model import ORGANISM, make_sequence_forward
 
         forward = make_sequence_forward(heads, detach_backbone=False, backbone=_fake_backbone())
-        dummy = jnp.zeros((1, seq_len, 4), jnp.float32)
+        dummy = jnp.zeros((1, seq_len, width), jnp.float32)
         self._params, self._state = forward.init(
             jax.random.PRNGKey(0), dummy, jnp.zeros((1,), jnp.int32)
         )
@@ -390,7 +390,7 @@ def test_seqconv_registered_and_choices_match():
     from tisiago.seq2func.model import HEAD_KINDS, SEQUENCE_KINDS, SeqConvTrackHead
 
     assert HEAD_KINDS["seqconv"] is SeqConvTrackHead
-    assert SEQUENCE_KINDS == {"seqconv"}
+    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx"}
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
         assert set(action.choices) == set(HEAD_KINDS)
@@ -538,7 +538,7 @@ def test_seqconv_jitted_train_step_has_finite_grads():
     assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
 
 
-@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv"])
+@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv", "seqconv_tx"])
 def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatch, kind):
     import types
 
@@ -562,7 +562,7 @@ def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatc
     monkeypatch.setattr(model_mod, "install_sequence_forward", fake_install)
     model = model_mod.load_model("ckpt", head, detach_backbone=False)
     assert model_mod._SEQUENCE_FREE_INIT is False
-    if kind == "seqconv":
+    if kind in ("seqconv", "seqconv_tx"):
         assert seen == {"free_init": True, "installed": ((head,), False)}
         assert model._predict == "sequence-forward"
     else:
@@ -622,6 +622,116 @@ def test_sequence_forward_matches_agft_forward_numerically(monkeypatch):
     ours = np.asarray(model._predict(model._params, model._state, seq, org, **kwargs)[head])
     assert agft_out.shape == (2, 64, 3) and agft_out.std() > 0
     np.testing.assert_array_equal(ours, agft_out)
+
+
+# --- seqconv_tx: spliced transcript features as extra input channels ---
+
+
+def _tx_sequences(rng, batch, length):
+    onehot = np.asarray(_random_onehot(rng, batch, length))
+    extra = rng.uniform(size=(batch, length, 20)).astype(np.float32)
+    return jnp.asarray(np.concatenate([onehot, extra], axis=-1))
+
+
+def test_seqconv_tx_head_input_is_embeddings_and_all_sequence_channels():
+    from tisiago.seq2func.model import HEAD_KINDS, SeqConvTxTrackHead, sequence_free_init
+
+    assert HEAD_KINDS["seqconv_tx"] is SeqConvTxTrackHead
+
+    def forward(emb, seq=None):
+        head = SeqConvTxTrackHead(name="s", output_type=None, num_tracks=2)
+        kwargs = {} if seq is None else {"sequence": seq}
+        return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), **kwargs)
+
+    fn = hk.without_apply_rng(hk.transform(forward))
+    emb = jnp.zeros((1, 40, 8), jnp.bfloat16)
+    rng = np.random.default_rng(0)
+    seq = _tx_sequences(rng, 1, 40)
+    params = fn.init(jax.random.PRNGKey(0), emb, seq)
+    assert params["s/~predict/hidden"]["w"].shape == (31, 8 + 24, 256)
+    pred = fn.apply(params, emb, seq)
+    assert pred.shape == (1, 40, 2) and pred.dtype == jnp.float32
+    # The transcript channels are used: same one-hot, other features -> other predictions.
+    other = seq.at[..., 4:].set(0.0)
+    assert not np.allclose(np.asarray(pred), np.asarray(fn.apply(params, emb, other)))
+    with pytest.raises(ValueError, match="24 channels"):
+        fn.apply(params, emb, seq[..., :4])
+    with pytest.raises(ValueError, match="sequence"):
+        fn.init(jax.random.PRNGKey(0), emb)
+    with sequence_free_init(True):
+        free = fn.init(jax.random.PRNGKey(0), emb)
+    assert free["s/~predict/hidden"]["w"].shape == (31, 8 + 24, 256)
+
+
+def test_sequence_forward_gives_backbone_onehot_only():
+    from tisiago.seq2func.model import make_sequence_forward
+
+    seen = {}
+
+    def backbone(dna_sequence, organism_index):
+        from alphagenome_research.model.embeddings import Embeddings
+
+        seen["shape"] = dna_sequence.shape
+        return Embeddings(embeddings_1bp=hk.Linear(8, name="fb")(dna_sequence))
+
+    head = "p6_test_tx_backbone"
+    register_track_head(head, 2, kind="seqconv_tx")
+    forward = make_sequence_forward([head], detach_backbone=True, backbone=backbone)
+    seq = _tx_sequences(np.random.default_rng(0), 1, 32)
+    params, state = forward.init(jax.random.PRNGKey(0), seq, jnp.zeros((1,), jnp.int32))
+    assert seen["shape"] == (1, 32, 4)
+    assert params["fb"]["w"].shape == (4, 8)
+    assert params[f"head/{head}/~predict/hidden"]["w"].shape == (31, 8 + 24, 256)
+
+
+def test_seqconv_tx_jitted_train_step_has_finite_grads():
+    from tisiago.seq2func.model import install_sequence_forward, make_predict, make_train_step
+
+    head = "p6_test_seqconv_tx_train"
+    register_track_head(head, 2, kind="seqconv_tx")
+    model = _FakeModel([head], 2, kind="seqconv_tx", width=24)
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    rng = np.random.default_rng(0)
+    batch = {
+        "sequences": _tx_sequences(rng, 2, 48),
+        "targets": jnp.asarray(rng.poisson(2, (2, 48, 2)).astype(np.float32)),
+        "mask": jnp.ones((2, 48, 2), bool),
+    }
+    step, opt_state = make_train_step(
+        model,
+        head,
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=False,
+        frame_weight=5.0,
+        frame_channels=(0,),
+        frame_block=2,
+    )
+    params, state = model._params, model._state
+
+    def loss(p):
+        preds = model._predict(
+            p,
+            state,
+            batch["sequences"],
+            jnp.zeros((2,), jnp.int32),
+            requested_outputs=(),
+            negative_strand_mask=jnp.zeros((2,), bool),
+            strand_reindexing=None,
+        )[head]
+        return model.create_loss_fn_for_head(head)(
+            preds, {"targets": batch["targets"], "mask": batch["mask"]}
+        )["loss"]
+
+    grads = jax.grad(loss)(params)
+    assert all(bool(jnp.isfinite(g).all()) for g in jax.tree_util.tree_leaves(grads))
+    w = grads[f"head/{head}/~predict/hidden"]["w"]
+    assert float(jnp.abs(w[:, -20:]).sum()) > 0  # gradient reaches the transcript channels
+    assert float(jnp.abs(grads["fake_backbone"]["w"]).sum()) > 0
+    new_params, _, aux = step(params, state, opt_state, batch)
+    assert np.isfinite(float(aux["loss"])) and float(aux["frame"]) >= 0
+    pred = make_predict(model, head)(new_params, state, batch["sequences"])
+    assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
 
 
 # --- two-stage init: backbone freeze and restore from a finished run ---

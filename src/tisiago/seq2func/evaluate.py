@@ -39,7 +39,7 @@ import pandas as pd
 from tisiago.seq2func.data import TrackReader, iterate
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
-from tisiago.seq2func.overfit import HEAD_CHOICES
+from tisiago.seq2func.overfit import HEAD_CHOICES, TRANSCRIPT_KINDS
 from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.samples import CONDITIONS
 from tisiago.seq2func.targets import channel_layout
@@ -360,11 +360,13 @@ def evaluate_checkpoint(
     base_checkpoint: str | Path | None = None,
     head_kind: str = "mlp",
     prefetch: int = 4,
+    transcripts=None,
 ) -> pd.DataFrame:
     """Per-channel metrics of the arm's predictions against pooled targets.
 
     ``predict_fn(batch)`` maps an ``iterate`` batch to ``(1, S, C)`` predictions; when omitted
-    it is loaded from ``checkpoint`` with :func:`load_predict_fn`.
+    it is loaded from ``checkpoint`` with :func:`load_predict_fn`. ``transcripts`` (see
+    :func:`load_transcripts`) adds the ``seqconv_tx`` input channels.
     """
     _, conditions = parse_arm(arm)
     if predict_fn is None:
@@ -384,6 +386,7 @@ def evaluate_checkpoint(
         augment_examples=False,
         loop=False,
         prefetch=prefetch,
+        transcripts=transcripts,
     )
     try:
         for i, batch in enumerate(batches):
@@ -418,6 +421,17 @@ def run_args(checkpoint: Path) -> dict:
 def head_kind_of(checkpoint: Path) -> str:
     """Head kind recorded in the run's ``run.json``; else mlp."""
     return run_args(checkpoint).get("head") or "mlp"
+
+
+def load_transcripts(head_kind: str, gtf: str | Path | None):
+    """``TranscriptFeatures`` from ``gtf`` for a :data:`TRANSCRIPT_KINDS` head, else ``None``."""
+    if head_kind not in TRANSCRIPT_KINDS:
+        return None
+    if not gtf:
+        raise ValueError(f"head kind {head_kind} needs --gtf (or TISIAGO_GTF)")
+    from tisiago.seq2func.tx_features import TranscriptFeatures
+
+    return TranscriptFeatures.from_gtf(gtf)
 
 
 def tracks_dir_of(checkpoint: Path | None) -> Path:
@@ -533,6 +547,7 @@ def main() -> None:
         return
 
     t0 = time.time()
+    head_kind = args.head or head_kind_of(args.checkpoint)
     table = evaluate_checkpoint(
         args.checkpoint,
         args.arm,
@@ -543,8 +558,9 @@ def main() -> None:
         cds=cds,
         cds_genes=cds_genes,
         base_checkpoint=args.base_checkpoint,
-        head_kind=args.head or head_kind_of(args.checkpoint),
+        head_kind=head_kind,
         prefetch=args.prefetch,
+        transcripts=load_transcripts(head_kind, args.gtf),
     )
     table = table.assign(source="model", arm=args.arm, checkpoint=str(args.checkpoint), **meta)
     write_tsv(table, paths["model"])

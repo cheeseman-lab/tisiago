@@ -406,3 +406,15 @@ def test_init_source_refuses_missing_run_json(tmp_path):
     (src.parent / "run.json").unlink()
     with pytest.raises(ValueError, match="no run.json"):
         train.init_source(src, "p6_k562", "mlp")
+
+
+def test_cli_seqconv_tx_needs_gtf(tmp_path, monkeypatch):
+    monkeypatch.delenv("TISIAGO_GTF", raising=False)
+    args = train.build_parser().parse_args(["--arm", "shared", "--gtf", "a.gtf"])
+    assert args.gtf == "a.gtf"
+    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), "--head", "seqconv_tx"])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()
