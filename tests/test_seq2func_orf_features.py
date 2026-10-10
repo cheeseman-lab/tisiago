@@ -12,6 +12,7 @@ from tisiago.seq2func.orf_features import (  # noqa: E402
     FEATURE_NAMES,
     NUM_FEATURES,
     orf_features,
+    strand_features_np,
 )
 
 BASES = "ACGT"
@@ -156,3 +157,14 @@ def test_batched_and_jittable():
     assert out.shape == (2, 12, 18) and out.dtype == jnp.float32
     for b, seq in enumerate(seqs):
         np.testing.assert_allclose(np.asarray(out[b]), reference(seq, 100), atol=1e-6)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+@pytest.mark.parametrize("length", [1, 2, 31, 60, 301])
+def test_numpy_strand_features_match_jax_and_reference(seed, length):
+    rng = np.random.default_rng(seed)
+    seq = "".join(rng.choice(list("ACGTTAN"), size=length))
+    got = strand_features_np(onehot(seq), cap=17)
+    assert got.shape == (length, 9) and got.dtype == np.float32
+    np.testing.assert_allclose(got, reference_strand(seq, 17), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(got, features(seq, cap=17)[:, :9], rtol=1e-6, atol=1e-6)
