@@ -25,10 +25,12 @@
 # per lane at a time); a trial's evaluate waits on its train in the same lane, so a trial uses
 # one GPU at a time. The trial goes to the lane with fewer jobs (ties: lane0).
 #   default : refuse if the count is >= 2 or the chosen lane is not empty.
-#   --queue : always submit. If the chosen lane is empty, its first job also waits (afterany) on
-#             the GPU jobs outside the lanes sorted by job id: lane i on the i-th, i+2-th, ...
-#             (lane0 on the 1st, 3rd, ...; lane1 on the 2nd, 4th, ...), so trials never run on
-#             top of them. Jobs submitted outside the lanes later are not gated.
+#   --queue : always submit. The chain's first job waits (afterany) on every job already in its
+#             lane (any state), so each lane is strictly serial without relying on singleton
+#             (singleton does not block on a pending predecessor; it stays as an extra guard),
+#             and on the GPU jobs outside the lanes sorted by job id: lane i on the i-th,
+#             i+2-th, ... (lane0 on the 1st, 3rd, ...; lane1 on the 2nd, 4th, ...), so trials
+#             never run on top of them. Jobs submitted outside the lanes later are not gated.
 #
 # Overrides (environment): P6_TRIAL_CEILING, P6_TRIAL_REF_PERIODICITY, P6_TRIAL_BASE,
 # P6_TRIAL_RESULTS, P6_TRIAL_WINDOWS_DIR, P6_TRIAL_EXPRESSION, P6_TRIAL_RUNS_DIR.
@@ -118,6 +120,7 @@ for id in ${IGNORE_JOBS//,/ }; do IGNORE[$id]=1; done
 SQUEUE_OUT="$(squeue -u "$USER" -h -o '%i|%j|%P|%b')" || die "squeue failed; refusing to guess"
 declare -a OUTSIDE=()
 declare -A LANE_JOBS=([0]=0 [1]=0)
+declare -A LANE_IDS=([0]="" [1]="")
 COUNT=0
 while IFS='|' read -r jobid name partition tres; do
     [[ -n "$jobid" ]] || continue
@@ -126,6 +129,7 @@ while IFS='|' read -r jobid name partition tres; do
     COUNT=$((COUNT + 1))
     if [[ "$name" == "${LANE_PREFIX}"[01] ]]; then
         LANE_JOBS[${name: -1}]=$((LANE_JOBS[${name: -1}] + 1))
+        LANE_IDS[${name: -1}]+=" $jobid"
     else
         OUTSIDE+=("$jobid")
     fi
@@ -143,7 +147,11 @@ if [[ $QUEUE -eq 0 ]]; then
         msg="GPU busy ($COUNT GPU jobs, lane$LANE has ${LANE_JOBS[$LANE]}); use --queue"
         if [[ $DRY_RUN -eq 1 ]]; then echo "# would refuse: $msg"; else die "$msg"; fi
     fi
-elif [[ ${LANE_JOBS[$LANE]} -eq 0 ]]; then
+else
+    read -ra lane_ids <<< "${LANE_IDS[$LANE]}"
+    for id in $(printf '%s\n' "${lane_ids[@]}" | grep . | sort -n); do
+        FIRST_DEP+=("afterany:$id")
+    done
     for ((i = LANE; i < ${#OUTSIDE[@]}; i += 2)); do FIRST_DEP+=("afterany:${OUTSIDE[$i]}"); done
 fi
 for id in ${AFTER//,/ }; do FIRST_DEP+=("afterok:$id"); done

@@ -48,7 +48,7 @@ def fake(tmp_path):
         "P6_TRIAL_RUNS_DIR": str(tmp_path / "runs"),
     }
 
-    def run(*args, squeue="", **extra):
+    def run(*args, squeue="", reset=True, **extra):
         (tmp_path / "squeue.txt").write_text(squeue)
         proc = subprocess.run(
             ["bash", str(SCRIPT), *args],
@@ -59,7 +59,8 @@ def fake(tmp_path):
         log = tmp_path / "sbatch.log"
         calls = log.read_text().splitlines() if log.exists() else []
         log.unlink(missing_ok=True)
-        (tmp_path / "n").unlink(missing_ok=True)
+        if reset:
+            (tmp_path / "n").unlink(missing_ok=True)
         cancel = tmp_path / "scancel.log"
         cancelled = cancel.read_text().split() if cancel.exists() else []
         return proc, calls, cancelled
@@ -115,13 +116,56 @@ def test_queue_second_lane_gets_second_outside_job(fake):
     assert "_tisiago_p6ar_lane1" in calls[0]
 
 
-def test_queue_busy_lane_only_chains_singleton(fake):
+def test_queue_busy_lane_waits_on_all_existing_lane_jobs(fake):
     squeue = "100|a|nvidia-A6000-20|gres/gpu:1\n"
+    squeue += f"810|{LANE0}|nvidia-A6000-20|gres/gpu:1\n"
     squeue += f"800|{LANE0}|nvidia-A6000-20|gres/gpu:1\n"
     squeue += f"801|{LANE0[:-1]}1|nvidia-A6000-20|gres/gpu:1\n"
+    squeue += f"811|{LANE0[:-1]}1|nvidia-A6000-20|gres/gpu:1\n"
     proc, calls, _ = fake("--queue", "t3", "--steps", "10", squeue=squeue)
     assert proc.returncode == 0, proc.stderr
-    assert dependency(calls[0]) == "singleton"
+    assert f"--job-name={LANE0}" in calls[0]  # tie -> lane0
+    assert dependency(calls[0]) == "singleton,afterany:800,afterany:810,afterany:100"
+
+
+def _deps(call):
+    return {
+        part.split(":", 1)[1].split(":")[i]
+        for part in dependency(call).split(",")
+        if part.startswith("after")
+        for i in range(len(part.split(":")) - 1)
+    }
+
+
+def test_three_queued_trials_never_exceed_two_gpus(fake):
+    outside = ["100", "200"]
+    lines = [f"{j}|base{j}|nvidia-A6000-20|gres/gpu:1" for j in outside]
+    gpu_deps: dict[str, set[str]] = {}
+    n = 0
+    for k in range(3):
+        squeue = "\n".join(lines) + "\n"
+        proc, calls, _ = fake("--queue", f"q{k}", "--steps", "10", squeue=squeue, reset=False)
+        assert proc.returncode == 0, proc.stderr
+        for call in calls:
+            n += 1
+            job = str(900 + n)
+            lane = next((a.split("=", 1)[1] for a in call.split() if "_p6ar_lane" in a), None)
+            if lane:
+                gpu_deps[job] = _deps(call)
+                lines.append(f"{job}|{lane}|nvidia-A6000-20|gres/gpu:1")
+    assert len(gpu_deps) == 6
+    # Event simulation: start every job whose dependencies are all done (singleton ignored).
+    running, done, pending = list(outside), set(), dict(gpu_deps)
+    started_before_outside_end = [j for j, d in pending.items() if not d]
+    assert started_before_outside_end == []
+    while running:
+        done.add(running.pop(0))
+        for job, deps in sorted(pending.items()):
+            if deps <= done:
+                running.append(job)
+                del pending[job]
+        assert len(running) <= 2, running
+    assert not pending
 
 
 def test_failed_sbatch_cancels_already_submitted(fake):
