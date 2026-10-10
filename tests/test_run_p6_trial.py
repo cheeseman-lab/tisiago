@@ -1,0 +1,144 @@
+"""scripts/run_p6_trial.sh against fake sbatch / squeue / scancel (no Slurm)."""
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "run_p6_trial.sh"
+LANE0 = f"{os.environ.get('USER', 'u')}_tisiago_p6ar_lane0"
+
+FAKE_SBATCH = """#!/bin/bash
+n=$(( $(cat "$FAKE_DIR/n" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$FAKE_DIR/n"
+printf '%s\\n' "$*" >> "$FAKE_DIR/sbatch.log"
+[[ "$n" == "${FAIL_AT:-0}" ]] && exit 1
+echo "$((900 + n))"
+"""
+FAKE_SQUEUE = """#!/bin/bash
+[[ -n "${SQUEUE_FAIL:-}" ]] && exit 1
+cat "$FAKE_DIR/squeue.txt"
+"""
+FAKE_SCANCEL = """#!/bin/bash
+printf '%s\\n' "$*" >> "$FAKE_DIR/scancel.log"
+"""
+
+
+@pytest.fixture
+def fake(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("sbatch", FAKE_SBATCH), ("squeue", FAKE_SQUEUE), ("scancel", FAKE_SCANCEL)):
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    for name in ("ceiling_val.tsv", "uniform_val.tsv", "ref.tsv"):
+        (refs / name).write_text("x\n")
+    (tmp_path / "squeue.txt").write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "FAKE_DIR": str(tmp_path),
+        "P6_TRIAL_CEILING": str(refs / "ceiling_val.tsv"),
+        "P6_TRIAL_REF_PERIODICITY": str(refs / "ref.tsv"),
+        "P6_TRIAL_BASE": str(tmp_path / "no_base.json"),
+        "P6_TRIAL_RESULTS": str(tmp_path / "results.tsv"),
+        "P6_TRIAL_RUNS_DIR": str(tmp_path / "runs"),
+    }
+
+    def run(*args, squeue="", **extra):
+        (tmp_path / "squeue.txt").write_text(squeue)
+        proc = subprocess.run(
+            ["bash", str(SCRIPT), *args],
+            env={**env, **extra},
+            capture_output=True,
+            text=True,
+        )
+        log = tmp_path / "sbatch.log"
+        calls = log.read_text().splitlines() if log.exists() else []
+        log.unlink(missing_ok=True)
+        (tmp_path / "n").unlink(missing_ok=True)
+        cancel = tmp_path / "scancel.log"
+        cancelled = cancel.read_text().split() if cancel.exists() else []
+        return proc, calls, cancelled
+
+    return run
+
+
+def dependency(call):
+    return next(a.split("=", 1)[1] for a in call.split() if a.startswith("--dependency="))
+
+
+def test_failed_squeue_aborts_without_submitting(fake):
+    proc, calls, _ = fake("t1", "--steps", "10", SQUEUE_FAIL="1")
+    assert proc.returncode != 0 and "squeue failed" in proc.stderr
+    assert calls == []
+
+
+def test_default_counts_held_and_dependency_jobs(fake):
+    squeue = "500|smoke|nvidia-A100-20|gres/gpu:1\n600|base|nvidia-A6000-20|gres/gpu:1\n"
+    proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue)
+    assert proc.returncode != 0 and "GPU busy (2 GPU jobs" in proc.stderr
+    assert calls == []
+    proc, calls, _ = fake("--ignore-jobs", "500", "t1", "--steps", "10", squeue=squeue)
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 4
+    assert dependency(calls[0]) == "singleton"
+
+
+def test_cpu_jobs_are_not_counted(fake):
+    squeue = "700|evaluate|20|N/A\n701|period|20|N/A\n"
+    proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_queue_waits_on_outside_jobs_by_id_and_after(fake):
+    squeue = "300|c|nvidia-A6000-20|gres/gpu:1\n100|a|nvidia-A6000-20|gres/gpu:1\n"
+    squeue += "200|b|nvidia-A6000-20|gres/gpu:1\n"
+    proc, calls, _ = fake("--queue", "--after", "100", "t1", "--steps", "10", squeue=squeue)
+    assert proc.returncode == 0, proc.stderr
+    assert dependency(calls[0]) == "singleton,afterany:100,afterany:300,afterok:100"
+    assert f"--job-name={LANE0}" in calls[0]
+    assert dependency(calls[1]) == "afterok:901,singleton"
+    assert dependency(calls[2]) == "afterok:901"
+    assert dependency(calls[3]) == "afterok:902:903"
+
+
+def test_queue_second_lane_gets_second_outside_job(fake):
+    squeue = "100|a|nvidia-A6000-20|gres/gpu:1\n200|b|nvidia-A6000-20|gres/gpu:1\n"
+    squeue += f"800|{LANE0}|nvidia-A6000-20|gres/gpu:1\n"
+    proc, calls, _ = fake("--queue", "t2", "--steps", "10", squeue=squeue)
+    assert proc.returncode == 0, proc.stderr
+    assert dependency(calls[0]) == "singleton,afterany:200"
+    assert "_tisiago_p6ar_lane1" in calls[0]
+
+
+def test_queue_busy_lane_only_chains_singleton(fake):
+    squeue = "100|a|nvidia-A6000-20|gres/gpu:1\n"
+    squeue += f"800|{LANE0}|nvidia-A6000-20|gres/gpu:1\n"
+    squeue += f"801|{LANE0[:-1]}1|nvidia-A6000-20|gres/gpu:1\n"
+    proc, calls, _ = fake("--queue", "t3", "--steps", "10", squeue=squeue)
+    assert proc.returncode == 0, proc.stderr
+    assert dependency(calls[0]) == "singleton"
+
+
+def test_failed_sbatch_cancels_already_submitted(fake):
+    proc, calls, cancelled = fake("t1", "--steps", "10", FAIL_AT="3")
+    assert proc.returncode != 0
+    assert "already submitted: 901 902" in proc.stderr
+    assert cancelled == ["901", "902"]
+    assert len(calls) == 3
+
+
+def test_eval_only_unfinished_run_needs_after(fake, tmp_path):
+    run = tmp_path / "runs" / "base"
+    (run / "best").mkdir(parents=True)
+    (run / "run.json").write_text('{"args": {"arm": "condition:K562"}}')
+    proc, calls, _ = fake("--eval-only", str(run))
+    assert proc.returncode != 0 and "not a finished run" in proc.stderr
+    proc, calls, _ = fake("--eval-only", str(run), "--after", "555")
+    assert proc.returncode == 0, proc.stderr
+    assert dependency(calls[0]) == "singleton,afterok:555"
+    assert dependency(calls[1]) == "afterok:555"
