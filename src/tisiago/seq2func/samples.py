@@ -32,8 +32,12 @@ def parse_para(path: str | Path) -> tuple[dict[int, int], dict[int, int] | None]
     return offsets, m0
 
 
-def load_samples(atis_root: str | Path) -> pd.DataFrame:
-    """Load the 6 conditions x 3 libraries x 2 replicates used by P6."""
+def load_samples(atis_root: str | Path, bam_overrides: str | Path | None = None) -> pd.DataFrame:
+    """Load the 6 conditions x 3 libraries x 2 replicates used by P6.
+
+    ``bam_overrides`` is an optional TSV (``sample_id``, ``bam``) that replaces the BAM of the
+    listed samples, e.g. rebuilt alignments. P-site offset files stay those of the sheet.
+    """
     root = Path(atis_root)
     sheet = pd.read_csv(root / "ribosome_profiling" / "manifest.csv", dtype=str).fillna("")
     rows = []
@@ -53,6 +57,13 @@ def load_samples(atis_root: str | Path) -> pd.DataFrame:
             }
         )
     samples = pd.DataFrame(rows)
+    if bam_overrides is not None:
+        table = pd.read_csv(bam_overrides, sep="\t", dtype=str)
+        unknown = sorted(set(table.sample_id) - set(samples.sample_id))
+        if unknown:
+            raise ValueError(f"unknown sample_id in {bam_overrides}: {unknown}")
+        new = dict(zip(table.sample_id, table.bam))
+        samples["bam"] = [Path(new.get(s, b)) for s, b in zip(samples.sample_id, samples.bam)]
     expected = len(CONDITIONS) * len(LIBRARIES) * len(REPLICATES)
     if len(samples) != expected or samples.duplicated(["condition", "library", "rep"]).any():
         raise ValueError(f"expected {expected} unique condition/library/rep samples")

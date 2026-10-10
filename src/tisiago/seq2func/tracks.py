@@ -122,11 +122,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--atis-root", default=os.environ.get("TISIAGO_ATIS_DATA"))
     ap.add_argument("--out-dir", default="data/p6/tracks")
+    ap.add_argument("--bam-overrides", default=os.environ.get("TISIAGO_BAM_OVERRIDES"))
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--index", type=int)
     group.add_argument("--pool", action="store_true")
     args = ap.parse_args()
-    samples = load_samples(args.atis_root)
+    samples = load_samples(args.atis_root, args.bam_overrides)
     out_dir = Path(args.out_dir)
     if args.index is not None:
         print(json.dumps(build_sample(samples.iloc[args.index], out_dir)))

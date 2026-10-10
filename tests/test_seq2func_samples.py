@@ -90,3 +90,25 @@ def test_load_samples_rejects_incomplete_sheet(tmp_path):
     sheet.iloc[1:].to_csv(root / "ribosome_profiling" / "manifest.csv", index=False)
     with pytest.raises(ValueError, match="expected 36"):
         load_samples(root)
+
+
+def test_load_samples_bam_overrides_replace_bam_keep_offsets(tmp_path):
+    root = _sheet(tmp_path)
+    table = tmp_path / "overrides.tsv"
+    table.write_text(
+        "sample_id\tbam\nK562_CHX_RPF_1\t/new/718.bam\nK562_TIS_Input_1\t/new/724.bam\n"
+    )
+    samples = load_samples(root, bam_overrides=table).set_index("sample_id")
+    assert str(samples.loc["K562_CHX_RPF_1", "bam"]) == "/new/718.bam"
+    assert str(samples.loc["K562_CHX_RPF_1", "para"]).startswith(str(root))
+    assert str(samples.loc["K562_TIS_Input_1", "bam"]) == "/new/724.bam"
+    assert pd.isna(samples.loc["K562_TIS_Input_1", "para"])
+    assert str(samples.loc["HeLa_CHX_RPF_1", "bam"]).startswith(str(root))
+
+
+def test_load_samples_rejects_unknown_override(tmp_path):
+    root = _sheet(tmp_path)
+    table = tmp_path / "overrides.tsv"
+    table.write_text("sample_id\tbam\nnot_a_sample\t/new/x.bam\n")
+    with pytest.raises(ValueError, match="not_a_sample"):
+        load_samples(root, bam_overrides=table)
