@@ -285,6 +285,45 @@ def load_finetuned(
     return model
 
 
+def restore_init(model, checkpoint_dir: str, head: str, *, reuse_head: bool) -> int:
+    """Overwrite ``model``'s parameters with a finished run's ``best/`` (two-stage init).
+
+    Backbone parameters and state always come from the checkpoint; ``head``'s leaves only when
+    ``reuse_head`` (otherwise they keep their fresh initialisation). Only the copied leaves are
+    read (Orbax partial restore), onto the template leaves' devices and dtypes.
+
+    Returns:
+        The number of leaves copied.
+    """
+    import orbax.checkpoint as ocp
+
+    from tisiago.seq2func.checkpoint import init_leaves, saved_leaf_shapes, tree_leaf_shapes
+
+    path = Path(checkpoint_dir).resolve() / "checkpoint"
+    template = (model._params, model._state)
+    load = init_leaves(
+        tree_leaf_shapes(template), saved_leaf_shapes(path), head, reuse_head=reuse_head
+    )
+    target: tuple[dict, dict] = ({}, {})
+    for part, module, name in load:
+        x = template[int(part)][module][name]
+        sds = jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=getattr(x, "sharding", None))
+        target[int(part)].setdefault(module, {})[name] = sds
+    restored = ocp.PyTreeCheckpointer().restore(
+        str(path),
+        args=ocp.args.PyTreeRestore(
+            item=target,
+            restore_args=ocp.checkpoint_utils.construct_restore_args(target),
+            partial_restore=True,
+        ),
+    )
+    trees = tuple({m: dict(leaves) for m, leaves in tree.items()} for tree in template)
+    for part, module, name in load:
+        trees[int(part)][module][name] = restored[int(part)][module][name]
+    model._params, model._state = trees
+    return len(load)
+
+
 def make_predict(model, head: str):
     """Jitted ``predict(params, state, sequences (B, S, 4)) -> (B, S, C)`` for ``head``."""
     strand_reindexing = model._metadata[ORGANISM].strand_reindexing
@@ -315,17 +354,28 @@ def label_backbone_params(params, head: str):
     return jax.tree_util.tree_map_with_path(label, params)
 
 
-def make_schedule(learning_rate: float, total_steps: int | None, warmup_steps: int = 0):
-    """Constant ``learning_rate``, or warmup-cosine decaying to ``learning_rate / 100``."""
+def make_schedule(
+    learning_rate: float, total_steps: int | None, warmup_steps: int = 0, freeze_steps: int = 0
+):
+    """Constant ``learning_rate``, or warmup-cosine decaying to ``learning_rate / 100``.
+
+    ``freeze_steps`` > 0 makes the rate 0 for the first ``freeze_steps`` updates and the
+    unchanged schedule after them.
+    """
     if total_steps is None:
-        return learning_rate
-    return optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=learning_rate,
-        warmup_steps=warmup_steps,
-        decay_steps=total_steps,
-        end_value=learning_rate * 0.01,
-    )
+        schedule = learning_rate
+    else:
+        schedule = optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=learning_rate,
+            warmup_steps=warmup_steps,
+            decay_steps=total_steps,
+            end_value=learning_rate * 0.01,
+        )
+    if freeze_steps <= 0:
+        return schedule
+    base = schedule if callable(schedule) else optax.constant_schedule(schedule)
+    return lambda count: jnp.where(count < freeze_steps, 0.0, base(count))
 
 
 def make_optimizer(
@@ -339,11 +389,13 @@ def make_optimizer(
     total_steps: int | None = None,
     warmup_steps: int = 0,
     clip_norm: float | None = None,
+    freeze_backbone_steps: int = 0,
 ) -> optax.GradientTransformation:
     """AdamW on the head only, or on head + backbone with a separate backbone learning rate.
 
     ``total_steps`` switches every learning rate to a warmup-cosine schedule; ``clip_norm``
-    clips the global gradient norm before the optimizer.
+    clips the global gradient norm before the optimizer; ``freeze_backbone_steps`` holds the
+    backbone learning rate at 0 for that many updates (head warm-up).
     """
     head_lr = make_schedule(learning_rate, total_steps, warmup_steps)
     if heads_only:
@@ -361,7 +413,9 @@ def make_optimizer(
         {
             "head": optax.adamw(head_lr, weight_decay=weight_decay),
             "backbone": optax.adamw(
-                make_schedule(backbone_learning_rate, total_steps, warmup_steps),
+                make_schedule(
+                    backbone_learning_rate, total_steps, warmup_steps, freeze_backbone_steps
+                ),
                 weight_decay=weight_decay,
             ),
         },
@@ -386,11 +440,13 @@ def make_train_step(
     frame_weight: float = 0.0,
     frame_channels: tuple[int, ...] = (),
     frame_block: int = 10,
+    freeze_backbone_steps: int = 0,
 ):
     """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
 
     ``heads_only=False`` also trains the backbone; load the model with ``detach_backbone=False``.
     ``frame_weight`` adds the codon-phase term on ``frame_channels`` (see ``loss.py``).
+    ``freeze_backbone_steps``: see :func:`make_optimizer`.
     """
     opt = make_optimizer(
         model._params,
@@ -402,6 +458,7 @@ def make_train_step(
         total_steps=total_steps,
         warmup_steps=warmup_steps,
         clip_norm=clip_norm,
+        freeze_backbone_steps=freeze_backbone_steps,
     )
     opt_state = opt.init(model._params)
     loss_fn = model.create_loss_fn_for_head(head)

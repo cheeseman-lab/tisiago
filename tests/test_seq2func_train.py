@@ -329,3 +329,59 @@ def test_default_out_separates_frozen_baseline():
         "data/p6/runs/condition_hela_frozen"
     )
     assert train.default_out("shared", True) != train.default_out("shared", False)
+
+
+def _fake_run(tmp_path, head_name="p6_k562", kind=None):
+    best = tmp_path / "src" / "best"
+    (best / "checkpoint").mkdir(parents=True)
+    args = {"arm": "condition:K562"} | ({"head": kind} if kind else {})
+    (best.parent / "run.json").write_text(json.dumps({"args": args, "head_name": head_name}))
+    return best
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "kind", "source_head", "reuse"),
+    [
+        ("mlp", "mlp", "p6_k562", True),
+        (None, "mlp", "p6_k562", True),  # runs before --head recorded mlp implicitly
+        ("mlp", "seqconv", "p6_k562", False),
+        ("mlp", "mlp", "p6_hela", False),
+    ],
+)
+def test_init_source_reuses_head_only_for_same_arm_and_kind(
+    tmp_path, source_kind, kind, source_head, reuse
+):
+    best = _fake_run(tmp_path, source_head, source_kind)
+    init = train.init_source(best, "p6_k562", kind)
+    assert init["reuse_head"] is reuse
+    assert init["path"] == str(best)
+    assert init["source_kind"] == (source_kind or "mlp")
+
+
+def test_init_source_requires_checkpoint_dir(tmp_path):
+    with pytest.raises(ValueError, match="no checkpoint/"):
+        train.init_source(tmp_path, "p6_k562", "mlp")
+
+
+def test_cli_two_stage_defaults_are_off():
+    args = train.build_parser().parse_args(["--arm", "shared"])
+    assert args.init_from is None
+    assert args.freeze_backbone_steps == 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["--freeze-backbone-steps", "-1"],
+        ["--freeze-backbone-steps", "10", "--steps", "10"],
+        ["--freeze-backbone-steps", "5", "--heads-only"],
+        ["--init-from", "does/not/exist"],
+    ],
+)
+def test_cli_rejects_bad_two_stage_options(tmp_path, monkeypatch, bad):
+    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), *bad])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()

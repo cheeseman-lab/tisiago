@@ -60,3 +60,54 @@ def test_shape_mismatch_is_refused():
     saved = {**model, ("0", "head/p6_hela/~predict/output", "w"): (4, 36)}
     with pytest.raises(ValueError, match=r"model \(4, 6\) vs saved \(4, 36\)"):
         check_restorable(model, saved)
+
+
+def test_init_leaves_fresh_head_copies_everything_else():
+    from tisiago.seq2func.checkpoint import init_leaves, is_head_leaf
+
+    model = tree_leaf_shapes(fake_model_trees())
+    saved = {p: s for p, s in model.items() if not is_head_leaf(p, "p6_hela")}
+    saved[("0", "head/p6_hela/~predict/hidden", "w")] = (31, 8, 4)  # another head kind
+    load = init_leaves(model, saved, "p6_hela", reuse_head=False)
+    assert load == sorted(p for p in model if "p6_hela" not in p[1])
+    assert len(load) == 2
+
+
+def test_init_leaves_reuse_head_requires_matching_head():
+    from tisiago.seq2func.checkpoint import init_leaves
+
+    model = tree_leaf_shapes(fake_model_trees())
+    assert init_leaves(model, model, "p6_hela", reuse_head=True) == sorted(model)
+    saved = {**model, ("0", "head/p6_hela/~predict/hidden", "w"): (31, 8, 4)}
+    with pytest.raises(ValueError, match=r"model \(8, 4\) vs saved \(31, 8, 4\)"):
+        init_leaves(model, saved, "p6_hela", reuse_head=True)
+
+
+def test_init_leaves_refuses_missing_backbone_leaf():
+    from tisiago.seq2func.checkpoint import init_leaves
+
+    model = tree_leaf_shapes(fake_model_trees())
+    saved = {p: s for p, s in model.items() if p[1] != "alphagenome/embed"}
+    with pytest.raises(ValueError, match=r"missing \(1\).*alphagenome/embed"):
+        init_leaves(model, saved, "p6_hela", reuse_head=False)
+
+
+def test_is_head_leaf_matches_agft_rule():
+    from tisiago.seq2func.checkpoint import is_head_leaf
+
+    assert is_head_leaf(("0", "head/h/~predict/hidden", "w"), "h")
+    assert not is_head_leaf(("0", "head/hh/~predict/hidden", "w"), "h")
+    assert not is_head_leaf(("0", "alphagenome/head/rna_seq/output", "w"), "h")
+    assert not is_head_leaf(("1", "alphagenome/norm", "var_ema"), "h")
+
+
+def test_saved_leaf_shapes_skips_empty_containers(tmp_path):
+    shapes = tree_leaf_shapes(fake_model_trees())
+    write_orbax_metadata(tmp_path, shapes)
+    meta = json.loads((tmp_path / "_METADATA").read_text())
+    meta["tree_metadata"]["('1',)"] = {
+        "key_metadata": [{"key": "1", "key_type": 1}],
+        "value_metadata": {"value_type": "Dict", "skip_deserialize": True},
+    }
+    (tmp_path / "_METADATA").write_text(json.dumps(meta))
+    assert saved_leaf_shapes(tmp_path) == shapes

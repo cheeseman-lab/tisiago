@@ -622,3 +622,115 @@ def test_sequence_forward_matches_agft_forward_numerically(monkeypatch):
     ours = np.asarray(model._predict(model._params, model._state, seq, org, **kwargs)[head])
     assert agft_out.shape == (2, 64, 3) and agft_out.std() > 0
     np.testing.assert_array_equal(ours, agft_out)
+
+
+# --- two-stage init: backbone freeze and restore from a finished run ---
+
+
+def _run_updates(n, **kwargs):
+    params = _fake_params()
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    opt = make_optimizer(
+        params,
+        "h",
+        learning_rate=1e-2,
+        weight_decay=1e-4,
+        heads_only=False,
+        backbone_learning_rate=1e-4,
+        total_steps=40,
+        warmup_steps=5,
+        clip_norm=1.0,
+        **kwargs,
+    )
+    state = opt.init(params)
+    out = []
+    for _ in range(n):
+        updates, state = opt.update(grads, state, params)
+        out.append(updates)
+    return out
+
+
+def test_freeze_backbone_zero_is_identical_to_default():
+    default, frozen0 = _run_updates(8), _run_updates(8, freeze_backbone_steps=0)
+    for a, b in zip(default, frozen0, strict=True):
+        for x, y in zip(jax.tree_util.tree_leaves(a), jax.tree_util.tree_leaves(b), strict=True):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def test_freeze_backbone_steps_holds_backbone_then_releases():
+    default, frozen = _run_updates(12), _run_updates(12, freeze_backbone_steps=8)
+    bb = "alphagenome/sequence_encoder/conv"
+    for i in range(12):
+        np.testing.assert_array_equal(
+            np.asarray(frozen[i]["head/h/~predict/hidden"]["w"]),
+            np.asarray(default[i]["head/h/~predict/hidden"]["w"]),
+        )
+        moved = float(jnp.abs(frozen[i][bb]["w"]).max())
+        assert (moved == 0.0) if i < 8 else (moved > 0.0)
+
+
+def test_make_schedule_freeze_masks_then_follows_schedule():
+    from tisiago.seq2func.model import make_schedule
+
+    base = make_schedule(1e-2, total_steps=100, warmup_steps=10)
+    frozen = make_schedule(1e-2, total_steps=100, warmup_steps=10, freeze_steps=20)
+    assert float(frozen(19)) == 0.0
+    assert float(frozen(20)) == pytest.approx(float(base(20)))
+    assert float(make_schedule(1e-3, None, freeze_steps=5)(5)) == pytest.approx(1e-3)
+
+
+def _save_model(model, directory):
+    import orbax.checkpoint as ocp
+
+    ck = ocp.StandardCheckpointer()
+    ck.save(str(directory.resolve() / "checkpoint"), (model._params, model._state))
+    ck.wait_until_finished()
+
+
+def _perturbed(tree, delta):
+    return jax.tree_util.tree_map(lambda x: x + delta, tree)
+
+
+def test_restore_init_same_head_loads_everything(tmp_path):
+    from tisiago.seq2func.model import restore_init
+
+    head = "p6_test_init_same"
+    register_track_head(head, 2, kind="mlp")
+    source = _FakeModel([head], 2, kind="mlp")
+    source._params = _perturbed(source._params, 0.5)
+    _save_model(source, tmp_path / "best")
+    target = _FakeModel([head], 2, kind="mlp")
+    n = restore_init(target, str(tmp_path / "best"), head, reuse_head=True)
+    assert n == len(jax.tree_util.tree_leaves((source._params, source._state)))
+    for a, b in zip(
+        jax.tree_util.tree_leaves(target._params),
+        jax.tree_util.tree_leaves(source._params),
+        strict=True,
+    ):
+        assert a.dtype == b.dtype
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_restore_init_new_head_kind_starts_fresh(tmp_path):
+    from tisiago.seq2func.model import restore_init
+
+    old, new = "p6_test_init_mlp", "p6_test_init_seqconv"
+    register_track_head(old, 2, kind="mlp")
+    register_track_head(new, 2, kind="seqconv")
+    source = _FakeModel([old], 2, kind="mlp")
+    source._params = _perturbed(source._params, 0.5)
+    _save_model(source, tmp_path / "best")
+    target = _FakeModel([new], 2, kind="seqconv")
+    fresh = jax.tree_util.tree_map(np.asarray, target._params)
+    restore_init(target, str(tmp_path / "best"), new, reuse_head=False)
+    for module, leaves in target._params.items():
+        for name, value in leaves.items():
+            want = (
+                fresh[module][name]
+                if module.startswith(f"head/{new}/")
+                else (source._params[module][name])
+            )
+            np.testing.assert_array_equal(np.asarray(value), np.asarray(want))
+    assert any(m.startswith(f"head/{new}/") for m in target._params)
+    with pytest.raises(ValueError, match="missing"):
+        restore_init(target, str(tmp_path / "best"), new, reuse_head=True)

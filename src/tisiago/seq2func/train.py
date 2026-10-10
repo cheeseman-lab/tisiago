@@ -5,10 +5,13 @@ Usage::
     python -m tisiago.seq2func.train --arm condition:HeLa --steps 600 --eval-every 200 \
         --eval-windows 20 --out data/p6/runs/hela
     python -m tisiago.seq2func.train --arm shared --heads-only --out data/p6/runs/shared_frozen
+    python -m tisiago.seq2func.train --arm condition:K562 --init-from data/p6/runs/k562_base/best \
+        --head seqconv --freeze-backbone-steps 1000 --out data/p6/runs/k562_seqconv_2stage
 
 Model selection reads only ``val.parquet`` (chr7); the held-out test split is never loaded.
 ``best/`` is selected on ``val_profile_kl``; ``val_frame`` (the codon-phase block KL on CHX
-channels) and the per-component train losses are logged, not selected on.
+channels) and the per-component train losses are logged, not selected on. ``--init-from`` starts
+from a finished run's parameters (``init_from`` in ``run.json``).
 """
 
 from __future__ import annotations
@@ -137,6 +140,27 @@ def check_out_dir(out: Path, overwrite: bool) -> None:
         )
 
 
+def init_source(init_from: Path, head: str, kind: str) -> dict:
+    """Describe a two-stage init from a finished run's ``best/`` (or ``last/``) directory.
+
+    The source head is reused only when its run's ``run.json`` records the same head name (arm)
+    and head kind; otherwise the new head starts fresh and only the backbone is copied.
+    """
+    init_from = Path(init_from)
+    if not (init_from / "checkpoint").is_dir():
+        raise ValueError(f"{init_from} has no checkpoint/; pass a run's best/ or last/ directory")
+    run_json = init_from.parent / "run.json"
+    source = json.loads(run_json.read_text()) if run_json.exists() else {}
+    source_kind = source.get("args", {}).get("head") or "mlp"
+    source_head = source.get("head_name")
+    return {
+        "path": str(init_from),
+        "source_head": source_head,
+        "source_kind": source_kind,
+        "reuse_head": source_head == head and source_kind == kind,
+    }
+
+
 def train_loop(
     step_fn,
     params,
@@ -261,6 +285,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="frozen-backbone baseline (default trains the backbone)",
     )
     ap.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="two-stage init: a finished run's best/ (backbone; head too if arm and kind match)",
+    )
+    ap.add_argument(
+        "--freeze-backbone-steps",
+        type=int,
+        default=0,
+        help="backbone learning rate 0 for the first N steps (head warm-up)",
+    )
+    ap.add_argument(
         "--overwrite",
         action="store_true",
         help="allow replacing log.jsonl/run.json/best/last of an earlier run in --out",
@@ -282,6 +318,16 @@ def main() -> None:
         ap.error(str(exc))
     if args.frame_weight < 0 or args.frame_block < 1:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
+    if not 0 <= args.freeze_backbone_steps < args.steps:
+        ap.error("--freeze-backbone-steps must be in [0, --steps)")
+    if args.freeze_backbone_steps and not args.train_backbone:
+        ap.error("--freeze-backbone-steps needs backbone training (drop --heads-only)")
+    init = None
+    if args.init_from is not None:
+        try:
+            init = init_source(args.init_from, head, args.head)
+        except ValueError as exc:
+            ap.error(str(exc))
     out = args.out or default_out(args.arm, args.train_backbone)
     try:
         check_out_dir(out, args.overwrite)
@@ -320,6 +366,8 @@ def main() -> None:
         "val_windows": len(val_windows),
         "jax_devices": [str(d) for d in jax.devices()],
     }
+    if init is not None:
+        run["init_from"] = init
     write_json_atomic(run, out / "run.json")
     print(json.dumps(run, indent=2), flush=True)
 
@@ -327,6 +375,12 @@ def main() -> None:
     t0 = time.time()
     model = load_model(args.checkpoint, head, detach_backbone=not args.train_backbone)
     print(f"model load {time.time() - t0:.1f}s", flush=True)
+    if init is not None:
+        from tisiago.seq2func.model import restore_init
+
+        init["leaves"] = restore_init(model, init["path"], head, reuse_head=init["reuse_head"])
+        write_json_atomic(run, out / "run.json")
+        print(f"init from {init}", flush=True)
     step_fn, opt_state = make_train_step(
         model,
         head,
@@ -340,6 +394,7 @@ def main() -> None:
         frame_weight=args.frame_weight,
         frame_channels=frame_channels,
         frame_block=args.frame_block,
+        freeze_backbone_steps=args.freeze_backbone_steps,
     )
     params, state = model._params, model._state
     predict = make_predict(model, head)

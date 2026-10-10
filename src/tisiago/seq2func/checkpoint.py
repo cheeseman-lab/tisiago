@@ -28,10 +28,15 @@ def tree_leaf_shapes(tree, prefix: tuple[str, ...] = ()) -> LeafShapes:
 
 
 def saved_leaf_shapes(checkpoint: str | Path) -> LeafShapes:
-    """``{path: shape}`` recorded in an Orbax checkpoint directory's ``_METADATA``."""
+    """``{path: shape}`` recorded in an Orbax checkpoint directory's ``_METADATA``.
+
+    Entries without a ``write_shape`` (empty containers such as an empty state dict) are skipped.
+    """
     meta = json.loads((Path(checkpoint) / "_METADATA").read_text())["tree_metadata"]
     out: LeafShapes = {}
     for entry in meta.values():
+        if "write_shape" not in entry["value_metadata"]:
+            continue
         path = tuple(str(k["key"]) for k in entry["key_metadata"])
         out[path] = tuple(int(d) for d in entry["value_metadata"]["write_shape"])
     return out
@@ -55,3 +60,29 @@ def check_restorable(template: LeafShapes, saved: LeafShapes) -> int:
             lines.append(f"  shape {'/'.join(p)}: model {template[p]} vs saved {saved[p]}")
         raise ValueError("\n".join(lines))
     return len(template)
+
+
+def is_head_leaf(path: tuple[str, ...], head: str) -> bool:
+    """Whether an Orbax leaf path belongs to custom head ``head`` (agft's head-path rule)."""
+    name = "/".join(path[1:])
+    return f"/head/{head}/" in name or name.startswith(f"head/{head}/")
+
+
+def init_leaves(template: LeafShapes, saved: LeafShapes, head: str, *, reuse_head: bool) -> list:
+    """Leaves of ``template`` to copy from ``saved`` for a two-stage init.
+
+    Every leaf outside ``head`` (backbone parameters and state) is copied; ``head``'s leaves only
+    when ``reuse_head``, otherwise they keep their fresh initialisation. Raises ``ValueError``
+    when a leaf to copy is missing from ``saved`` or has another shape.
+    """
+    load = sorted(p for p in template if reuse_head or not is_head_leaf(p, head))
+    missing = [p for p in load if p not in saved]
+    mismatched = [p for p in load if p in saved and saved[p] != template[p]]
+    if missing or mismatched:
+        lines = [f"init checkpoint does not match the model ({len(load)} leaves to load):"]
+        if missing:
+            lines.append(f"  missing ({len(missing)}): {['/'.join(p) for p in missing[:5]]}")
+        for p in mismatched[:5]:
+            lines.append(f"  shape {'/'.join(p)}: model {template[p]} vs saved {saved[p]}")
+        raise ValueError("\n".join(lines))
+    return load
