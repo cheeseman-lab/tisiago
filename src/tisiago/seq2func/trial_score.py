@@ -183,6 +183,10 @@ def gate_fit(score: dict, base: dict | None) -> bool | None:
     """Fit gate against the base run's score; ``None`` without a base."""
     if base is None:
         return None
+    for key in ("val_profile_kl", "gene_log_pearson"):
+        value = base.get(key)
+        if value is None or not math.isfinite(value):
+            raise ValueError(f"base score has no finite {key} ({value!r}); re-score the base run")
     return bool(
         score["val_profile_kl"] <= base["val_profile_kl"] + KL_TOLERANCE
         and score["gene_log_pearson"] >= base["gene_log_pearson"] - PEARSON_TOLERANCE

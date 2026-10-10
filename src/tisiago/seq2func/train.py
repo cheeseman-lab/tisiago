@@ -143,14 +143,23 @@ def check_out_dir(out: Path, overwrite: bool) -> None:
 def init_source(init_from: Path, head: str, kind: str) -> dict:
     """Describe a two-stage init from a finished run's ``best/`` (or ``last/``) directory.
 
-    The source head is reused only when its run's ``run.json`` records the same head name (arm)
-    and head kind; otherwise the new head starts fresh and only the backbone is copied.
+    The source must be a finished run: its ``run.json`` exists and records a non-null ``best``
+    (``best/`` is rewritten at every improving eval while a run is still training). The source
+    head is reused only when that ``run.json`` records the same head name (arm) and head kind;
+    otherwise the new head starts fresh and only the backbone is copied.
     """
     init_from = Path(init_from)
     if not (init_from / "checkpoint").is_dir():
         raise ValueError(f"{init_from} has no checkpoint/; pass a run's best/ or last/ directory")
     run_json = init_from.parent / "run.json"
-    source = json.loads(run_json.read_text()) if run_json.exists() else {}
+    if not run_json.exists():
+        raise ValueError(f"{init_from}: no run.json in {init_from.parent}; cannot verify the run")
+    source = json.loads(run_json.read_text())
+    if not source.get("best"):
+        raise ValueError(
+            f"{init_from.parent} is not a finished run (run.json has no best); its best/ is an "
+            "intermediate checkpoint — wait for the run to finish"
+        )
     source_kind = source.get("args", {}).get("head") or "mlp"
     source_head = source.get("head_name")
     return {

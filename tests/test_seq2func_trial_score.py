@@ -224,3 +224,10 @@ def test_cli_writes_score_json_and_appends(tmp_path, monkeypatch):
     table = pd.read_csv(out, sep="\t")
     assert table.run.tolist() == ["k562_base", "ar_x"]
     assert json.loads((run / "trial_score.json").read_text())["gate_fit"] is False
+
+
+@pytest.mark.parametrize("key", ["val_profile_kl", "gene_log_pearson"])
+def test_gate_fit_refuses_null_base_values(key):
+    base = {"val_profile_kl": 1.0, "gene_log_pearson": 0.5, key: None}
+    with pytest.raises(ValueError, match=f"base score has no finite {key}"):
+        gate_fit({"val_profile_kl": 1.0, "gene_log_pearson": 0.5}, base)

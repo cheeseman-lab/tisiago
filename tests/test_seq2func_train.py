@@ -335,7 +335,8 @@ def _fake_run(tmp_path, head_name="p6_k562", kind=None):
     best = tmp_path / "src" / "best"
     (best / "checkpoint").mkdir(parents=True)
     args = {"arm": "condition:K562"} | ({"head": kind} if kind else {})
-    (best.parent / "run.json").write_text(json.dumps({"args": args, "head_name": head_name}))
+    run = {"args": args, "head_name": head_name, "best": {"step": 2000}}
+    (best.parent / "run.json").write_text(json.dumps(run))
     return best
 
 
@@ -385,3 +386,23 @@ def test_cli_rejects_bad_two_stage_options(tmp_path, monkeypatch, bad):
         train.main()
     assert exc.value.code != 0
     assert not (tmp_path / "r").exists()
+
+
+@pytest.mark.parametrize("best", [None, "missing"])
+def test_init_source_refuses_unfinished_run(tmp_path, best):
+    src = _fake_run(tmp_path)
+    run = json.loads((src.parent / "run.json").read_text())
+    if best == "missing":
+        del run["best"]
+    else:
+        run["best"] = None
+    (src.parent / "run.json").write_text(json.dumps(run))
+    with pytest.raises(ValueError, match="not a finished run"):
+        train.init_source(src, "p6_k562", "mlp")
+
+
+def test_init_source_refuses_missing_run_json(tmp_path):
+    src = _fake_run(tmp_path)
+    (src.parent / "run.json").unlink()
+    with pytest.raises(ValueError, match="no run.json"):
+        train.init_source(src, "p6_k562", "mlp")
