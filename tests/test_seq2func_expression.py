@@ -85,3 +85,13 @@ def test_expression_table_sums_replicates_and_thresholds(tmp_path, monkeypatch):
     assert row.loc["G1.1", "rna_count"] == 2 and bool(row.loc["G1.1", "expressed"])
     assert row.loc["G2.3", "rna_count"] == 0 and not bool(row.loc["G2.3", "expressed"])
     assert set(table.condition) == {"HeLa"}
+
+
+def test_expression_table_reads_counts_dir(tmp_path, monkeypatch):
+    samples = pd.DataFrame([{"condition": "K562", "library": "rna", "rep": 1, "sample_id": "a"}])
+    monkeypatch.setattr("tisiago.seq2func.expression.load_samples", lambda root: samples)
+    other = tmp_path / "rebuilt"
+    other.mkdir()
+    (other / "a_htseqcount.txt").write_text("G1.1\t3\n")
+    table = expression_table(tmp_path, _gtf(tmp_path), counts_dir=other)
+    assert table.set_index("gene_id").loc["G1.1", "rna_count"] == 3

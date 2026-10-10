@@ -42,7 +42,7 @@ def read_counts(path: str | Path) -> pd.Series:
     return table.set_index("gene_id")["count"].astype(int)
 
 
-def counts_path(root: str | Path, sample_id: str) -> Path:
+def counts_path(root: str | Path, sample_id: str, counts_dir: str | Path | None = None) -> Path:
     """Resolve counts file for a sample, handling lane suffix mismatches.
 
     First tries exact {sample_id}_htseqcount.txt; if not found, searches for
@@ -51,6 +51,7 @@ def counts_path(root: str | Path, sample_id: str) -> Path:
     Args:
         root: directory containing counts/ subdirectory
         sample_id: sample identifier (may include _L[digit]+ lane suffix)
+        counts_dir: counts directory; default ``root/counts``
 
     Returns:
         Path to the htseq-count file
@@ -60,7 +61,7 @@ def counts_path(root: str | Path, sample_id: str) -> Path:
         ValueError: if multiple lane variants match
     """
     root = Path(root)
-    counts_dir = root / "counts"
+    counts_dir = Path(counts_dir) if counts_dir is not None else root / "counts"
     exact_path = counts_dir / f"{sample_id}_htseqcount.txt"
 
     # Try exact match first
@@ -82,8 +83,16 @@ def counts_path(root: str | Path, sample_id: str) -> Path:
     return matches[0]
 
 
-def expression_table(atis_root: str | Path, gtf: str | Path, min_count: int = 2) -> pd.DataFrame:
-    """One row per condition x gene: summed TIS-input counts and ``expressed`` flag."""
+def expression_table(
+    atis_root: str | Path,
+    gtf: str | Path,
+    min_count: int = 2,
+    counts_dir: str | Path | None = None,
+) -> pd.DataFrame:
+    """One row per condition x gene: summed TIS-input counts and ``expressed`` flag.
+
+    ``counts_dir`` replaces ``atis_root/counts`` (e.g. counts rebuilt from rebuilt BAMs).
+    """
     root = Path(atis_root)
     spans = read_gene_spans(gtf)
     samples = load_samples(root)
@@ -91,7 +100,7 @@ def expression_table(atis_root: str | Path, gtf: str | Path, min_count: int = 2)
     for condition, rows in samples[samples.library == "rna"].groupby("condition"):
         total = pd.Series(0, index=spans.gene_id, dtype=int)
         for sample_id in rows.sample_id:
-            path = counts_path(root, sample_id)
+            path = counts_path(root, sample_id, counts_dir)
             counts = read_counts(path)
             total = total.add(counts.reindex(spans.gene_id, fill_value=0), fill_value=0)
         frame = spans.copy()
