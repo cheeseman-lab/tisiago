@@ -120,6 +120,54 @@ def test_iterate_loops_and_augments(world):
     assert all(b["sequences"].shape == (1, 32, 4) for b in batches)
 
 
+def _transcripts():
+    from tisiago.seq2func.tx_features import Transcript, TranscriptFeatures
+
+    plus = Transcript("TP", "GP", "chr1", "+", ((2, 12), (20, 40)))
+    minus = Transcript("TM", "GM", "chr1", "-", ((30, 60),))
+    return TranscriptFeatures([plus, minus], cap=50)
+
+
+def test_make_example_with_transcript_features(world):
+    transcripts = _transcripts()
+    base = make_example(**kwargs(world), chrom="chr1", start=0, end=32)
+    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32, transcripts=transcripts)
+    assert ex["sequences"].shape == (32, 24) and ex["sequences"].dtype == np.float32
+    np.testing.assert_array_equal(ex["sequences"][:, :4], base["sequences"])
+    np.testing.assert_array_equal(ex["targets"], base["targets"])
+    seq = Fasta(world["fasta"], as_raw=True)
+    np.testing.assert_array_equal(ex["sequences"][:, 4:], transcripts.window(seq, "chr1", 0, 32))
+    assert ex["sequences"][2:12, 13].all() and not ex["sequences"][12:20, 13].any()
+
+
+def test_augment_moves_transcript_features_with_the_sequence(world):
+    from tisiago.seq2func.augment import reverse_complement, shift
+
+    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32, transcripts=_transcripts())
+    pairs = strand_pairs(channel_layout(world["conditions"]))
+    out = augment(ex, FixedRng(0.0, 2), pairs)
+    rc = reverse_complement(ex["sequences"], ex["targets"], ex["mask"], pairs)
+    expected = shift(*rc, 2)[0]
+    np.testing.assert_array_equal(out["sequences"], expected)
+    # plus-strand exonic block moved to the minus block, positions mirrored and shifted
+    assert out["sequences"][31 - 2 + 2, 4 + 19] == 1.0
+    assert out["sequences"][31 - 2 + 2, 4 + 9] == 0.0
+
+
+def test_iterate_passes_transcripts(world):
+    batches = list(
+        iterate(
+            world["windows"],
+            **kwargs(world),
+            seed=0,
+            augment_examples=True,
+            loop=False,
+            transcripts=_transcripts(),
+        )
+    )
+    assert all(b["sequences"].shape == (1, 32, 24) for b in batches)
+
+
 def test_iterate_worker_error_raised_in_consumer(world, tmp_path):
     (tmp_path / "tracks" / "HeLa" / "tis_reppooled.plus.bw").unlink()
     it = iterate(world["windows"], **kwargs(world), seed=0, augment_examples=False)

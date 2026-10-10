@@ -98,21 +98,31 @@ def make_example(
     start: int,
     end: int,
     reader: TrackReader | None = None,
+    transcripts=None,
 ) -> dict[str, np.ndarray]:
     """One window: ``sequences (S, 4)``, ``targets (S, C)``, ``mask (S, C)``.
 
-    Pass ``reader`` to reuse open bigWig handles across calls.
+    Pass ``reader`` to reuse open bigWig handles across calls. With ``transcripts`` (a
+    :class:`tisiago.seq2func.tx_features.TranscriptFeatures`) ``sequences`` is ``(S, 4 + 20)``:
+    one-hot, then the transcript-coordinate open-frame features.
     """
+
+    def read(handle):
+        sequence = one_hot(fetch_sequence(handle, chrom, start, end))
+        if transcripts is None:
+            return sequence
+        return np.concatenate([sequence, transcripts.window(handle, chrom, start, end)], axis=1)
+
     if isinstance(fasta, (str, Path)):
         from pyfaidx import Fasta
 
         handle = Fasta(str(fasta), as_raw=True)
         try:
-            seq = fetch_sequence(handle, chrom, start, end)
+            sequences = read(handle)
         finally:
             handle.close()
     else:
-        seq = fetch_sequence(fasta, chrom, start, end)
+        sequences = read(fasta)
     layout = channel_layout(conditions)
     if reader is None:
         reader = TrackReader(tracks_dir, conditions)
@@ -123,14 +133,17 @@ def make_example(
     else:
         targets = reader.read(chrom, start, end)
     return {
-        "sequences": one_hot(seq),
+        "sequences": sequences,
         "targets": targets,
         "mask": expression_mask(layout, genes, chrom, start, end),
     }
 
 
 def augment(example: dict, rng, pairs, max_shift: int = 3) -> dict[str, np.ndarray]:
-    """Reverse-complement with p=0.5, then shift by an offset in ``[-max_shift, max_shift]``."""
+    """Reverse-complement with p=0.5, then shift by an offset in ``[-max_shift, max_shift]``.
+
+    Extra ``sequences`` channels (stranded feature blocks) follow :func:`reverse_complement`.
+    """
     onehot, targets, mask = example["sequences"], example["targets"], example["mask"]
     if rng.random() < 0.5:
         onehot, targets, mask = reverse_complement(onehot, targets, mask, pairs)
@@ -154,7 +167,7 @@ def _produce(out, stop, worker, workers, windows, cfg, seed, augment_examples, l
 
     reader = handle = None
     try:
-        fasta, tracks_dir, conditions, genes = cfg
+        fasta, tracks_dir, conditions, genes, transcripts = cfg
         handle = Fasta(str(fasta), as_raw=True)
         reader = TrackReader(tracks_dir, conditions)
         pairs = strand_pairs(channel_layout(conditions))
@@ -177,6 +190,7 @@ def _produce(out, stop, worker, workers, windows, cfg, seed, augment_examples, l
                     int(row.start),
                     int(row.end),
                     reader=reader,
+                    transcripts=transcripts,
                 )
                 if augment_examples:
                     example = augment(example, rng, pairs)
@@ -207,6 +221,7 @@ def iterate(
     prefetch: int = 4,
     loop: bool = True,
     workers: int = 4,
+    transcripts=None,
 ) -> Iterator[dict[str, np.ndarray]]:
     """Yield batch-1 dicts (leading axis 1) prefetched by daemon threads into a bounded queue.
 
@@ -214,11 +229,13 @@ def iterate(
     ``workers`` threads (each with its own handle cache and rng stream) and never ends; order
     is not preserved. ``loop=False`` uses one worker and yields each window once, in order.
     Worker errors are re-raised here; closing the generator stops and joins the workers.
+    ``transcripts`` (shared by the workers) adds the ``seqconv_tx`` channels: see
+    :func:`make_example`.
     """
     workers = max(1, workers) if loop else 1
     out: queue.Queue = queue.Queue(maxsize=prefetch)
     stop = threading.Event()
-    cfg = (fasta, tracks_dir, conditions, genes)
+    cfg = (fasta, tracks_dir, conditions, genes, transcripts)
     threads = [
         threading.Thread(
             target=_produce,
