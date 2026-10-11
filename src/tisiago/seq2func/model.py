@@ -30,6 +30,7 @@ from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 
 ORGANISM = Organism.HOMO_SAPIENS
 CONV_WIDTH = 31
+MOD_HIDDEN = 64
 INIT_SEQ_LEN = 2**14
 _SEQUENCE_FREE_INIT = False
 
@@ -113,6 +114,23 @@ class SeqConvTrackHead(ConvTrackHead):
         return ConvTrackHead.predict(self, embeddings, organism_index, sequence=extra)
 
 
+def _tx_sequence(embeddings, kwargs, kind: str):
+    """``kwargs["sequence"]`` ``(B, S, 4 + 20)`` for a transcript head (zeros inside init)."""
+    width = 4 + NUM_TX_CHANNELS
+    sequence = kwargs.get("sequence")
+    if sequence is None:
+        if not _SEQUENCE_FREE_INIT:
+            raise ValueError(f"{kind} head needs the input sequence (sequence=...)")
+        x = embeddings.get_sequence_embeddings(resolution=1)
+        sequence = jnp.zeros((*x.shape[:2], width), jnp.float32)
+    if sequence.shape[-1] != width:
+        raise ValueError(
+            f"{kind} head needs sequences with {width} channels (one-hot + transcript "
+            f"features: iterate(..., transcripts=...)), got {sequence.shape[-1]}"
+        )
+    return sequence
+
+
 class SeqConvTxTrackHead(ConvTrackHead):
     """concat(1-bp embeddings, one-hot, spliced open-frame features) -> ConvTrackHead's stack.
 
@@ -123,19 +141,33 @@ class SeqConvTxTrackHead(ConvTrackHead):
 
     def predict(self, embeddings, organism_index, **kwargs):
         """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
-        width = 4 + NUM_TX_CHANNELS
-        sequence = kwargs.get("sequence")
-        if sequence is None:
-            if not _SEQUENCE_FREE_INIT:
-                raise ValueError("seqconv_tx head needs the input sequence (sequence=...)")
-            x = embeddings.get_sequence_embeddings(resolution=1)
-            sequence = jnp.zeros((*x.shape[:2], width), jnp.float32)
-        if sequence.shape[-1] != width:
-            raise ValueError(
-                f"seqconv_tx head needs sequences with {width} channels (one-hot + transcript "
-                f"features: iterate(..., transcripts=...)), got {sequence.shape[-1]}"
-            )
+        sequence = _tx_sequence(embeddings, kwargs, "seqconv_tx")
         return ConvTrackHead.predict(self, embeddings, organism_index, sequence=sequence)
+
+
+class ResidTxTrackHead(TrackHead):
+    """:class:`TrackHead`'s output times ``exp`` of a zero-initialised sequence modulation.
+
+    Base branch: ``TrackHead``'s ``hidden`` / ``output`` (same leaf paths, so an ``mlp`` run
+    initialises it). Modulation: concat(1-bp embeddings, one-hot + spliced transcript features,
+    as :class:`SeqConvTxTrackHead`) -> Conv1D(64, 31) -> relu -> Conv1D(num_tracks, 1), the
+    last layer zero-initialised (``mod_hidden`` / ``mod_output``), so predictions equal the
+    base head's at step 0.
+    """
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
+        sequence = _tx_sequence(embeddings, kwargs, "resid_tx")
+        base = TrackHead.predict(self, embeddings, organism_index)
+        x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
+        x = jnp.concatenate([x, sequence.astype(jnp.float32)], axis=-1)
+        x = hk.Conv1D(MOD_HIDDEN, kernel_shape=CONV_WIDTH, padding="SAME", name="mod_hidden")(x)
+        x = jax.nn.relu(x)
+        zeros = hk.initializers.Constant(0.0)
+        delta = hk.Conv1D(
+            self._num_tracks, kernel_shape=1, w_init=zeros, b_init=zeros, name="mod_output"
+        )(x)
+        return base * jnp.exp(delta.astype(jnp.float32))
 
 
 HEAD_KINDS = {
@@ -143,9 +175,10 @@ HEAD_KINDS = {
     "conv": ConvTrackHead,
     "seqconv": SeqConvTrackHead,
     "seqconv_tx": SeqConvTxTrackHead,
+    "resid_tx": ResidTxTrackHead,
 }
-SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx"})
-SEQUENCE_WIDTHS = {"seqconv_tx": 4 + NUM_TX_CHANNELS}
+SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx"})
+SEQUENCE_WIDTHS = {"seqconv_tx": 4 + NUM_TX_CHANNELS, "resid_tx": 4 + NUM_TX_CHANNELS}
 _REGISTERED_KINDS: dict[str, str] = {}
 
 
@@ -319,11 +352,12 @@ def load_finetuned(
     return model
 
 
-def restore_init(model, checkpoint_dir: str, head: str, *, reuse_head: bool) -> int:
+def restore_init(model, checkpoint_dir: str, head: str, *, reuse_head: bool | str) -> int:
     """Overwrite ``model``'s parameters with a finished run's ``best/`` (two-stage init).
 
-    Backbone parameters and state always come from the checkpoint; ``head``'s leaves only when
-    ``reuse_head`` (otherwise they keep their fresh initialisation). Only the copied leaves are
+    Backbone parameters and state always come from the checkpoint; ``head``'s leaves per
+    ``reuse_head`` (``"all"``, ``"matching"``, ``"none"``; see ``checkpoint.init_leaves``), the
+    rest keeping their fresh initialisation. Only the copied leaves are
     read (Orbax partial restore), onto the template leaves' devices and dtypes.
 
     Returns:

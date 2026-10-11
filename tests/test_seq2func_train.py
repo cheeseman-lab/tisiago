@@ -343,10 +343,14 @@ def _fake_run(tmp_path, head_name="p6_k562", kind=None):
 @pytest.mark.parametrize(
     ("source_kind", "kind", "source_head", "reuse"),
     [
-        ("mlp", "mlp", "p6_k562", True),
-        (None, "mlp", "p6_k562", True),  # runs before --head recorded mlp implicitly
-        ("mlp", "seqconv", "p6_k562", False),
-        ("mlp", "mlp", "p6_hela", False),
+        ("mlp", "mlp", "p6_k562", "all"),
+        (None, "mlp", "p6_k562", "all"),  # runs before --head recorded mlp implicitly
+        ("mlp", "seqconv", "p6_k562", "none"),
+        ("mlp", "mlp", "p6_hela", "none"),
+        ("mlp", "resid_tx", "p6_k562", "matching"),
+        (None, "resid_tx", "p6_k562", "matching"),
+        ("mlp", "resid_tx", "p6_hela", "none"),
+        ("seqconv_tx", "resid_tx", "p6_k562", "none"),
     ],
 )
 def test_init_source_reuses_head_only_for_same_arm_and_kind(
@@ -354,7 +358,7 @@ def test_init_source_reuses_head_only_for_same_arm_and_kind(
 ):
     best = _fake_run(tmp_path, source_head, source_kind)
     init = train.init_source(best, "p6_k562", kind)
-    assert init["reuse_head"] is reuse
+    assert init["reuse_head"] == reuse
     assert init["path"] == str(best)
     assert init["source_kind"] == (source_kind or "mlp")
 

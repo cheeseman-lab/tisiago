@@ -68,14 +68,26 @@ def is_head_leaf(path: tuple[str, ...], head: str) -> bool:
     return f"/head/{head}/" in name or name.startswith(f"head/{head}/")
 
 
-def init_leaves(template: LeafShapes, saved: LeafShapes, head: str, *, reuse_head: bool) -> list:
+def init_leaves(
+    template: LeafShapes, saved: LeafShapes, head: str, *, reuse_head: bool | str
+) -> list:
     """Leaves of ``template`` to copy from ``saved`` for a two-stage init.
 
-    Every leaf outside ``head`` (backbone parameters and state) is copied; ``head``'s leaves only
-    when ``reuse_head``, otherwise they keep their fresh initialisation. Raises ``ValueError``
-    when a leaf to copy is missing from ``saved`` or has another shape.
+    Every leaf outside ``head`` (backbone parameters and state) is copied. ``head``'s leaves:
+    ``reuse_head`` ``"all"`` (or True) copies all, ``"none"`` (or False) keeps them fresh,
+    ``"matching"`` copies those present in ``saved`` with the same shape (a partly shared head).
+    Raises ``ValueError`` when a leaf to copy is missing from ``saved`` or has another shape.
     """
-    load = sorted(p for p in template if reuse_head or not is_head_leaf(p, head))
+    mode = {True: "all", False: "none"}.get(reuse_head, reuse_head)
+    if mode not in ("all", "none", "matching"):
+        raise ValueError(f"reuse_head must be all, matching or none, got {reuse_head!r}")
+
+    def wanted(p):
+        if not is_head_leaf(p, head):
+            return True
+        return mode == "all" or (mode == "matching" and saved.get(p) == template[p])
+
+    load = sorted(p for p in template if wanted(p))
     missing = [p for p in load if p not in saved]
     mismatched = [p for p in load if p in saved and saved[p] != template[p]]
     if missing or mismatched:

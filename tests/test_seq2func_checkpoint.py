@@ -83,6 +83,25 @@ def test_init_leaves_reuse_head_requires_matching_head():
         init_leaves(model, saved, "p6_hela", reuse_head=True)
 
 
+def test_init_leaves_matching_copies_shared_head_leaves_only():
+    from tisiago.seq2func.checkpoint import init_leaves, is_head_leaf
+
+    model = tree_leaf_shapes(fake_model_trees())
+    model[("0", "head/p6_hela/~predict/mod_output", "w")] = (1, 64, 4)
+    saved = {p: s for p, s in model.items() if "mod_output" not in p[1]}
+    load = init_leaves(model, saved, "p6_hela", reuse_head="matching")
+    assert load == sorted(p for p in model if "mod_output" not in p[1])
+    assert any(is_head_leaf(p, "p6_hela") for p in load)
+    saved[("0", "head/p6_hela/~predict/hidden", "w")] = (31, 8, 4)  # shape differs: not copied
+    skipped = init_leaves(model, saved, "p6_hela", reuse_head="matching")
+    assert ("0", "head/p6_hela/~predict/hidden", "w") not in skipped
+    assert init_leaves(model, saved, "p6_hela", reuse_head="none") == sorted(
+        p for p in model if not is_head_leaf(p, "p6_hela")
+    )
+    with pytest.raises(ValueError, match="all, matching or none"):
+        init_leaves(model, saved, "p6_hela", reuse_head="some")
+
+
 def test_init_leaves_refuses_missing_backbone_leaf():
     from tisiago.seq2func.checkpoint import init_leaves
 

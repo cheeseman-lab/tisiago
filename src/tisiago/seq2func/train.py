@@ -151,8 +151,10 @@ def init_source(init_from: Path, head: str, kind: str) -> dict:
 
     The source must be a finished run: its ``run.json`` exists and records a non-null ``best``
     (``best/`` is rewritten at every improving eval while a run is still training). The source
-    head is reused only when that ``run.json`` records the same head name (arm) and head kind;
-    otherwise the new head starts fresh and only the backbone is copied.
+    head is reused (``reuse_head`` ``"all"``) only when that ``run.json`` records the same head
+    name (arm) and head kind. An ``mlp`` source into ``resid_tx`` of the same arm reuses
+    ``"matching"`` leaves (the shared base branch; ``mod_*`` stay fresh). Otherwise (``"none"``)
+    the new head starts fresh and only the backbone is copied.
     """
     init_from = Path(init_from)
     if not (init_from / "checkpoint").is_dir():
@@ -168,11 +170,17 @@ def init_source(init_from: Path, head: str, kind: str) -> dict:
         )
     source_kind = source.get("args", {}).get("head") or "mlp"
     source_head = source.get("head_name")
+    reuse_head = "none"
+    if source_head == head:
+        if source_kind == kind:
+            reuse_head = "all"
+        elif (source_kind, kind) == ("mlp", "resid_tx"):
+            reuse_head = "matching"
     return {
         "path": str(init_from),
         "source_head": source_head,
         "source_kind": source_kind,
-        "reuse_head": source_head == head and source_kind == kind,
+        "reuse_head": reuse_head,
     }
 
 

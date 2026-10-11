@@ -390,7 +390,7 @@ def test_seqconv_registered_and_choices_match():
     from tisiago.seq2func.model import HEAD_KINDS, SEQUENCE_KINDS, SeqConvTrackHead
 
     assert HEAD_KINDS["seqconv"] is SeqConvTrackHead
-    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx"}
+    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx", "resid_tx"}
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
         assert set(action.choices) == set(HEAD_KINDS)
@@ -538,7 +538,7 @@ def test_seqconv_jitted_train_step_has_finite_grads():
     assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
 
 
-@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv", "seqconv_tx"])
+@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv", "seqconv_tx", "resid_tx"])
 def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatch, kind):
     import types
 
@@ -562,7 +562,7 @@ def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatc
     monkeypatch.setattr(model_mod, "install_sequence_forward", fake_install)
     model = model_mod.load_model("ckpt", head, detach_backbone=False)
     assert model_mod._SEQUENCE_FREE_INIT is False
-    if kind in ("seqconv", "seqconv_tx"):
+    if kind in ("seqconv", "seqconv_tx", "resid_tx"):
         assert seen == {"free_init": True, "installed": ((head,), False)}
         assert model._predict == "sequence-forward"
     else:
@@ -732,6 +732,150 @@ def test_seqconv_tx_jitted_train_step_has_finite_grads():
     assert np.isfinite(float(aux["loss"])) and float(aux["frame"]) >= 0
     pred = make_predict(model, head)(new_params, state, batch["sequences"])
     assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
+
+
+# --- resid_tx: mlp base branch times exp(zero-initialised sequence modulation) ---
+
+
+def _resid_model(head, seq_len=48):
+    register_track_head(head, 2, kind="resid_tx")
+    model = _FakeModel([head], 2, kind="resid_tx", seq_len=seq_len, width=24)
+    from tisiago.seq2func.model import install_sequence_forward
+
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    return model
+
+
+def test_resid_tx_equals_mlp_at_init_and_modulates_after():
+    from tisiago.seq2func.model import HEAD_KINDS, ResidTxTrackHead
+
+    assert HEAD_KINDS["resid_tx"] is ResidTxTrackHead
+
+    def forward(kind, emb, seq=None):
+        head = HEAD_KINDS[kind](name="h", output_type=None, num_tracks=2)
+        kwargs = {} if seq is None else {"sequence": seq}
+        return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), **kwargs)
+
+    mlp = hk.without_apply_rng(hk.transform(lambda e: forward("mlp", e)))
+    resid = hk.without_apply_rng(hk.transform(lambda e, q: forward("resid_tx", e, q)))
+    rng = np.random.default_rng(0)
+    emb = jnp.asarray(rng.normal(size=(1, 40, 8)).astype(np.float32))
+    seq = _tx_sequences(rng, 1, 40)
+    mlp_params = mlp.init(jax.random.PRNGKey(0), emb)
+    params = resid.init(jax.random.PRNGKey(1), emb, seq)
+    for key in mlp_params:
+        assert params[key]["w"].shape == mlp_params[key]["w"].shape
+    assert params["h/~predict/mod_hidden"]["w"].shape == (31, 8 + 24, 64)
+    for leaf in params["h/~predict/mod_output"].values():
+        assert float(jnp.abs(leaf).max()) == 0.0
+    base_params = {**params, **mlp_params}
+    out = resid.apply(base_params, emb, seq)
+    np.testing.assert_array_equal(np.asarray(out), np.asarray(mlp.apply(mlp_params, emb)))
+    assert out.dtype == jnp.float32
+    bumped = {**base_params, "h/~predict/mod_output": {"w": jnp.ones((1, 64, 2)), "b": jnp.ones(2)}}
+    assert not np.allclose(np.asarray(resid.apply(bumped, emb, seq)), np.asarray(out))
+    with pytest.raises(ValueError, match="24 channels"):
+        resid.apply(params, emb, seq[..., :4])
+
+
+def test_resid_tx_jitted_train_step_has_nonzero_mod_grads_with_frame_loss():
+    from tisiago.seq2func.model import make_predict, make_train_step
+
+    head = "p6_test_resid_tx_train"
+    model = _resid_model(head)
+    rng = np.random.default_rng(0)
+    batch = {
+        "sequences": _tx_sequences(rng, 2, 48),
+        "targets": jnp.asarray(rng.poisson(2, (2, 48, 2)).astype(np.float32)),
+        "mask": jnp.ones((2, 48, 2), bool),
+    }
+    step, opt_state = make_train_step(
+        model,
+        head,
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=False,
+        frame_weight=5.0,
+        frame_channels=(0,),
+        frame_block=2,
+    )
+    params, state = model._params, model._state
+    loss_fn = model.create_loss_fn_for_head(head)
+
+    def loss(p):
+        preds = model._predict(
+            p,
+            state,
+            batch["sequences"],
+            jnp.zeros((2,), jnp.int32),
+            requested_outputs=(),
+            negative_strand_mask=jnp.zeros((2,), bool),
+            strand_reindexing=None,
+        )[head]
+        return loss_fn(
+            preds,
+            {
+                "targets": batch["targets"],
+                "mask": batch["mask"],
+                "frame_weight": 5.0,
+                "frame_channels": (0,),
+                "frame_block": 2,
+            },
+        )["loss"]
+
+    grads = jax.grad(loss)(params)
+    assert all(bool(jnp.isfinite(g).all()) for g in jax.tree_util.tree_leaves(grads))
+    scope = f"head/{head}/~predict/"
+    assert float(jnp.abs(grads[scope + "mod_output"]["w"]).sum()) > 0
+    new_params, _, aux = step(params, state, opt_state, batch)
+    assert np.isfinite(float(aux["loss"]))
+    # The zero-initialised last layer moved, so the next forward differs from the base branch.
+    assert float(jnp.abs(new_params[scope + "mod_output"]["w"]).sum()) > 0
+    pred = make_predict(model, head)(new_params, state, batch["sequences"])
+    assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
+
+
+def test_resid_tx_checkpoint_round_trip_and_matching_init(tmp_path):
+    from tisiago.seq2func.model import make_predict, restore_init
+
+    head = "p6_test_resid_tx_ck"
+    source = _resid_model(head)
+    source._params = _perturbed(source._params, 0.25)
+    _save_model(source, tmp_path / "best")
+    same = _resid_model(head)
+    n = restore_init(same, str(tmp_path / "best"), head, reuse_head="all")
+    assert n == len(jax.tree_util.tree_leaves((source._params, source._state)))
+    seq = _tx_sequences(np.random.default_rng(1), 1, 48)
+    np.testing.assert_array_equal(
+        np.asarray(make_predict(same, head)(same._params, same._state, seq)),
+        np.asarray(make_predict(source, head)(source._params, source._state, seq)),
+    )
+
+    mlp_head = "p6_test_resid_tx_mlp"
+    register_track_head(mlp_head, 2, kind="mlp")
+    base = _FakeModel([mlp_head], 2, kind="mlp")
+    base._params = _perturbed(base._params, 0.5)
+    _save_model(base, tmp_path / "mlp_best")
+    name = mlp_head + "_r"
+    target = _resid_model(name)
+    # the mlp source's head scope renamed to the resid arm (the same arm in a real run)
+    base_scope = f"head/{mlp_head}/~predict/"
+    saved = {k.replace(base_scope, f"head/{name}/~predict/"): v for k, v in base._params.items()}
+    renamed = _FakeModel([mlp_head], 2, kind="mlp")
+    renamed._params, renamed._state = saved, base._state
+    _save_model(renamed, tmp_path / "mlp_as_resid")
+    fresh = jax.tree_util.tree_map(np.asarray, target._params)
+    restore_init(target, str(tmp_path / "mlp_as_resid"), name, reuse_head="matching")
+    scope = f"head/{name}/~predict/"
+    for module, leaves in target._params.items():
+        for leaf, value in leaves.items():
+            if module in (scope + "hidden", scope + "output"):
+                want = saved[module][leaf]
+            elif module.startswith(scope):
+                want = fresh[module][leaf]  # mod_* stay fresh
+            else:
+                want = base._params[module][leaf]
+            np.testing.assert_array_equal(np.asarray(value), np.asarray(want))
 
 
 # --- two-stage init: backbone freeze and restore from a finished run ---
