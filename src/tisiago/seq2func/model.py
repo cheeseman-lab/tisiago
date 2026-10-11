@@ -31,6 +31,7 @@ from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 ORGANISM = Organism.HOMO_SAPIENS
 CONV_WIDTH = 31
 MOD_HIDDEN = 64
+MOD_SCALE = 1.5
 INIT_SEQ_LEN = 2**14
 _SEQUENCE_FREE_INIT = False
 
@@ -146,7 +147,10 @@ class SeqConvTxTrackHead(ConvTrackHead):
 
 
 class ResidTxTrackHead(TrackHead):
-    """:class:`TrackHead`'s output times ``exp`` of a zero-initialised sequence modulation.
+    """:class:`TrackHead`'s output times a bounded, zero-initialised sequence modulation.
+
+    The factor is ``exp(MOD_SCALE * tanh(delta))``, bounded to ``[exp(-MOD_SCALE),
+    exp(MOD_SCALE)]`` = [0.22, 4.5] so the modulation cannot blow up the loss.
 
     Base branch: ``TrackHead``'s ``hidden`` / ``output`` (same leaf paths, so an ``mlp`` run
     initialises it). Modulation: concat(1-bp embeddings, one-hot + spliced transcript features,
@@ -167,7 +171,7 @@ class ResidTxTrackHead(TrackHead):
         delta = hk.Conv1D(
             self._num_tracks, kernel_shape=1, w_init=zeros, b_init=zeros, name="mod_output"
         )(x)
-        return base * jnp.exp(delta.astype(jnp.float32))
+        return base * jnp.exp(MOD_SCALE * jnp.tanh(delta.astype(jnp.float32)))
 
 
 HEAD_KINDS = {
@@ -357,8 +361,8 @@ def restore_init(model, checkpoint_dir: str, head: str, *, reuse_head: bool | st
 
     Backbone parameters and state always come from the checkpoint; ``head``'s leaves per
     ``reuse_head`` (``"all"``, ``"matching"``, ``"none"``; see ``checkpoint.init_leaves``), the
-    rest keeping their fresh initialisation. Only the copied leaves are
-    read (Orbax partial restore), onto the template leaves' devices and dtypes.
+    rest keeping their fresh initialisation. Only the copied leaves are read (Orbax partial
+    restore), onto the template leaves' devices and dtypes.
 
     Returns:
         The number of leaves copied.

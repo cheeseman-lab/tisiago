@@ -778,6 +778,31 @@ def test_resid_tx_equals_mlp_at_init_and_modulates_after():
         resid.apply(params, emb, seq[..., :4])
 
 
+def test_resid_tx_modulation_is_bounded_for_large_mod_output_weights():
+    from tisiago.seq2func.model import HEAD_KINDS, MOD_SCALE
+
+    def forward(kind, emb, seq=None):
+        head = HEAD_KINDS[kind](name="h", output_type=None, num_tracks=2)
+        kwargs = {} if seq is None else {"sequence": seq}
+        return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), **kwargs)
+
+    mlp = hk.without_apply_rng(hk.transform(lambda e: forward("mlp", e)))
+    resid = hk.without_apply_rng(hk.transform(lambda e, q: forward("resid_tx", e, q)))
+    rng = np.random.default_rng(0)
+    emb = jnp.asarray(rng.normal(size=(1, 40, 8)).astype(np.float32))
+    seq = _tx_sequences(rng, 1, 40)
+    mlp_params = mlp.init(jax.random.PRNGKey(0), emb)
+    params = {**resid.init(jax.random.PRNGKey(1), emb, seq), **mlp_params}
+    base = np.asarray(mlp.apply(mlp_params, emb))
+    for sign in (1.0, -1.0):
+        big = {"w": sign * 1e4 * jnp.ones((1, 64, 2)), "b": sign * 1e4 * jnp.ones(2)}
+        out = np.asarray(resid.apply({**params, "h/~predict/mod_output": big}, emb, seq))
+        assert np.isfinite(out).all()
+        np.testing.assert_array_less(out, base * np.exp(MOD_SCALE) * (1 + 1e-5) + 1e-30)
+        np.testing.assert_array_less(base * np.exp(-MOD_SCALE) * (1 - 1e-5) - 1e-30, out)
+    assert MOD_SCALE == 1.5
+
+
 def test_resid_tx_jitted_train_step_has_nonzero_mod_grads_with_frame_loss():
     from tisiago.seq2func.model import make_predict, make_train_step
 
