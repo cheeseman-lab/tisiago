@@ -39,10 +39,10 @@ import pandas as pd
 from tisiago.seq2func.data import TrackReader, iterate
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
-from tisiago.seq2func.overfit import HEAD_CHOICES, TRANSCRIPT_KINDS
+from tisiago.seq2func.overfit import CHX_KINDS, HEAD_CHOICES, TRANSCRIPT_KINDS
 from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.samples import CONDITIONS
-from tisiago.seq2func.targets import channel_layout
+from tisiago.seq2func.targets import channel_layout, library_channels
 from tisiago.seq2func.train import parse_arm
 
 EXCLUDED = -1
@@ -327,19 +327,34 @@ def load_predict_fn(
     head_kind: str = "mlp",
     device=None,
 ) -> Callable[[dict], np.ndarray]:
-    """``predict(batch) -> (1, S, C)`` from a ``save_checkpoint(save_full_model=True)`` dir."""
+    """``predict(batch) -> (1, S, C)`` from a ``save_checkpoint(save_full_model=True)`` dir.
+
+    A ``resid_chx`` head is rebuilt with the arm's CHX channels (as ``train.py`` derives them),
+    checked against ``mod_channels`` in the run's ``run.json`` when recorded.
+    """
     import jax.numpy as jnp
 
     from tisiago.seq2func.model import load_finetuned, make_predict
 
     head, conditions = parse_arm(arm)
+    layout = channel_layout(conditions)
+    mod_channels = None
+    if head_kind in CHX_KINDS:
+        mod_channels = library_channels(layout, "chx")
+        run = Path(checkpoint).parent / "run.json"
+        recorded = json.loads(run.read_text()).get("mod_channels") if run.exists() else None
+        if recorded is not None and tuple(recorded) != mod_channels:
+            raise ValueError(
+                f"{run} records mod_channels={recorded}, but arm {arm} gives {mod_channels}"
+            )
     model = load_finetuned(
         str(checkpoint),
         str(base_checkpoint),
         head,
-        len(channel_layout(conditions)),
+        len(layout),
         head_kind,
         device=device,
+        mod_channels=mod_channels,
     )
     predict = make_predict(model, head)
     params, state = model._params, model._state

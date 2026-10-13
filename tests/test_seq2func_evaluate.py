@@ -1,5 +1,6 @@
 """Tests for held-out evaluation and the replicate ceiling."""
 
+import json
 import math
 import sys
 from collections import Counter
@@ -267,9 +268,12 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
     class FakeModel:
         _params, _state = "params", "state"
 
-    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, device=None):
+    def fake_load_finetuned(
+        checkpoint, base, head, num_tracks, kind, device=None, mod_channels=None
+    ):
         calls["load"] = (checkpoint, base, head, num_tracks, kind)
         calls["device"] = device
+        calls["mod_channels"] = mod_channels
         return FakeModel()
 
     def fake_make_predict(model, head):
@@ -282,10 +286,43 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
         tmp_path, "condition:HeLa", base_checkpoint="weights", head_kind="conv", device="cpu0"
     )
     assert calls["load"] == (str(tmp_path), "weights", "p6_hela", 6, "conv")
+    assert calls["mod_channels"] is None
     assert calls["device"] == "cpu0"
     assert calls["head"] == "p6_hela"
     out = predict({"sequences": np.zeros((1, 8, 4), np.float32)})
     assert out.shape == (1, 8, 6) and (out == 1).all()
+
+
+def test_load_predict_fn_passes_chx_channels_for_resid_chx(monkeypatch, tmp_path):
+    pytest.importorskip("alphagenome_ft")
+    model_mod = pytest.importorskip("tisiago.seq2func.model")
+    from tisiago.seq2func.targets import channel_layout, library_channels
+
+    calls = {}
+
+    class FakeModel:
+        _params, _state = "params", "state"
+
+    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, **kwargs):
+        calls.update(kwargs)
+        return FakeModel()
+
+    monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
+    monkeypatch.setattr(model_mod, "make_predict", lambda model, head: None)
+    evaluate.load_predict_fn(
+        tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
+    )
+    want = library_channels(channel_layout(["K562"]), "chx")
+    assert calls["mod_channels"] == want and len(want) == 2
+    (tmp_path / "run.json").write_text(json.dumps({"mod_channels": [0, 1]}))
+    with pytest.raises(ValueError, match="mod_channels"):
+        evaluate.load_predict_fn(
+            tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
+        )
+    (tmp_path / "run.json").write_text(json.dumps({"mod_channels": list(want)}))
+    evaluate.load_predict_fn(
+        tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
+    )
 
 
 def test_head_kind_read_from_run_json(tmp_path):

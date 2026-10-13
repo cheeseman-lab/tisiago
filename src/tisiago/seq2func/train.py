@@ -33,7 +33,9 @@ import numpy as np
 
 from tisiago.seq2func.metrics import profile_kl
 from tisiago.seq2func.overfit import (
+    CHX_KINDS,
     HEAD_CHOICES,
+    MOD_KINDS,
     TRANSCRIPT_KINDS,
     finite_or_none,
     write_json_atomic,
@@ -152,9 +154,9 @@ def init_source(init_from: Path, head: str, kind: str) -> dict:
     The source must be a finished run: its ``run.json`` exists and records a non-null ``best``
     (``best/`` is rewritten at every improving eval while a run is still training). The source
     head is reused (``reuse_head`` ``"all"``) only when that ``run.json`` records the same head
-    name (arm) and head kind. An ``mlp`` source into ``resid_tx`` of the same arm reuses
-    ``"matching"`` leaves (the shared base branch; ``mod_*`` stay fresh). Otherwise (``"none"``)
-    the new head starts fresh and only the backbone is copied.
+    name (arm) and head kind. An ``mlp`` source into ``resid_tx`` / ``resid_chx`` of the same
+    arm reuses ``"matching"`` leaves (the shared base branch; ``mod_*`` stay fresh). Otherwise
+    (``"none"``) the new head starts fresh and only the backbone is copied.
     """
     init_from = Path(init_from)
     if not (init_from / "checkpoint").is_dir():
@@ -174,7 +176,7 @@ def init_source(init_from: Path, head: str, kind: str) -> dict:
     if source_head == head:
         if source_kind == kind:
             reuse_head = "all"
-        elif (source_kind, kind) == ("mlp", "resid_tx"):
+        elif source_kind == "mlp" and kind in MOD_KINDS:
             reuse_head = "matching"
     return {
         "path": str(init_from),
@@ -294,6 +296,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--head", choices=HEAD_CHOICES, default="mlp")
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--backbone-learning-rate", type=float, default=1e-4)
+    ap.add_argument(
+        "--mod-learning-rate",
+        type=float,
+        default=None,
+        help="learning rate of the resid_tx / resid_chx mod_* branch (default: --learning-rate)",
+    )
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--warmup-steps", type=int, default=300)
     ap.add_argument("--clip-norm", type=float, default=1.0)
@@ -346,6 +354,10 @@ def main() -> None:
         ap.error(str(exc))
     if args.head in TRANSCRIPT_KINDS and not args.gtf:
         ap.error(f"--head {args.head} needs --gtf (or set TISIAGO_GTF)")
+    if args.mod_learning_rate is not None and args.head not in MOD_KINDS:
+        ap.error(f"--mod-learning-rate needs --head in {sorted(MOD_KINDS)}")
+    if args.mod_learning_rate is not None and args.mod_learning_rate < 0:
+        ap.error("--mod-learning-rate must be >= 0")
     if args.frame_weight < 0 or args.frame_block < 1:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     if not 0 <= args.freeze_backbone_steps < args.steps:
@@ -392,16 +404,20 @@ def main() -> None:
         "conditions": list(conditions),
         "num_tracks": num_tracks,
         "frame_channels": list(frame_channels),
+        "mod_learning_rate": args.mod_learning_rate,
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
         "jax_devices": [str(d) for d in jax.devices()],
     }
+    mod_channels = frame_channels if args.head in CHX_KINDS else None
+    if mod_channels is not None:
+        run["mod_channels"] = list(mod_channels)
     if init is not None:
         run["init_from"] = init
     write_json_atomic(run, out / "run.json")
     print(json.dumps(run, indent=2), flush=True)
 
-    register_track_head(head, num_tracks, kind=args.head)
+    register_track_head(head, num_tracks, kind=args.head, mod_channels=mod_channels)
     t0 = time.time()
     model = load_model(args.checkpoint, head, detach_backbone=not args.train_backbone)
     print(f"model load {time.time() - t0:.1f}s", flush=True)
@@ -425,6 +441,7 @@ def main() -> None:
         frame_channels=frame_channels,
         frame_block=args.frame_block,
         freeze_backbone_steps=args.freeze_backbone_steps,
+        mod_learning_rate=args.mod_learning_rate,
     )
     params, state = model._params, model._state
     predict = make_predict(model, head)

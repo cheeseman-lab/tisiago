@@ -351,6 +351,11 @@ def _fake_run(tmp_path, head_name="p6_k562", kind=None):
         (None, "resid_tx", "p6_k562", "matching"),
         ("mlp", "resid_tx", "p6_hela", "none"),
         ("seqconv_tx", "resid_tx", "p6_k562", "none"),
+        ("mlp", "resid_chx", "p6_k562", "matching"),
+        (None, "resid_chx", "p6_k562", "matching"),
+        ("mlp", "resid_chx", "p6_hela", "none"),
+        ("resid_tx", "resid_chx", "p6_k562", "none"),
+        ("resid_chx", "resid_chx", "p6_k562", "all"),
     ],
 )
 def test_init_source_reuses_head_only_for_same_arm_and_kind(
@@ -422,3 +427,38 @@ def test_cli_seqconv_tx_needs_gtf(tmp_path, monkeypatch):
         train.main()
     assert exc.value.code != 0
     assert not (tmp_path / "r").exists()
+
+
+def test_cli_mod_learning_rate_parses_and_defaults_to_none():
+    args = train.build_parser().parse_args(["--arm", "shared"])
+    assert args.mod_learning_rate is None
+    args = train.build_parser().parse_args(
+        ["--arm", "shared", "--head", "resid_chx", "--mod-learning-rate", "1e-3"]
+    )
+    assert args.mod_learning_rate == 1e-3
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["--head", "mlp", "--mod-learning-rate", "1e-3"],
+        ["--head", "seqconv_tx", "--mod-learning-rate", "1e-3"],
+        ["--head", "resid_chx", "--mod-learning-rate", "-1e-3"],
+    ],
+)
+def test_cli_rejects_mod_learning_rate_without_mod_head(tmp_path, monkeypatch, bad):
+    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--gtf", "a.gtf", "--out", str(tmp_path / "r"), *bad])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()
+
+
+def test_cli_resid_chx_needs_gtf(tmp_path, monkeypatch):
+    monkeypatch.delenv("TISIAGO_GTF", raising=False)
+    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), "--head", "resid_chx"])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
