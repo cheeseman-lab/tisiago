@@ -8,7 +8,7 @@
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
 #
-# Usage: sbatch --partition=20 --array=0-5 scripts/run_p6_roundtrip.sh
+# Usage: sbatch --partition=20 --array=0-5 scripts/run_p6_roundtrip.sh [roundtrip args]
 
 set -euo pipefail
 
@@ -22,4 +22,4 @@ require_python "$PYTHON"
 
 cd "$REPO_ROOT"
 "$PYTHON" -m tisiago.seq2func.roundtrip --condition "${CONDITIONS[$SLURM_ARRAY_TASK_ID]}" \
-    --nproc "${SLURM_CPUS_PER_TASK:-1}"
+    --nproc "${SLURM_CPUS_PER_TASK:-1}" "$@"
