@@ -31,6 +31,7 @@ from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 ORGANISM = Organism.HOMO_SAPIENS
 CONV_WIDTH = 31
 MOD_HIDDEN = 64
+MOD_HIDDEN_CHX = 256
 MOD_SCALE = 1.5
 INIT_SEQ_LEN = 2**14
 _SEQUENCE_FREE_INIT = False
@@ -146,6 +147,17 @@ class SeqConvTxTrackHead(ConvTrackHead):
         return ConvTrackHead.predict(self, embeddings, organism_index, sequence=sequence)
 
 
+def _modulation(embeddings, sequence, hidden: int, num_out: int):
+    """``exp(MOD_SCALE * tanh(delta))`` from the ``mod_hidden`` / zero-init ``mod_output`` convs."""
+    x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
+    x = jnp.concatenate([x, sequence.astype(jnp.float32)], axis=-1)
+    x = hk.Conv1D(hidden, kernel_shape=CONV_WIDTH, padding="SAME", name="mod_hidden")(x)
+    x = jax.nn.relu(x)
+    zeros = hk.initializers.Constant(0.0)
+    delta = hk.Conv1D(num_out, kernel_shape=1, w_init=zeros, b_init=zeros, name="mod_output")(x)
+    return jnp.exp(MOD_SCALE * jnp.tanh(delta.astype(jnp.float32)))
+
+
 class ResidTxTrackHead(TrackHead):
     """:class:`TrackHead`'s output times a bounded, zero-initialised sequence modulation.
 
@@ -163,15 +175,30 @@ class ResidTxTrackHead(TrackHead):
         """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
         sequence = _tx_sequence(embeddings, kwargs, "resid_tx")
         base = TrackHead.predict(self, embeddings, organism_index)
-        x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
-        x = jnp.concatenate([x, sequence.astype(jnp.float32)], axis=-1)
-        x = hk.Conv1D(MOD_HIDDEN, kernel_shape=CONV_WIDTH, padding="SAME", name="mod_hidden")(x)
-        x = jax.nn.relu(x)
-        zeros = hk.initializers.Constant(0.0)
-        delta = hk.Conv1D(
-            self._num_tracks, kernel_shape=1, w_init=zeros, b_init=zeros, name="mod_output"
-        )(x)
-        return base * jnp.exp(MOD_SCALE * jnp.tanh(delta.astype(jnp.float32)))
+        return base * _modulation(embeddings, sequence, MOD_HIDDEN, self._num_tracks)
+
+
+class ResidChxTrackHead(TrackHead):
+    """:class:`ResidTxTrackHead` with the modulation on the CHX channels only.
+
+    The channels come from ``metadata["mod_channels"]`` (static indices, set by
+    :func:`register_track_head`); every other channel returns the base output exactly. The
+    modulation is Conv1D(256, 31) -> relu -> Conv1D(len(mod_channels), 1), zero-initialised,
+    with the same bounded factor and leaf names as :class:`ResidTxTrackHead`.
+    """
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
+        channels = tuple(self._metadata.get("mod_channels") or ())
+        if not channels or len(set(channels)) != len(channels):
+            raise ValueError(
+                "resid_chx head needs unique metadata['mod_channels'] (CHX channel indices)"
+            )
+        sequence = _tx_sequence(embeddings, kwargs, "resid_chx")
+        base = TrackHead.predict(self, embeddings, organism_index)
+        factor = _modulation(embeddings, sequence, MOD_HIDDEN_CHX, len(channels))
+        index = jnp.asarray(channels)
+        return base.at[..., index].multiply(factor, unique_indices=True)
 
 
 HEAD_KINDS = {
@@ -180,16 +207,40 @@ HEAD_KINDS = {
     "seqconv": SeqConvTrackHead,
     "seqconv_tx": SeqConvTxTrackHead,
     "resid_tx": ResidTxTrackHead,
+    "resid_chx": ResidChxTrackHead,
 }
-SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx"})
-SEQUENCE_WIDTHS = {"seqconv_tx": 4 + NUM_TX_CHANNELS, "resid_tx": 4 + NUM_TX_CHANNELS}
+SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx"})
+SEQUENCE_WIDTHS = {
+    "seqconv_tx": 4 + NUM_TX_CHANNELS,
+    "resid_tx": 4 + NUM_TX_CHANNELS,
+    "resid_chx": 4 + NUM_TX_CHANNELS,
+}
 _REGISTERED_KINDS: dict[str, str] = {}
 
 
-def register_track_head(name: str, num_tracks: int, kind: str = "mlp") -> None:
-    """Register a track head of ``kind``; idempotent for the same ``(name, num_tracks, kind)``."""
+def _check_mod_channels(kind: str, num_tracks: int, mod_channels) -> tuple[int, ...] | None:
+    """``mod_channels`` as a tuple: required (unique, in range) for ``resid_chx``, else None."""
+    if not issubclass(HEAD_KINDS[kind], ResidChxTrackHead):
+        if mod_channels is not None:
+            raise ValueError(f"mod_channels is only for resid_chx heads, not {kind!r}")
+        return None
+    channels = tuple(int(c) for c in mod_channels or ())
+    if not channels or len(set(channels)) != len(channels):
+        raise ValueError(f"{kind} needs unique, non-empty mod_channels, got {mod_channels!r}")
+    if not all(0 <= c < num_tracks for c in channels):
+        raise ValueError(f"mod_channels {channels} out of range for num_tracks={num_tracks}")
+    return channels
+
+
+def register_track_head(name: str, num_tracks: int, kind: str = "mlp", mod_channels=None) -> None:
+    """Register a track head of ``kind``; idempotent for the same arguments.
+
+    ``mod_channels`` (``resid_chx`` only, required there) are the modulated channel indices,
+    stored in the head config's metadata.
+    """
     if kind not in HEAD_KINDS:
         raise ValueError(f"unknown head kind {kind!r}; expected one of {sorted(HEAD_KINDS)}")
+    channels = _check_mod_channels(kind, num_tracks, mod_channels)
     existing = get_custom_head_config(name)
     if existing is not None:
         if existing.num_tracks != num_tracks:
@@ -202,6 +253,12 @@ def register_track_head(name: str, num_tracks: int, kind: str = "mlp") -> None:
             raise ValueError(
                 f"head {name!r} already registered with kind={previous!r}, not {kind!r}"
             )
+        previous_channels = (existing.metadata or {}).get("mod_channels")
+        if previous_channels != channels:
+            raise ValueError(
+                f"head {name!r} already registered with mod_channels={previous_channels}, "
+                f"not {channels}"
+            )
         return
     register_custom_head(
         name,
@@ -210,6 +267,7 @@ def register_track_head(name: str, num_tracks: int, kind: str = "mlp") -> None:
             type=CustomHeadType.GENOME_TRACKS,
             output_type=dna_output.OutputType.RNA_SEQ,
             num_tracks=num_tracks,
+            metadata=None if channels is None else {"mod_channels": channels},
         ),
     )
     _REGISTERED_KINDS[name] = kind
@@ -332,19 +390,21 @@ def load_finetuned(
     *,
     detach_backbone: bool = True,
     device=None,
+    mod_channels=None,
 ):
     """Rebuild the training model and restore a ``save_checkpoint(save_full_model=True)`` dir.
 
     agft 0.1.12 ``load_checkpoint`` wraps full-model checkpoints with the base model's forward,
     which has no custom heads, so the model is rebuilt with :func:`load_model` instead and every
-    saved ``(params, state)`` leaf is checked against it before the restore.
+    saved ``(params, state)`` leaf is checked against it before the restore. ``mod_channels``:
+    see :func:`register_track_head` (``resid_chx``: the channels the run trained with).
     """
     import orbax.checkpoint as ocp
 
     from tisiago.seq2func.checkpoint import check_restorable, saved_leaf_shapes, tree_leaf_shapes
 
     path = Path(checkpoint_dir).resolve() / "checkpoint"
-    register_track_head(head, num_tracks, kind=kind)
+    register_track_head(head, num_tracks, kind=kind, mod_channels=mod_channels)
     model = load_model(base_checkpoint, head, detach_backbone=detach_backbone, device=device)
     template = (model._params, model._state)
     check_restorable(tree_leaf_shapes(template), saved_leaf_shapes(path))
@@ -417,11 +477,17 @@ def make_predict(model, head: str):
     return predict
 
 
-def label_backbone_params(params, head: str):
-    """Label leaves under ``head/<head>/`` as ``"head"`` and every other leaf ``"backbone"``."""
+def label_backbone_params(params, head: str, *, mod: bool = False):
+    """Label leaves under ``head/<head>/`` as ``"head"`` and every other leaf ``"backbone"``.
+
+    ``mod=True`` labels the head's leaves in a module whose name starts with ``mod_`` ``"mod"``.
+    """
 
     def label(path, _value):
-        return "head" if is_trainable_head_path(parameter_path_to_str(path), {head}) else "backbone"
+        parts = parameter_path_to_str(path).split("/")
+        if not is_trainable_head_path("/".join(parts), {head}):
+            return "backbone"
+        return "mod" if mod and len(parts) > 1 and parts[-2].startswith("mod_") else "head"
 
     return jax.tree_util.tree_map_with_path(label, params)
 
@@ -462,14 +528,43 @@ def make_optimizer(
     warmup_steps: int = 0,
     clip_norm: float | None = None,
     freeze_backbone_steps: int = 0,
+    mod_learning_rate: float | None = None,
 ) -> optax.GradientTransformation:
     """AdamW on the head only, or on head + backbone with a separate backbone learning rate.
 
     ``total_steps`` switches every learning rate to a warmup-cosine schedule; ``clip_norm``
     clips the global gradient norm before the optimizer; ``freeze_backbone_steps`` holds the
-    backbone learning rate at 0 for that many updates (head warm-up).
+    backbone learning rate at 0 for that many updates (head warm-up). ``mod_learning_rate``
+    gives the head's ``mod_*`` modules their own rate (same schedule shape and weight decay;
+    ``None``: the head's).
     """
     head_lr = make_schedule(learning_rate, total_steps, warmup_steps)
+    if mod_learning_rate is not None:
+        if heads_only:
+            backbone = optax.set_to_zero()
+        else:
+            if backbone_learning_rate is None:
+                backbone_learning_rate = learning_rate / 100
+            backbone = optax.adamw(
+                make_schedule(
+                    backbone_learning_rate, total_steps, warmup_steps, freeze_backbone_steps
+                ),
+                weight_decay=weight_decay,
+            )
+        inner = optax.multi_transform(
+            {
+                "head": optax.adamw(head_lr, weight_decay=weight_decay),
+                "mod": optax.adamw(
+                    make_schedule(mod_learning_rate, total_steps, warmup_steps),
+                    weight_decay=weight_decay,
+                ),
+                "backbone": backbone,
+            },
+            label_backbone_params(params, head, mod=True),
+        )
+        if clip_norm is None:
+            return inner
+        return optax.chain(optax.clip_by_global_norm(clip_norm), inner)
     if heads_only:
         return create_optimizer(
             params,
@@ -513,12 +608,13 @@ def make_train_step(
     frame_channels: tuple[int, ...] = (),
     frame_block: int = 10,
     freeze_backbone_steps: int = 0,
+    mod_learning_rate: float | None = None,
 ):
     """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
 
     ``heads_only=False`` also trains the backbone; load the model with ``detach_backbone=False``.
     ``frame_weight`` adds the codon-phase term on ``frame_channels`` (see ``loss.py``).
-    ``freeze_backbone_steps``: see :func:`make_optimizer`.
+    ``freeze_backbone_steps``, ``mod_learning_rate``: see :func:`make_optimizer`.
     """
     opt = make_optimizer(
         model._params,
@@ -531,6 +627,7 @@ def make_train_step(
         warmup_steps=warmup_steps,
         clip_norm=clip_norm,
         freeze_backbone_steps=freeze_backbone_steps,
+        mod_learning_rate=mod_learning_rate,
     )
     opt_state = opt.init(model._params)
     loss_fn = model.create_loss_fn_for_head(head)

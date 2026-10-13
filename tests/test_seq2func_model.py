@@ -390,7 +390,7 @@ def test_seqconv_registered_and_choices_match():
     from tisiago.seq2func.model import HEAD_KINDS, SEQUENCE_KINDS, SeqConvTrackHead
 
     assert HEAD_KINDS["seqconv"] is SeqConvTrackHead
-    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx", "resid_tx"}
+    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx", "resid_tx", "resid_chx"}
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
         assert set(action.choices) == set(HEAD_KINDS)
@@ -538,14 +538,14 @@ def test_seqconv_jitted_train_step_has_finite_grads():
     assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
 
 
-@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv", "seqconv_tx", "resid_tx"])
+@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv", "seqconv_tx", "resid_tx", "resid_chx"])
 def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatch, kind):
     import types
 
     from tisiago.seq2func import model as model_mod
 
     head = f"p6_test_load_{kind}"
-    register_track_head(head, 2, kind=kind)
+    register_track_head(head, 2, kind=kind, mod_channels=(1,) if kind == "resid_chx" else None)
     sentinel = object()
     seen = {}
 
@@ -562,7 +562,7 @@ def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatc
     monkeypatch.setattr(model_mod, "install_sequence_forward", fake_install)
     model = model_mod.load_model("ckpt", head, detach_backbone=False)
     assert model_mod._SEQUENCE_FREE_INIT is False
-    if kind in ("seqconv", "seqconv_tx", "resid_tx"):
+    if kind in ("seqconv", "seqconv_tx", "resid_tx", "resid_chx"):
         assert seen == {"free_init": True, "installed": ((head,), False)}
         assert model._predict == "sequence-forward"
     else:
@@ -901,6 +901,273 @@ def test_resid_tx_checkpoint_round_trip_and_matching_init(tmp_path):
             else:
                 want = base._params[module][leaf]
             np.testing.assert_array_equal(np.asarray(value), np.asarray(want))
+
+
+# --- resid_chx: resid_tx's modulation on the CHX channels only, own learning rate ---
+
+
+def _chx_forward(kind, emb, seq=None, channels=(1, 3)):
+    from tisiago.seq2func.model import HEAD_KINDS
+
+    metadata = {"mod_channels": channels} if kind == "resid_chx" else None
+    head = HEAD_KINDS[kind](name="h", output_type=None, num_tracks=4, metadata=metadata)
+    kwargs = {} if seq is None else {"sequence": seq}
+    return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), **kwargs)
+
+
+def test_resid_chx_registered_like_resid_tx():
+    from tisiago.seq2func import overfit
+    from tisiago.seq2func.model import (
+        HEAD_KINDS,
+        SEQUENCE_KINDS,
+        SEQUENCE_WIDTHS,
+        ResidChxTrackHead,
+    )
+
+    assert HEAD_KINDS["resid_chx"] is ResidChxTrackHead
+    assert "resid_chx" in SEQUENCE_KINDS
+    assert SEQUENCE_WIDTHS["resid_chx"] == SEQUENCE_WIDTHS["resid_tx"]
+    assert "resid_chx" in overfit.HEAD_CHOICES and "resid_chx" in overfit.TRANSCRIPT_KINDS
+    assert overfit.MOD_KINDS == {"resid_tx", "resid_chx"}
+    assert overfit.CHX_KINDS == {"resid_chx"}
+
+
+def test_resid_chx_equals_mlp_at_init_and_modulates_only_chx_channels():
+    from tisiago.seq2func.model import MOD_HIDDEN_CHX, MOD_SCALE
+
+    mlp = hk.without_apply_rng(hk.transform(lambda e: _chx_forward("mlp", e)))
+    chx = hk.without_apply_rng(hk.transform(lambda e, q: _chx_forward("resid_chx", e, q)))
+    rng = np.random.default_rng(0)
+    emb = jnp.asarray(rng.normal(size=(1, 40, 8)).astype(np.float32))
+    seq = _tx_sequences(rng, 1, 40)
+    mlp_params = mlp.init(jax.random.PRNGKey(0), emb)
+    params = chx.init(jax.random.PRNGKey(1), emb, seq)
+    assert MOD_HIDDEN_CHX == 256
+    assert params["h/~predict/mod_hidden"]["w"].shape == (31, 8 + 24, MOD_HIDDEN_CHX)
+    assert params["h/~predict/mod_output"]["w"].shape == (1, MOD_HIDDEN_CHX, 2)
+    for leaf in params["h/~predict/mod_output"].values():
+        assert float(jnp.abs(leaf).max()) == 0.0
+    params = {**params, **mlp_params}
+    base = np.asarray(mlp.apply(mlp_params, emb))
+    out = np.asarray(chx.apply(params, emb, seq))
+    np.testing.assert_array_equal(out, base)
+    for sign in (1.0, -1.0):
+        big = {"w": sign * 1e4 * jnp.ones((1, MOD_HIDDEN_CHX, 2)), "b": sign * 1e4 * jnp.ones(2)}
+        out = np.asarray(chx.apply({**params, "h/~predict/mod_output": big}, emb, seq))
+        np.testing.assert_array_equal(out[..., [0, 2]], base[..., [0, 2]])
+        assert not np.allclose(out[..., [1, 3]], base[..., [1, 3]])
+        assert np.isfinite(out).all()
+        np.testing.assert_array_less(out, base * np.exp(MOD_SCALE) * (1 + 1e-5) + 1e-30)
+        np.testing.assert_array_less(base * np.exp(-MOD_SCALE) * (1 - 1e-5) - 1e-30, out)
+
+
+def test_resid_chx_needs_mod_channels():
+    from tisiago.seq2func.model import sequence_free_init
+
+    chx = hk.without_apply_rng(
+        hk.transform(lambda e, q: _chx_forward("resid_chx", e, q, channels=()))
+    )
+    emb = jnp.zeros((1, 8, 8), jnp.float32)
+    with pytest.raises(ValueError, match="mod_channels"), sequence_free_init():
+        chx.init(jax.random.PRNGKey(0), emb, None)
+    with pytest.raises(ValueError, match="mod_channels"):
+        register_track_head("p6_test_chx_none", 4, kind="resid_chx")
+    with pytest.raises(ValueError, match="mod_channels"):
+        register_track_head("p6_test_chx_range", 4, kind="resid_chx", mod_channels=(1, 4))
+    with pytest.raises(ValueError, match="mod_channels"):
+        register_track_head("p6_test_chx_dup", 4, kind="resid_chx", mod_channels=(1, 1))
+    with pytest.raises(ValueError, match="mod_channels"):
+        register_track_head("p6_test_chx_mlp", 4, kind="mlp", mod_channels=(1,))
+    register_track_head("p6_test_chx_ok", 4, kind="resid_chx", mod_channels=[1, 3])
+    register_track_head("p6_test_chx_ok", 4, kind="resid_chx", mod_channels=(1, 3))
+    with pytest.raises(ValueError, match="mod_channels"):
+        register_track_head("p6_test_chx_ok", 4, kind="resid_chx", mod_channels=(0, 2))
+
+
+def _mod_fake_params():
+    return {
+        **_fake_params(),
+        "head/h/~predict/mod_hidden": {"w": jnp.ones((3, 2)), "b": jnp.ones((2,))},
+        "head/h/~predict/mod_output": {"w": jnp.ones((2, 2))},
+        "head/other/~predict/mod_output": {"w": jnp.ones((2, 2))},
+    }
+
+
+def test_label_backbone_params_mod_label():
+    params = _mod_fake_params()
+    plain = label_backbone_params(params, "h")
+    assert plain["head/h/~predict/mod_output"] == {"w": "head"}
+    labels = label_backbone_params(params, "h", mod=True)
+    assert labels["head/h/~predict/mod_hidden"] == {"w": "mod", "b": "mod"}
+    assert labels["head/h/~predict/mod_output"] == {"w": "mod"}
+    assert labels["head/h/~predict/hidden"] == {"w": "head", "b": "head"}
+    assert labels["head/other/~predict/mod_output"] == {"w": "backbone"}
+    assert labels["alphagenome/sequence_encoder/conv"] == {"w": "backbone"}
+
+
+@pytest.mark.parametrize("heads_only", [True, False])
+def test_make_optimizer_mod_learning_rate(heads_only):
+    params = _mod_fake_params()
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    opt = make_optimizer(
+        params,
+        "h",
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=heads_only,
+        backbone_learning_rate=1e-4,
+        mod_learning_rate=1e-3,
+        total_steps=40,
+        warmup_steps=0,
+        clip_norm=1e6,
+    )
+    updates, _ = opt.update(grads, opt.init(params), params)
+
+    def step(module):
+        return float(jnp.abs(updates[module]["w"]).mean())
+
+    assert step("head/h/~predict/hidden") == pytest.approx(1e-2, rel=1e-3)
+    assert step("head/h/~predict/mod_hidden") == pytest.approx(1e-3, rel=1e-3)
+    assert step("head/h/~predict/mod_output") == pytest.approx(1e-3, rel=1e-3)
+    bb = step("alphagenome/sequence_encoder/conv")
+    assert bb == 0.0 if heads_only else bb == pytest.approx(1e-4, rel=1e-3)
+
+
+def test_make_optimizer_mod_learning_rate_none_matches_default():
+    params = _mod_fake_params()
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    for heads_only in (True, False):
+        kw = dict(learning_rate=1e-2, weight_decay=1e-4, heads_only=heads_only, total_steps=10)
+        a, b = (
+            make_optimizer(params, "h", **kw),
+            make_optimizer(params, "h", mod_learning_rate=None, **kw),
+        )
+        ua, _ = a.update(grads, a.init(params), params)
+        ub, _ = b.update(grads, b.init(params), params)
+        for x, y in zip(jax.tree_util.tree_leaves(ua), jax.tree_util.tree_leaves(ub), strict=True):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+
+def _chx_model(head, seq_len=48, channels=(1,)):
+    register_track_head(head, 2, kind="resid_chx", mod_channels=channels)
+    model = _FakeModel([head], 2, kind="resid_chx", seq_len=seq_len, width=24)
+    from tisiago.seq2func.model import install_sequence_forward
+
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    return model
+
+
+@pytest.mark.parametrize("backbone_lr", [0.0, 1e-3])
+def test_resid_chx_step_with_zero_head_lr_moves_only_mod_leaves(backbone_lr):
+    from tisiago.seq2func.model import make_train_step
+
+    head = "p6_test_chx_step"
+    model = _chx_model(head)
+    rng = np.random.default_rng(0)
+    batch = {
+        "sequences": _tx_sequences(rng, 2, 48),
+        "targets": jnp.asarray(rng.poisson(2, (2, 48, 2)).astype(np.float32)),
+        "mask": jnp.ones((2, 48, 2), bool),
+    }
+    step, opt_state = make_train_step(
+        model,
+        head,
+        learning_rate=0.0,
+        weight_decay=1e-4,
+        heads_only=False,
+        backbone_learning_rate=backbone_lr,
+        mod_learning_rate=1e-2,
+        frame_weight=5.0,
+        frame_channels=(1,),
+        frame_block=2,
+    )
+    params, state = model._params, model._state
+    new_params, _, aux = step(params, state, opt_state, batch)
+    assert np.isfinite(float(aux["loss"]))
+    scope = f"head/{head}/~predict/"
+    for module, leaves in params.items():
+        for name, value in leaves.items():
+            moved = not np.array_equal(np.asarray(value), np.asarray(new_params[module][name]))
+            if module == scope + "mod_output":
+                assert moved
+            elif module.startswith(scope + "mod_"):
+                pass  # mod_hidden: zero gradient behind the zero mod_output, weight decay only
+            elif module.startswith(scope):
+                assert not moved, module  # the base branch at head lr 0
+            elif backbone_lr == 0.0:
+                assert not moved, module
+    if backbone_lr:
+        assert not np.array_equal(
+            np.asarray(params["fake_backbone"]["w"]), np.asarray(new_params["fake_backbone"]["w"])
+        )
+
+
+def test_resid_chx_checkpoint_round_trip_and_matching_init(tmp_path, monkeypatch):
+    from alphagenome_ft.custom_heads import get_custom_head_config
+
+    from tisiago.seq2func import model as model_mod
+    from tisiago.seq2func.model import make_predict, restore_init
+
+    head = "p6_test_chx_ck"
+    source = _chx_model(head)
+    source._params = _perturbed(source._params, 0.25)
+    _save_model(source, tmp_path / "best")
+    seq = _tx_sequences(np.random.default_rng(1), 1, 48)
+    want = np.asarray(make_predict(source, head)(source._params, source._state, seq))
+
+    def fake_load_model(checkpoint, name, *, detach_backbone=True, device=None):
+        model = _FakeModel([name], 2, kind="resid_chx", width=24)
+        return model_mod.install_sequence_forward(
+            model, [name], detach_backbone=detach_backbone, backbone=_fake_backbone()
+        )
+
+    monkeypatch.setattr(model_mod, "load_model", fake_load_model)
+    loaded = model_mod.load_finetuned(
+        str(tmp_path / "best"), "weights", head, 2, "resid_chx", mod_channels=(1,)
+    )
+    assert tuple(get_custom_head_config(head).metadata["mod_channels"]) == (1,)
+    np.testing.assert_array_equal(
+        np.asarray(make_predict(loaded, head)(loaded._params, loaded._state, seq)), want
+    )
+    with pytest.raises(ValueError, match="mod_channels"):
+        model_mod.load_finetuned(
+            str(tmp_path / "best"), "weights", head, 2, "resid_chx", mod_channels=(0,)
+        )
+
+    mlp_head = "p6_test_chx_mlp"
+    register_track_head(mlp_head, 2, kind="mlp")
+    base = _FakeModel([mlp_head], 2, kind="mlp")
+    base._params = _perturbed(base._params, 0.5)
+    name = mlp_head + "_r"
+    base_scope = f"head/{mlp_head}/~predict/"
+    saved = {k.replace(base_scope, f"head/{name}/~predict/"): v for k, v in base._params.items()}
+    renamed = _FakeModel([mlp_head], 2, kind="mlp")
+    renamed._params, renamed._state = saved, base._state
+    _save_model(renamed, tmp_path / "mlp_as_chx")
+    target = _chx_model(name)
+    fresh = jax.tree_util.tree_map(np.asarray, target._params)
+    restore_init(target, str(tmp_path / "mlp_as_chx"), name, reuse_head="matching")
+    scope = f"head/{name}/~predict/"
+    for module, leaves in target._params.items():
+        for leaf, value in leaves.items():
+            if module in (scope + "hidden", scope + "output"):
+                want = saved[module][leaf]
+            elif module.startswith(scope):
+                want = fresh[module][leaf]
+            else:
+                want = base._params[module][leaf]
+            np.testing.assert_array_equal(np.asarray(value), np.asarray(want))
+    # matching init leaves predictions equal to the mlp source's (mod_output zero)
+    mlp_pred = np.asarray(_mlp_predict(base, mlp_head, seq))
+    chx_pred = np.asarray(make_predict(target, name)(target._params, target._state, seq))
+    np.testing.assert_array_equal(chx_pred, mlp_pred)
+
+
+def _mlp_predict(model, head, seq):
+    from tisiago.seq2func.model import install_sequence_forward, make_predict
+
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    return make_predict(model, head)(model._params, model._state, seq[..., :4])
 
 
 # --- two-stage init: backbone freeze and restore from a finished run ---

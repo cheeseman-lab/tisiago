@@ -25,8 +25,10 @@ HEAD = "p6_overfit"
 WINDOW = 131_072
 TIMING_SKIP = 2
 PROFILE_KL_MAX = 1.0
-HEAD_CHOICES = ("mlp", "conv", "seqconv", "seqconv_tx", "resid_tx")
-TRANSCRIPT_KINDS = frozenset({"seqconv_tx", "resid_tx"})
+HEAD_CHOICES = ("mlp", "conv", "seqconv", "seqconv_tx", "resid_tx", "resid_chx")
+TRANSCRIPT_KINDS = frozenset({"seqconv_tx", "resid_tx", "resid_chx"})
+MOD_KINDS = frozenset({"resid_tx", "resid_chx"})
+CHX_KINDS = frozenset({"resid_chx"})
 
 
 def fetch_onehot(genome: str, chrom: str, start: int, end: int) -> np.ndarray:
