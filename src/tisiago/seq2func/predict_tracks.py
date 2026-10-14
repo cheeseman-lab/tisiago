@@ -17,6 +17,13 @@ counts with one generator per library and replicate seeded from ``--seed`` (``--
 draws ``k * Poisson(expectation / k)``, matching BAMs that carry every alignment ``k`` times);
 ``--mode expected`` writes the expectation rounded to the nearest integer.
 
+``--match-depth`` first rescales each library's pooled prediction so its total over the written
+region equals the real pooled total there (factors in the manifest). ``--source real-resample``
+replaces the model by the real pooled tracks (already in Ribo-TISH convention, read back to
+canonical coordinates and re-shifted once on writing) and draws replicates the same way: the
+same-pipeline noise ceiling for the comparison; it needs no checkpoint
+(``--condition --tracks-dir --windows-dir --out-dir``).
+
 Overlapping windows are stitched by nearest centre: each position takes the prediction of the
 window whose centre is nearest (ties to the earlier window), i.e. the central part of every
 window, and is written once. The written region is the union of the split's windows.
@@ -44,6 +51,7 @@ from tisiago.seq2func.windows import merge_spans
 LIBRARIES = ("tis", "chx")
 REPS = (1, 2)
 MODES = ("sample", "expected")
+SOURCES = ("model", "real-resample")
 SPLIT_FILES = {"val": "val.parquet", "test": "test.parquet"}
 MANIFEST = "predict_tracks.json"
 
@@ -159,20 +167,57 @@ def _draw(expectation: np.ndarray, mode: str, rng, copies: int) -> np.ndarray:
     return copies * rng.poisson(np.maximum(expectation, 0.0) / copies).astype(np.float64)
 
 
+def pooled_real_arrays(
+    tracks_dir: str | Path, condition: str, region: dict[str, list[tuple[int, int]]]
+) -> dict[tuple[str, str], dict[str, tuple[np.ndarray, np.ndarray]]]:
+    """Real replicate-pooled counts in ``region`` per (library, strand) and chromosome.
+
+    Values are ``(canonical positions, counts)`` sorted by position: the sum of the replicate
+    tracks with the minus strand shifted back out of the Ribo-TISH convention.
+    """
+    out = {}
+    for library in LIBRARIES:
+        for strand, name in STRAND_FILES.items():
+            total: dict[str, Counter] = {}
+            for rep in REPS:
+                prefix = track_prefix(tracks_dir, condition, library, rep)
+                counts = region_counts(f"{prefix}.{name}.bw", region, strand_shift(strand))
+                for chrom, counter in counts.items():
+                    total.setdefault(chrom, Counter()).update(counter)
+            per_chrom = {}
+            for chrom, counter in total.items():
+                positions = np.array(sorted(counter), dtype=np.int64)
+                values = np.array([counter[p] for p in positions.tolist()], dtype=np.float64)
+                per_chrom[chrom] = (positions - strand_shift(strand), values)
+            out[(library, strand)] = per_chrom
+    return out
+
+
+def _real_span(arrays: dict, chrom: str, lo: int, hi: int) -> np.ndarray:
+    """Dense counts over canonical ``[lo, hi)`` from :func:`pooled_real_arrays` entries."""
+    dense = np.zeros(max(hi - lo, 0))
+    positions, values = arrays.get(chrom, (np.empty(0, np.int64), np.empty(0)))
+    i, j = np.searchsorted(positions, [lo, hi])
+    dense[positions[i:j] - lo] = values[i:j]
+    return dense
+
+
 def predict_condition(
-    predict_fn: Callable[[dict], np.ndarray],
+    predict_fn: Callable[[dict], np.ndarray] | None,
     windows: pd.DataFrame,
     *,
-    fasta: str | Path,
+    fasta: str | Path | None = None,
     tracks_dir: str | Path,
-    genes: pd.DataFrame,
+    genes: pd.DataFrame | None = None,
     condition: str,
-    conditions: Sequence[str],
+    conditions: Sequence[str] = (),
     out_dir: str | Path,
     mode: str = "sample",
     seed: int = 0,
     copies: int = 1,
     mask_unexpressed: bool = False,
+    match_depth: bool = False,
+    source: str = "model",
     transcripts=None,
     prefetch: int = 4,
     meta: dict | None = None,
@@ -181,16 +226,29 @@ def predict_condition(
 
     ``predict_fn(batch)`` maps an ``iterate`` batch to ``(1, S, C)`` pooled predictions in
     :func:`channel_layout` order of ``conditions`` (canonical P-sites). ``mask_unexpressed``
-    zeroes positions outside the loss mask (unexpressed genes) before scaling.
+    zeroes positions outside the loss mask (unexpressed genes) before scaling. ``match_depth``
+    rescales each library's pooled prediction so its total over the written region equals the
+    real pooled total there (one factor per library; the whole prediction is held in memory).
+    ``source="real-resample"`` replaces the model by the real pooled tracks as the expectation
+    (the same-pipeline noise ceiling); ``predict_fn``, ``fasta``, ``genes`` are then unused.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
+    if source not in SOURCES:
+        raise ValueError(f"source must be one of {SOURCES}, not {source!r}")
     if copies < 1:
         raise ValueError("copies must be >= 1")
-    layout = channel_layout(conditions)
-    channel = {(lib, s): i for i, (c, lib, s) in enumerate(layout) if c == condition}
-    if not channel:
-        raise ValueError(f"{condition} is not among {tuple(conditions)}")
+    model = source == "model"
+    channel = {}
+    if model:
+        layout = channel_layout(conditions)
+        channel = {
+            (lib, s): i
+            for i, (c, lib, s) in enumerate(layout)
+            if c == condition and lib in LIBRARIES
+        }
+        if not channel:
+            raise ValueError(f"{condition} is not among {tuple(conditions)}")
     sizes = chrom_sizes_of(f"{track_prefix(tracks_dir, condition, 'tis', 1)}.plus.bw")
     order = {chrom: i for i, (chrom, _) in enumerate(sizes)}
     unknown = set(windows.chrom) - set(order)
@@ -202,6 +260,59 @@ def predict_condition(
     region = region_of(windows)
     fractions = replicate_fractions(tracks_dir, condition, region)
     size_of = dict(sizes)
+
+    def expectations():
+        """Yield ``(chrom, lo, hi, {(library, strand): pooled expectation})`` per window."""
+        if not model:
+            real = pooled_real_arrays(tracks_dir, condition, region)
+            for i, row in enumerate(windows.itertuples()):
+                lo, hi = spans[i]
+                yield (
+                    row.chrom,
+                    lo,
+                    hi,
+                    {key: _real_span(arrays, row.chrom, lo, hi) for key, arrays in real.items()},
+                )
+            return
+        batches = iterate(
+            windows,
+            fasta=fasta,
+            tracks_dir=tracks_dir,
+            conditions=conditions,
+            genes=genes,
+            seed=0,
+            augment_examples=False,
+            loop=False,
+            prefetch=prefetch,
+            transcripts=transcripts,
+        )
+        try:
+            for i, batch in enumerate(batches):
+                row = windows.iloc[i]
+                start, (lo, hi) = int(row.start), spans[i]
+                pred = np.asarray(predict_fn(batch), dtype=np.float64)[0]
+                if mask_unexpressed:
+                    pred = np.where(batch["mask"][0], pred, 0.0)
+                pred = pred[lo - start : hi - start]
+                yield row.chrom, lo, hi, {key: pred[:, c] for key, c in channel.items()}
+        finally:
+            batches.close()
+
+    stream = expectations()
+    expected = dict.fromkeys(LIBRARIES, 0.0)
+    factors = dict.fromkeys(LIBRARIES, 1.0)
+    unscaled = None
+    if match_depth:
+        stream = list(stream)
+        for _, _, _, pooled_by in stream:
+            for (library, _), pooled in pooled_by.items():
+                expected[library] += float(pooled.sum())
+        for library in LIBRARIES:
+            real_total = sum(fractions[library]["totals"])
+            if expected[library] <= 0:
+                raise ValueError(f"{condition} {library}: no predicted counts to depth-match")
+            factors[library] = real_total / expected[library]
+        unscaled, expected = expected, dict.fromkeys(LIBRARIES, 0.0)
 
     out_dir = Path(out_dir)
     writers = {}
@@ -215,34 +326,15 @@ def predict_condition(
                 bw = pyBigWig.open(str(prefix.with_name(f"{prefix.name}.{name}.bw")), "w")
                 bw.addHeader(sizes)
                 writers[(library, rep, strand)] = bw
-    expected = dict.fromkeys(LIBRARIES, 0.0)
     written = {lib: [0.0] * len(REPS) for lib in LIBRARIES}
-    batches = iterate(
-        windows,
-        fasta=fasta,
-        tracks_dir=tracks_dir,
-        conditions=conditions,
-        genes=genes,
-        seed=0,
-        augment_examples=False,
-        loop=False,
-        prefetch=prefetch,
-        transcripts=transcripts,
-    )
     try:
-        for i, batch in enumerate(batches):
-            row = windows.iloc[i]
-            start, (lo, hi) = int(row.start), spans[i]
-            pred = np.asarray(predict_fn(batch), dtype=np.float64)[0]
-            if mask_unexpressed:
-                pred = np.where(batch["mask"][0], pred, 0.0)
-            pred = pred[lo - start : hi - start]
+        for chrom, lo, hi, pooled_by in stream:
             for library in LIBRARIES:
                 for strand in STRAND_FILES:
-                    pooled = pred[:, channel[(library, strand)]]
+                    pooled = pooled_by[(library, strand)] * factors[library]
                     expected[library] += float(pooled.sum())
                     positions = np.arange(lo, hi) + strand_shift(strand)
-                    inside = (positions >= 0) & (positions < size_of[row.chrom])
+                    inside = (positions >= 0) & (positions < size_of[chrom])
                     for r, rep in enumerate(REPS):
                         share = fractions[library]["fractions"][r]
                         values = _draw(pooled * share, mode, rngs[(library, rep)], copies)
@@ -250,24 +342,29 @@ def predict_condition(
                         if not keep.any():
                             continue
                         writers[(library, rep, strand)].addEntries(
-                            row.chrom,
+                            chrom,
                             positions[keep].tolist(),
                             values=values[keep].tolist(),
                             span=1,
                         )
                         written[library][r] += float(values[keep].sum())
     finally:
-        batches.close()
+        if not isinstance(stream, list):
+            stream.close()
         for bw in writers.values():
             bw.close()
 
     manifest = {
         **(meta or {}),
         "condition": condition,
+        "source": source,
         "mode": mode,
         "seed": seed,
         "copies": copies,
         "mask_unexpressed": mask_unexpressed,
+        "match_depth": match_depth,
+        "depth_factors": factors if match_depth else None,
+        "unscaled_expected_totals": unscaled,
         "stitching": "nearest_centre",
         "windows": len(windows),
         "chroms": list(region),
@@ -290,8 +387,10 @@ def _run_arg(checkpoint: Path, key: str, default):
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--checkpoint", type=Path, required=True, help="run's best/ or last/")
-    ap.add_argument("--arm", required=True, help="'shared' or 'condition:<C>'")
+    ap.add_argument(
+        "--checkpoint", type=Path, help="run's best/ or last/ (required for --source model)"
+    )
+    ap.add_argument("--arm", help="'shared' or 'condition:<C>' (required for --source model)")
     ap.add_argument("--condition", help="condition to write (default: the arm's only one)")
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
@@ -299,6 +398,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--expression", type=Path, help="default: run.json, else data/p6/expression")
     ap.add_argument("--tracks-dir", type=Path, help="real tracks; default: run.json")
     ap.add_argument("--out-dir", type=Path, help="default: <run>/predicted_<split>")
+    ap.add_argument(
+        "--source",
+        choices=SOURCES,
+        default="model",
+        help="model: checkpoint predictions; real-resample: Poisson resample of the real pooled\n"
+        "tracks (same-pipeline noise ceiling; no checkpoint needed)",
+    )
+    ap.add_argument(
+        "--match-depth",
+        action="store_true",
+        help="scale each library's pooled prediction to the real pooled total over the region",
+    )
     ap.add_argument("--mode", choices=MODES, default="sample")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--copies", type=int, default=1, help="draw k * Poisson(expectation / k)")
@@ -319,67 +430,94 @@ def main() -> None:
     args = ap.parse_args()
     if args.split == "test" and not args.i_am_final:
         ap.error("--split test reads the held-out chromosomes; pass --i-am-final to confirm")
-    from tisiago.seq2func.evaluate import (
-        head_kind_of,
-        load_predict_fn,
-        load_transcripts,
-        tracks_dir_of,
-    )
-    from tisiago.seq2func.train import parse_arm
+    model = args.source == "model"
+    if model and not (args.checkpoint and args.arm):
+        ap.error("--checkpoint and --arm are required for --source model")
+    if not model and not (args.condition or args.arm):
+        ap.error("--source real-resample needs --condition (or --arm)")
+    conditions: tuple[str, ...] = ()
+    if args.arm:
+        from tisiago.seq2func.train import parse_arm
 
-    try:
-        _, conditions = parse_arm(args.arm)
-    except ValueError as exc:
-        ap.error(str(exc))
+        try:
+            _, conditions = parse_arm(args.arm)
+        except ValueError as exc:
+            ap.error(str(exc))
     condition = args.condition or (conditions[0] if len(conditions) == 1 else None)
-    if condition not in conditions:
-        ap.error(f"--condition must be one of {conditions}")
-    for flag in ("genome", "base_checkpoint"):
-        if not getattr(args, flag):
-            ap.error(f"--{flag.replace('_', '-')} is required (or set it in .env)")
-    out_dir = args.out_dir or args.checkpoint.parent / f"predicted_{args.split}"
+    if condition is None or (conditions and condition not in conditions):
+        ap.error(f"--condition must be one of {conditions}" if conditions else "--condition needed")
+    if model:
+        for flag in ("genome", "base_checkpoint"):
+            if not getattr(args, flag):
+                ap.error(f"--{flag.replace('_', '-')} is required (or set it in .env)")
+    if args.out_dir:
+        out_dir = args.out_dir
+    elif args.checkpoint:
+        out_dir = args.checkpoint.parent / f"predicted_{args.split}"
+    else:
+        ap.error("--out-dir is required without --checkpoint")
     if (out_dir / condition / MANIFEST).exists() and not args.overwrite:
         ap.error(f"{out_dir / condition / MANIFEST} exists; pass --overwrite to replace")
-    windows_dir = args.windows_dir or _run_arg(args.checkpoint, "windows_dir", "data/p6/windows")
-    expression = args.expression or _run_arg(
-        args.checkpoint, "expression", "data/p6/expression/expression.parquet"
-    )
-    tracks_dir = args.tracks_dir or tracks_dir_of(args.checkpoint)
+    if args.checkpoint:
+        windows_dir = args.windows_dir or _run_arg(
+            args.checkpoint, "windows_dir", "data/p6/windows"
+        )
+    else:
+        windows_dir = args.windows_dir or Path("data/p6/windows")
+    if args.tracks_dir:
+        tracks_dir = args.tracks_dir
+    elif args.checkpoint:
+        from tisiago.seq2func.evaluate import tracks_dir_of
+
+        tracks_dir = tracks_dir_of(args.checkpoint)
+    else:
+        ap.error("--tracks-dir is required without --checkpoint")
     windows = pd.read_parquet(windows_dir / SPLIT_FILES[args.split])
     if args.max_windows is not None:
         windows = windows.iloc[: args.max_windows]
-    genes = pd.read_parquet(expression).reset_index(drop=True)
-    genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
-    head_kind = args.head or head_kind_of(args.checkpoint)
-    predict_fn = load_predict_fn(
-        args.checkpoint, args.arm, base_checkpoint=args.base_checkpoint, head_kind=head_kind
-    )
     meta = {
-        "checkpoint": str(args.checkpoint),
+        "checkpoint": str(args.checkpoint) if args.checkpoint else None,
         "arm": args.arm,
-        "head": head_kind,
         "split": args.split,
         "max_windows": args.max_windows,
         "windows_dir": str(windows_dir),
-        "expression": str(expression),
         "tracks_dir": str(tracks_dir),
     }
+    kwargs = {}
+    if model:
+        from tisiago.seq2func.evaluate import head_kind_of, load_predict_fn, load_transcripts
+
+        expression = args.expression or _run_arg(
+            args.checkpoint, "expression", "data/p6/expression/expression.parquet"
+        )
+        genes = pd.read_parquet(expression).reset_index(drop=True)
+        genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
+        head_kind = args.head or head_kind_of(args.checkpoint)
+        kwargs = dict(
+            predict_fn=load_predict_fn(
+                args.checkpoint, args.arm, base_checkpoint=args.base_checkpoint, head_kind=head_kind
+            ),
+            fasta=args.genome,
+            genes=genes,
+            conditions=conditions,
+            transcripts=load_transcripts(head_kind, args.gtf),
+        )
+        meta |= {"head": head_kind, "expression": str(expression)}
     manifest = predict_condition(
-        predict_fn,
+        kwargs.pop("predict_fn", None),
         windows,
-        fasta=args.genome,
         tracks_dir=tracks_dir,
-        genes=genes,
         condition=condition,
-        conditions=conditions,
         out_dir=out_dir,
         mode=args.mode,
         seed=args.seed,
         copies=args.copies,
         mask_unexpressed=args.mask_unexpressed,
-        transcripts=load_transcripts(head_kind, args.gtf),
+        match_depth=args.match_depth,
+        source=args.source,
         prefetch=args.prefetch,
         meta=meta,
+        **kwargs,
     )
     print(json.dumps(manifest, indent=2), flush=True)
 

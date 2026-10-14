@@ -279,3 +279,138 @@ def test_test_split_refuses_without_final_flag(monkeypatch, capsys):
     with pytest.raises(SystemExit):
         predict_tracks.main()
     assert "--i-am-final" in capsys.readouterr().err
+
+
+def _flat_model(value):
+    def predict(batch):
+        return np.full_like(batch["targets"], value)
+
+    return predict
+
+
+def _run(world, out, predict_fn=None, **kwargs):
+    return predict_condition(
+        predict_fn,
+        WINDOWS,
+        fasta=world["fasta"],
+        tracks_dir=world["tracks"],
+        genes=_genes(),
+        condition="K562",
+        conditions=("K562",),
+        out_dir=out,
+        **kwargs,
+    )
+
+
+def test_match_depth_scales_to_real_pooled_total_and_records_factor(world):
+    _write_reps(world["tracks"], {"chr7": {10: 800}}, {}, reps=(1, 2, "pooled"))
+    # real pooled total in the region: 1600 per library; flat 8 over 200 bases x 2 strands = 3200
+    off = _run(world, world["out"].with_name("off"), _flat_model(8.0), mode="expected")
+    on = _run(world, world["out"], _flat_model(8.0), mode="expected", match_depth=True)
+    assert off["match_depth"] is False and off["depth_factors"] is None
+    assert on["match_depth"] is True and on["source"] == "model"
+    assert on["depth_factors"] == pytest.approx({"tis": 0.5, "chx": 0.5})
+    assert on["unscaled_expected_totals"]["tis"] == pytest.approx(3200.0)
+    assert on["expected_totals"]["tis"] == pytest.approx(1600.0)
+    for name, per_position in (("off", 4.0), ("out", 2.0)):
+        out = world["out"] if name == "out" else world["out"].with_name(name)
+        prefix = track_prefix(out, "K562", "tis", 1)
+        values = read_bigwig_counts(f"{prefix}.plus.bw")["chr7"].values()
+        assert set(values) == {per_position}
+    saved = json.loads((world["out"] / "K562" / "predict_tracks.json").read_text())
+    assert saved["depth_factors"]["chx"] == pytest.approx(0.5)
+
+
+def test_match_depth_sampled_total_near_real_total(world):
+    _write_reps(world["tracks"], {"chr7": {10: 500}}, {}, reps=(1, 2, "pooled"))
+    manifest = _run(world, world["out"], _flat_model(6.0), mode="sample", seed=2, match_depth=True)
+    for library in ("tis", "chx"):
+        assert abs(sum(manifest["written_totals"][library]) - 1000) < 150
+
+
+def test_real_resample_expectation_is_real_pooled_split_by_fraction(world):
+    # equal replicate totals (8 each); minus file 201 is canonical 200, outside the region
+    _write_reps(world["tracks"], {"chr7": {10: 6}}, {"chr7": {200: 2, 201: 5}}, reps=(1,))
+    _write_reps(world["tracks"], {"chr7": {10: 2}}, {"chr7": {200: 6, 201: 5}}, reps=(2,))
+    manifest = _run(world, world["out"], None, mode="expected", source="real-resample")
+    assert manifest["source"] == "real-resample"
+    assert manifest["expected_totals"]["tis"] == pytest.approx(16.0)
+    for library in ("tis", "chx"):
+        for rep in (1, 2):
+            prefix = track_prefix(world["out"], "K562", library, rep)
+            assert dict(read_bigwig_counts(f"{prefix}.plus.bw")["chr7"]) == {10: 4.0}
+            # file coordinates preserved (not shifted twice); 201 stays out of the region
+            assert dict(read_bigwig_counts(f"{prefix}.minus.bw")["chr7"]) == {200: 4.0}
+
+
+def test_real_resample_minus_strand_roundtrips_through_psites(world):
+    pytest.importorskip("pysam")
+    from tisiago.seq2func.synthetic_bam import tracks_to_bam
+
+    _write_reps(world["tracks"], {}, {"chr7": {100: 4}}, reps=(1, 2))
+    _run(world, world["out"], None, mode="expected", source="real-resample")
+    prefix = track_prefix(world["out"], "K562", "tis", 1)
+    bam = world["out"] / "tis_rep1.bam"
+    tracks_to_bam(f"{prefix}.plus.bw", f"{prefix}.minus.bw", bam)
+    assert _psites(bam) == Counter({("chr7", "-", 100): 4})
+
+
+def test_real_resample_sampling_is_seeded(world):
+    _write_reps(world["tracks"], {"chr7": {10: 300, 50: 300}}, {}, reps=(1, 2))
+
+    def read(name, seed, rep=1):
+        out = world["out"].with_name(name)
+        _run(world, out, None, mode="sample", seed=seed, source="real-resample")
+        prefix = track_prefix(out, "K562", "tis", rep)
+        return read_bigwig_counts(f"{prefix}.plus.bw")["chr7"]
+
+    a, b, c = read("a", 5), read("b", 5), read("c", 6)
+    assert a == b and a != c
+    assert set(a) == {10, 50}
+    assert 400 < sum(a.values()) < 800  # Poisson around 600 per replicate
+
+
+def test_real_resample_needs_no_model_or_genome(world):
+    _write_reps(world["tracks"], {"chr7": {10: 2}}, {}, reps=(1, 2))
+    manifest = predict_condition(
+        None,
+        WINDOWS,
+        tracks_dir=world["tracks"],
+        condition="K562",
+        out_dir=world["out"],
+        mode="expected",
+        source="real-resample",
+    )
+    assert manifest["windows"] == 3
+
+
+def test_unknown_source_rejected(world):
+    with pytest.raises(ValueError, match="source"):
+        _run(world, world["out"], None, source="oracle")
+
+
+def test_real_resample_cli_runs_without_checkpoint(world, monkeypatch, tmp_path):
+    _write_reps(world["tracks"], {"chr7": {10: 4}}, {}, reps=(1, 2))
+    windows_dir = tmp_path / "win"
+    windows_dir.mkdir()
+    WINDOWS.to_parquet(windows_dir / "val.parquet")
+    argv = [
+        "predict_tracks",
+        "--source",
+        "real-resample",
+        "--condition",
+        "K562",
+        "--tracks-dir",
+        str(world["tracks"]),
+        "--windows-dir",
+        str(windows_dir),
+        "--out-dir",
+        str(world["out"]),
+        "--mode",
+        "expected",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    predict_tracks.main()
+    saved = json.loads((world["out"] / "K562" / "predict_tracks.json").read_text())
+    assert saved["source"] == "real-resample" and saved["checkpoint"] is None
+    assert saved["tracks_dir"] == str(world["tracks"])
