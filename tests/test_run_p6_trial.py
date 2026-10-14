@@ -46,6 +46,8 @@ def fake(tmp_path):
         "P6_TRIAL_BASE": str(tmp_path / "no_base.json"),
         "P6_TRIAL_RESULTS": str(tmp_path / "results.tsv"),
         "P6_TRIAL_RUNS_DIR": str(tmp_path / "runs"),
+        "TISIAGO_AGFT_PARTITION": "nvidia-A6000-20",
+        "P6_TRIAL_LANES": "nvidia-A6000-20 nvidia-A6000-20",
     }
 
     def run(*args, squeue="", reset=True, **extra):
