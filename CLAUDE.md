@@ -103,6 +103,8 @@ src/tisiago/
     samples.py, psite.py, tracks.py   per-sample P-site tracks from BAMs
     synthetic_bam.py                  synthetic BAMs for tests
     ribotish.py, roundtrip.py         Ribo-TISH call parsing + P6.0 round trip
+    predict_tracks.py                 predicted TIS/CHX tracks -> per-replicate bigWigs (GPU)
+    predicted_calls.py                Ribo-TISH on predicted vs real tracks, same pipeline
     qc.py                             replicate / frame QC
     targets.py, augment.py, masking.py   window targets, augmentation, loss masks
     loss.py, model.py                 profile loss, agft model + 6-channel heads

@@ -44,6 +44,36 @@ def ribotish_version(ribotish: str) -> str:
     return lines[0] if lines else "unknown"
 
 
+def run_ribotish(
+    condition: str,
+    tracks_dir: Path,
+    work_dir: Path,
+    gtf: Path,
+    fasta: Path,
+    ribotish: str,
+    nproc: int = 1,
+) -> pd.DataFrame:
+    """Synthetic BAMs from ``tracks_dir`` -> Ribo-TISH predict in ``work_dir``; all candidates."""
+    gtf, fasta = Path(gtf).resolve(), Path(fasta).resolve()
+    work_dir = Path(work_dir).resolve()
+    inputs = prepare_inputs(condition, Path(tracks_dir).resolve(), work_dir)
+    output = work_dir / f"{condition}_TIS_predict.txt"
+    argv = predict_command(
+        ribotish,
+        inputs["tis_bams"],
+        inputs["chx_bams"],
+        inputs["tis_paras"],
+        inputs["chx_paras"],
+        gtf,
+        fasta,
+        output,
+        work_dir / "tisBackground.txt",
+        nproc=nproc,
+    )
+    subprocess.run(argv, check=True, cwd=work_dir)
+    return pd.read_csv(work_dir / f"{condition}_TIS_predict_all.txt", sep="\t")
+
+
 def run_condition(
     condition: str,
     tracks_dir: Path,
@@ -62,24 +92,7 @@ def run_condition(
     fasta = fasta or os.environ.get("TISIAGO_GENOME")
     if not gtf or not fasta:
         raise ValueError("GTF and FASTA are required (or set TISIAGO_GTF / TISIAGO_GENOME)")
-    gtf, fasta = Path(gtf).resolve(), Path(fasta).resolve()
-    work_dir = Path(work_dir).resolve()
-    inputs = prepare_inputs(condition, Path(tracks_dir).resolve(), work_dir)
-    output = work_dir / f"{condition}_TIS_predict.txt"
-    argv = predict_command(
-        ribotish,
-        inputs["tis_bams"],
-        inputs["chx_bams"],
-        inputs["tis_paras"],
-        inputs["chx_paras"],
-        gtf,
-        fasta,
-        output,
-        work_dir / "tisBackground.txt",
-        nproc=nproc,
-    )
-    subprocess.run(argv, check=True, cwd=work_dir)
-    ours = pd.read_csv(work_dir / f"{condition}_TIS_predict_all.txt", sep="\t")
+    ours = run_ribotish(condition, tracks_dir, work_dir, gtf, fasta, ribotish, nproc=nproc)
     reference = pd.read_csv(reference_all, sep="\t")
     report = {
         "condition": condition,
