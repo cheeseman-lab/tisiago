@@ -19,21 +19,26 @@
 # exist; it is linked into the run's eval/ so evaluate never recomputes it. train.py refuses an
 # --init-from run that has not finished, so chain on the source's train job with --after.
 #
-# GPU concurrency (at most 2 GPU jobs running). Counted: every GPU job of the user (tres gpu or
-# an nvidia partition) in any state, minus --ignore-jobs. A failed squeue aborts. Trial GPU jobs
-# run in two job-name lanes, ${USER}_tisiago_p6ar_lane{0,1}, with --dependency=singleton (one job
-# per lane at a time); a trial's evaluate waits on its train in the same lane, so a trial uses
-# one GPU at a time. The trial goes to the lane with fewer jobs (ties: lane0).
-#   default : refuse if the count is >= 2 or the chosen lane is not empty.
+# GPU lanes. P6_TRIAL_LANES is a space-separated list of partitions, one per lane (default: two
+# lanes on $TISIAGO_AGFT_PARTITION), e.g. "nvidia-A6000-20 nvidia-A6000-20 nvidia-L40S-24". Lane i
+# runs on entry i with job name ${USER}_tisiago_p6ar_lane<i> and --dependency=singleton (one job
+# per lane at a time); a trial's evaluate waits on its train in the same lane, so a trial uses one
+# GPU at a time. All GPU sbatch calls of a trial use the lane's partition. The trial goes to the
+# lane with the fewest existing lane jobs (ties: lowest index). Counted: GPU jobs of the user
+# (tres gpu or an nvidia partition) in any state, minus --ignore-jobs, but only those in the chosen
+# lane's partition; GPU jobs in other partitions never gate. A failed squeue aborts.
+#   default : refuse if the chosen lane is not empty or its partition already holds as many GPU
+#             jobs as it has lanes.
 #   --queue : always submit. The chain's first job waits (afterany) on every job already in its
 #             lane (any state), so each lane is strictly serial without relying on singleton
 #             (singleton does not block on a pending predecessor; it stays as an extra guard),
-#             and on the GPU jobs outside the lanes sorted by job id: lane i on the i-th,
-#             i+2-th, ... (lane0 on the 1st, 3rd, ...; lane1 on the 2nd, 4th, ...), so trials
-#             never run on top of them. Jobs submitted outside the lanes later are not gated.
+#             and on the GPU jobs outside the lanes in its partition sorted by job id: with k
+#             lanes on the partition, the j-th of them (0-based) waits on the j-th, j+k-th, ...
+#             so trials never run on top of them. Jobs submitted outside the lanes later are not
+#             gated.
 #
 # Overrides (environment): P6_TRIAL_CEILING, P6_TRIAL_REF_PERIODICITY, P6_TRIAL_BASE,
-# P6_TRIAL_RESULTS, P6_TRIAL_WINDOWS_DIR, P6_TRIAL_EXPRESSION, P6_TRIAL_RUNS_DIR.
+# P6_TRIAL_RESULTS, P6_TRIAL_WINDOWS_DIR, P6_TRIAL_EXPRESSION, P6_TRIAL_RUNS_DIR, P6_TRIAL_LANES.
 
 set -euo pipefail
 
@@ -66,7 +71,8 @@ UNIFORM="$(dirname "$CEILING")/$(basename "$CEILING" | sed 's/^ceiling_/uniform_
 REF_PERIODICITY="${P6_TRIAL_REF_PERIODICITY:-data/p6/periodicity/reference_condition_k562/regions_val_max100_replicate.tsv}"
 BASE="${P6_TRIAL_BASE:-data/p6/runs/k562_base/trial_score.json}"
 RESULTS="${P6_TRIAL_RESULTS:-autoresearch/p6/results.tsv}"
-GPU_PARTITION="$TISIAGO_AGFT_PARTITION"
+read -ra LANES <<< "${P6_TRIAL_LANES:-$TISIAGO_AGFT_PARTITION $TISIAGO_AGFT_PARTITION}"
+[[ ${#LANES[@]} -gt 0 ]] || { echo "run_p6_trial: P6_TRIAL_LANES is empty" >&2; exit 1; }
 CPU_PARTITION="${TISIAGO_CPU_PARTITION:?set TISIAGO_CPU_PARTITION in .env}"
 LANE_PREFIX="${USER}_tisiago_p6ar_lane"
 
@@ -118,33 +124,42 @@ fi
 declare -A IGNORE=()
 for id in ${IGNORE_JOBS//,/ }; do IGNORE[$id]=1; done
 SQUEUE_OUT="$(squeue -u "$USER" -h -o '%i|%j|%P|%b')" || die "squeue failed; refusing to guess"
-declare -a OUTSIDE=()
-declare -A LANE_JOBS=([0]=0 [1]=0)
-declare -A LANE_IDS=([0]="" [1]="")
-COUNT=0
+NLANES=${#LANES[@]}
+declare -A LANE_JOBS=() LANE_IDS=() PART_COUNT=() PART_LANES=() PART_OUTSIDE=()
+for ((i = 0; i < NLANES; i++)); do
+    LANE_JOBS[$i]=0; LANE_IDS[$i]=""
+    PART_LANES[${LANES[$i]}]=$(( ${PART_LANES[${LANES[$i]}]:-0} + 1 ))
+done
 while IFS='|' read -r jobid name partition tres; do
     [[ -n "$jobid" ]] || continue
     [[ "$tres" == *gpu* || "$partition" == *nvidia* ]] || continue
     [[ -z "${IGNORE[$jobid]:-}" ]] || continue
-    COUNT=$((COUNT + 1))
-    if [[ "$name" == "${LANE_PREFIX}"[01] ]]; then
-        LANE_JOBS[${name: -1}]=$((LANE_JOBS[${name: -1}] + 1))
-        LANE_IDS[${name: -1}]+=" $jobid"
+    PART_COUNT[$partition]=$(( ${PART_COUNT[$partition]:-0} + 1 ))
+    idx="${name#"$LANE_PREFIX"}"
+    if [[ "$name" == "$LANE_PREFIX"* && "$idx" =~ ^[0-9]+$ && $idx -lt $NLANES ]]; then
+        LANE_JOBS[$idx]=$((LANE_JOBS[$idx] + 1))
+        LANE_IDS[$idx]+=" $jobid"
     else
-        OUTSIDE+=("$jobid")
+        PART_OUTSIDE[$partition]+="$jobid"$'\n'
     fi
 done <<< "$SQUEUE_OUT"
-mapfile -t OUTSIDE < <(printf '%s\n' "${OUTSIDE[@]}" | grep . | sort -n)
 
 LANE=0
-[[ ${LANE_JOBS[1]} -lt ${LANE_JOBS[0]} ]] && LANE=1
+for ((i = 1; i < NLANES; i++)); do
+    [[ ${LANE_JOBS[$i]} -lt ${LANE_JOBS[$LANE]} ]] && LANE=$i
+done
 LANE_NAME="${LANE_PREFIX}${LANE}"
+GPU_PARTITION="${LANES[$LANE]}"
+mapfile -t OUTSIDE < <(printf '%s' "${PART_OUTSIDE[$GPU_PARTITION]:-}" | grep . | sort -n || true)
+LANE_SUMMARY=""
+for ((i = 0; i < NLANES; i++)); do LANE_SUMMARY+="lane$i(${LANES[$i]})=${LANE_JOBS[$i]} "; done
+COUNT=${PART_COUNT[$GPU_PARTITION]:-0}
 FIRST_DEP=(singleton)
-echo "# GPU jobs (all states): $COUNT; lane0=${LANE_JOBS[0]} lane1=${LANE_JOBS[1]};" \
-    "outside lanes (by id): ${OUTSIDE[*]:-none}; ignored: ${IGNORE_JOBS:-none}"
+echo "# GPU jobs in $GPU_PARTITION (all states): $COUNT; $LANE_SUMMARY;" \
+    "outside lanes in $GPU_PARTITION (by id): ${OUTSIDE[*]:-none}; ignored: ${IGNORE_JOBS:-none}"
 if [[ $QUEUE -eq 0 ]]; then
-    if [[ $COUNT -ge 2 || ${LANE_JOBS[$LANE]} -gt 0 ]]; then
-        msg="GPU busy ($COUNT GPU jobs, lane$LANE has ${LANE_JOBS[$LANE]}); use --queue"
+    if [[ $COUNT -ge ${PART_LANES[$GPU_PARTITION]} || ${LANE_JOBS[$LANE]} -gt 0 ]]; then
+        msg="GPU busy ($COUNT GPU jobs in $GPU_PARTITION, lane$LANE has ${LANE_JOBS[$LANE]}); use --queue"
         if [[ $DRY_RUN -eq 1 ]]; then echo "# would refuse: $msg"; else die "$msg"; fi
     fi
 else
@@ -152,7 +167,10 @@ else
     for id in $(printf '%s\n' "${lane_ids[@]}" | grep . | sort -n); do
         FIRST_DEP+=("afterany:$id")
     done
-    for ((i = LANE; i < ${#OUTSIDE[@]}; i += 2)); do FIRST_DEP+=("afterany:${OUTSIDE[$i]}"); done
+    K=${PART_LANES[$GPU_PARTITION]}
+    RANK=0
+    for ((i = 0; i < LANE; i++)); do [[ "${LANES[$i]}" == "$GPU_PARTITION" ]] && RANK=$((RANK + 1)); done
+    for ((i = RANK; i < ${#OUTSIDE[@]}; i += K)); do FIRST_DEP+=("afterany:${OUTSIDE[$i]}"); done
 fi
 for id in ${AFTER//,/ }; do FIRST_DEP+=("afterok:$id"); done
 FIRST_DEP_STR="$(IFS=,; echo "${FIRST_DEP[*]}")"

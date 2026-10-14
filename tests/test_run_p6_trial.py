@@ -79,7 +79,7 @@ def test_failed_squeue_aborts_without_submitting(fake):
 
 
 def test_default_counts_held_and_dependency_jobs(fake):
-    squeue = "500|smoke|nvidia-A100-20|gres/gpu:1\n600|base|nvidia-A6000-20|gres/gpu:1\n"
+    squeue = "500|smoke|nvidia-A6000-20|gres/gpu:1\n600|base|nvidia-A6000-20|gres/gpu:1\n"
     proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue)
     assert proc.returncode != 0 and "GPU busy (2 GPU jobs" in proc.stderr
     assert calls == []
@@ -186,3 +186,68 @@ def test_eval_only_unfinished_run_needs_after(fake, tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert dependency(calls[0]) == "singleton,afterok:555"
     assert dependency(calls[1]) == "afterok:555"
+
+
+A6 = "nvidia-A6000-20"
+L40 = "nvidia-L40S-24"
+LANES3 = f"{A6} {A6} {L40}"
+
+
+def lane_name(i):
+    return f"{LANE0[:-1]}{i}"
+
+
+def partition(call):
+    return next(a.split("=", 1)[1] for a in call.split() if a.startswith("--partition=nvidia"))
+
+
+def test_three_lanes_pick_fewest_jobs_then_lowest_index(fake):
+    squeue = f"800|{lane_name(0)}|{A6}|gres/gpu:1\n801|{lane_name(1)}|{A6}|gres/gpu:1\n"
+    proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=LANES3)
+    assert proc.returncode == 0, proc.stderr
+    assert f"--job-name={lane_name(2)}" in calls[0] and partition(calls[0]) == L40
+    assert f"--job-name={lane_name(2)}" in calls[1] and partition(calls[1]) == L40
+    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue="", P6_TRIAL_LANES=LANES3)
+    assert f"--job-name={lane_name(0)}" in calls[0] and partition(calls[0]) == A6
+    squeue = f"800|{lane_name(0)}|{A6}|gres/gpu:1\n"
+    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=LANES3)
+    assert f"--job-name={lane_name(1)}" in calls[0] and partition(calls[0]) == A6
+
+
+def test_outside_job_in_other_partition_does_not_gate(fake):
+    squeue = f"500|x|{L40}|gres/gpu:1\n501|y|{L40}|gres/gpu:1\n"
+    proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=f"{A6} {A6}")
+    assert proc.returncode == 0, proc.stderr
+    assert partition(calls[0]) == A6 and dependency(calls[0]) == "singleton"
+    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=squeue,
+                          P6_TRIAL_LANES=f"{A6} {A6}")
+    assert dependency(calls[0]) == "singleton"
+
+
+def test_outside_job_in_same_partition_gates_right_lane(fake):
+    squeue = f"500|x|{L40}|gres/gpu:1\n"
+    proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=LANES3)
+    assert proc.returncode == 0, proc.stderr  # lane0 on A6000 is free
+    proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=f"{L40} {A6}")
+    assert proc.returncode != 0 and f"GPU busy (1 GPU jobs in {L40}" in proc.stderr
+    # queue: lane 2 (only L40 lane) waits on the L40 outside job; lanes 0/1 busy
+    squeue += f"800|{lane_name(0)}|{A6}|gres/gpu:1\n801|{lane_name(1)}|{A6}|gres/gpu:1\n"
+    squeue += f"802|{lane_name(0)}|{A6}|gres/gpu:1\n803|{lane_name(1)}|{A6}|gres/gpu:1\n"
+    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=LANES3)
+    assert f"--job-name={lane_name(2)}" in calls[0]
+    assert dependency(calls[0]) == "singleton,afterany:500"
+
+
+def test_queue_distributes_outside_jobs_over_lanes_of_partition(fake):
+    squeue = f"100|a|{A6}|gres/gpu:1\n200|b|{A6}|gres/gpu:1\n300|c|{A6}|gres/gpu:1\n"
+    squeue += f"400|d|{L40}|gres/gpu:1\n"
+    squeue += f"800|{lane_name(0)}|{A6}|gres/gpu:1\n"
+    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=LANES3)
+    assert f"--job-name={lane_name(1)}" in calls[0]  # lane1 is 2nd A6000 lane: 200 only
+    assert dependency(calls[0]) == "singleton,afterany:200"
+
+
+def test_all_gpu_calls_use_lane_partition(fake):
+    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=f"800|{lane_name(0)}|{A6}|g\n"
+                          f"801|{lane_name(1)}|{A6}|g\n", P6_TRIAL_LANES=LANES3)
+    assert partition(calls[0]) == L40 and partition(calls[1]) == L40
