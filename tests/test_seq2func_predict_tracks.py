@@ -414,3 +414,83 @@ def test_real_resample_cli_runs_without_checkpoint(world, monkeypatch, tmp_path)
     saved = json.loads((world["out"] / "K562" / "predict_tracks.json").read_text())
     assert saved["source"] == "real-resample" and saved["checkpoint"] is None
     assert saved["tracks_dir"] == str(world["tracks"])
+
+
+def test_float_mode_writes_pooled_expectation_unrounded(world):
+    _write_reps(world["tracks"], {"chr7": {10: 1}}, {}, reps=(1, 2, "pooled"))
+    layout = channel_layout(["K562"])
+    plus_tis, minus_chx = layout.index(("K562", "tis", "+")), layout.index(("K562", "chx", "-"))
+
+    def ramp(batch):
+        pred = np.zeros_like(batch["targets"], dtype=np.float64)
+        pred[0, :, plus_tis] = 0.25 + np.arange(pred.shape[1]) / 1000.0  # never an integer
+        pred[0, :, minus_chx] = 0.125
+        return pred
+
+    manifest = _run(world, world["out"], ramp, mode="float")
+    assert manifest["mode"] == "float" and manifest["layout"] == "pooled"
+    tis = predict_tracks.pooled_prefix(world["out"], "K562", "tis")
+    chx = predict_tracks.pooled_prefix(world["out"], "K562", "chx")
+    assert tis == world["out"] / "K562" / "tis_pooled"
+    got_plus = read_bigwig_counts(f"{tis}.plus.bw")["chr7"]
+    got_minus = read_bigwig_counts(f"{chx}.minus.bw")["chr7"]
+    assert sorted(got_plus) == list(range(200))  # every region position written once
+    assert not any(float(v).is_integer() for v in got_plus.values())  # no rounding, no sampling
+    assert set(got_minus.values()) == {0.125}
+    assert sorted(got_minus) == [p + RIBOTISH_MINUS_SHIFT for p in range(200)]
+    assert manifest["written_totals"]["chx"] == [pytest.approx(0.125 * 200)]
+    assert not (world["out"] / "K562" / "tis_rep1.plus.bw").exists()
+    saved = json.loads((world["out"] / "K562" / "predict_tracks.json").read_text())
+    assert saved["mode"] == "float" and saved["layout"] == "pooled"
+    assert saved["files"]["tis"] == {"+": "tis_pooled.plus.bw", "-": "tis_pooled.minus.bw"}
+
+
+def test_float_mode_matches_oracle_pooled_values(world):
+    plus = {"chr7": {10: 3, 77: 1}}
+    minus = {"chr7": {31: 2, 201: 5}}
+    _write_reps(world["tracks"], plus, minus)
+    _write_reps(
+        world["tracks"],
+        {k: {p: 2 * v for p, v in d.items()} for k, d in plus.items()},
+        {k: {p: 2 * v for p, v in d.items()} for k, d in minus.items()},
+        reps=("pooled",),
+    )
+    _run(world, world["out"], _oracle, mode="float")
+    prefix = predict_tracks.pooled_prefix(world["out"], "K562", "tis")
+    got_plus = {p: v for p, v in read_bigwig_counts(f"{prefix}.plus.bw")["chr7"].items() if v}
+    got_minus = {p: v for p, v in read_bigwig_counts(f"{prefix}.minus.bw")["chr7"].items() if v}
+    # oracle targets are the pooled real counts (rep1 + rep2) in canonical coordinates
+    assert got_plus == {10: 6.0, 77: 2.0}
+    assert got_minus == {31: 4.0}  # file 201 is canonical 200, outside the region
+
+
+def test_float_mode_cli_default_out_dir(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_predict(predict_fn, windows, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    windows_dir = tmp_path / "win"
+    windows_dir.mkdir()
+    WINDOWS.to_parquet(windows_dir / "val.parquet")
+    monkeypatch.setattr(predict_tracks, "predict_condition", fake_predict)
+    argv = [
+        "predict_tracks",
+        "--source",
+        "real-resample",
+        "--condition",
+        "K562",
+        "--tracks-dir",
+        str(tmp_path / "tracks"),
+        "--windows-dir",
+        str(windows_dir),
+        "--checkpoint",
+        str(tmp_path / "run" / "best"),
+        "--mode",
+        "float",
+    ]
+    monkeypatch.setattr(sys, "argv", argv)
+    predict_tracks.main()
+    assert seen["mode"] == "float"
+    assert seen["out_dir"] == tmp_path / "run" / "predicted_val_float"

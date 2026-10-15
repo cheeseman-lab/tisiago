@@ -15,7 +15,10 @@ pooled prediction times ``total_r / (total_1 + total_2)``, the library's share m
 real tracks over the same region (both strands). ``--mode sample`` (default) draws Poisson
 counts with one generator per library and replicate seeded from ``--seed`` (``--copies k``
 draws ``k * Poisson(expectation / k)``, matching BAMs that carry every alignment ``k`` times);
-``--mode expected`` writes the expectation rounded to the nearest integer.
+``--mode expected`` writes the expectation rounded to the nearest integer. ``--mode float``
+writes the pooled expectation itself, unsplit, unsampled and unrounded, to
+``<out>/<C>/{tis,chx}_pooled.{plus,minus}.bw`` (default ``<out>`` =
+``<run>/predicted_<split>_float``), every position of the written region included.
 
 ``--match-depth`` first rescales each library's pooled prediction so its total over the written
 region equals the real pooled total there (factors in the manifest). ``--source real-resample``
@@ -50,10 +53,15 @@ from tisiago.seq2func.windows import merge_spans
 
 LIBRARIES = ("tis", "chx")
 REPS = (1, 2)
-MODES = ("sample", "expected")
+MODES = ("sample", "expected", "float")
 SOURCES = ("model", "real-resample")
 SPLIT_FILES = {"val": "val.parquet", "test": "test.parquet"}
 MANIFEST = "predict_tracks.json"
+
+
+def pooled_prefix(out_dir: str | Path, condition: str, library: str) -> Path:
+    """Path prefix of a ``--mode float`` pooled track."""
+    return Path(out_dir) / condition / f"{library}_pooled"
 
 
 def strand_shift(strand: str) -> int:
@@ -249,6 +257,7 @@ def predict_condition(
         }
         if not channel:
             raise ValueError(f"{condition} is not among {tuple(conditions)}")
+    pooled_only = mode == "float"
     sizes = chrom_sizes_of(f"{track_prefix(tracks_dir, condition, 'tis', 1)}.plus.bw")
     order = {chrom: i for i, (chrom, _) in enumerate(sizes)}
     unknown = set(windows.chrom) - set(order)
@@ -258,7 +267,11 @@ def predict_condition(
     windows = windows.drop(columns="_order").reset_index(drop=True)
     spans = owned_spans(windows)
     region = region_of(windows)
-    fractions = replicate_fractions(tracks_dir, condition, region)
+    fractions = (
+        None
+        if pooled_only and not match_depth
+        else replicate_fractions(tracks_dir, condition, region)
+    )
     size_of = dict(sizes)
 
     def expectations():
@@ -317,16 +330,22 @@ def predict_condition(
     out_dir = Path(out_dir)
     writers = {}
     rngs = {}
+    files = {}
     for k, library in enumerate(LIBRARIES):
-        for rep in REPS:
-            prefix = track_prefix(out_dir, condition, library, rep)
+        for rep in ("pooled",) if pooled_only else REPS:
+            if pooled_only:
+                prefix = pooled_prefix(out_dir, condition, library)
+            else:
+                prefix = track_prefix(out_dir, condition, library, rep)
+                rngs[(library, rep)] = np.random.default_rng([seed, k, rep])
             prefix.parent.mkdir(parents=True, exist_ok=True)
-            rngs[(library, rep)] = np.random.default_rng([seed, k, rep])
             for strand, name in STRAND_FILES.items():
-                bw = pyBigWig.open(str(prefix.with_name(f"{prefix.name}.{name}.bw")), "w")
+                path = prefix.with_name(f"{prefix.name}.{name}.bw")
+                files.setdefault(library, {})[strand] = path.name
+                bw = pyBigWig.open(str(path), "w")
                 bw.addHeader(sizes)
                 writers[(library, rep, strand)] = bw
-    written = {lib: [0.0] * len(REPS) for lib in LIBRARIES}
+    written = {lib: [0.0] * (1 if pooled_only else len(REPS)) for lib in LIBRARIES}
     try:
         for chrom, lo, hi, pooled_by in stream:
             for library in LIBRARIES:
@@ -335,6 +354,17 @@ def predict_condition(
                     expected[library] += float(pooled.sum())
                     positions = np.arange(lo, hi) + strand_shift(strand)
                     inside = (positions >= 0) & (positions < size_of[chrom])
+                    if pooled_only:
+                        if inside.any():  # contiguous: one fixed-step block per window
+                            writers[(library, "pooled", strand)].addEntries(
+                                chrom,
+                                int(positions[inside][0]),
+                                values=pooled[inside].astype(np.float64).tolist(),
+                                span=1,
+                                step=1,
+                            )
+                            written[library][0] += float(pooled[inside].sum())
+                        continue
                     for r, rep in enumerate(REPS):
                         share = fractions[library]["fractions"][r]
                         values = _draw(pooled * share, mode, rngs[(library, rep)], copies)
@@ -359,6 +389,8 @@ def predict_condition(
         "condition": condition,
         "source": source,
         "mode": mode,
+        "layout": "pooled" if pooled_only else "replicates",
+        "files": files,
         "seed": seed,
         "copies": copies,
         "mask_unexpressed": mask_unexpressed,
@@ -397,7 +429,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--windows-dir", type=Path, help="default: run.json, else data/p6/windows")
     ap.add_argument("--expression", type=Path, help="default: run.json, else data/p6/expression")
     ap.add_argument("--tracks-dir", type=Path, help="real tracks; default: run.json")
-    ap.add_argument("--out-dir", type=Path, help="default: <run>/predicted_<split>")
+    ap.add_argument(
+        "--out-dir", type=Path, help="default: <run>/predicted_<split>[_float for --mode float]"
+    )
     ap.add_argument(
         "--source",
         choices=SOURCES,
@@ -453,7 +487,8 @@ def main() -> None:
     if args.out_dir:
         out_dir = args.out_dir
     elif args.checkpoint:
-        out_dir = args.checkpoint.parent / f"predicted_{args.split}"
+        suffix = "_float" if args.mode == "float" else ""
+        out_dir = args.checkpoint.parent / f"predicted_{args.split}{suffix}"
     else:
         ap.error("--out-dir is required without --checkpoint")
     if (out_dir / condition / MANIFEST).exists() and not args.overwrite:
