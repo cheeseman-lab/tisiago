@@ -3,6 +3,7 @@
 import json
 import sys
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -128,16 +129,46 @@ def test_offset_profile_recovers_planted_offset_on_both_strands(tmp_path):
     assert profile[0, 0, 5 + 1] == pytest.approx(9.0)  # K562 plus at d=+1: 6 + 3
 
 
-def test_aggregate_max_over_conditions_and_reference():
+def test_aggregate_max_over_conditions_eps_grid_depth_norm_and_reference():
     per_condition = {
-        "K562": {"peak": np.array([1.0, 5.0]), "enrich": np.array([2.0, 0.5])},
-        "HeLa": {"peak": np.array([3.0, 0.0]), "enrich": np.array([1.0, 4.0])},
+        "K562": {"peak": np.array([1.0, 6.0]), "context": np.array([1.0, 2.0])},
+        "HeLa": {"peak": np.array([3.0, 0.0]), "context": np.array([0.5, 0.0])},
     }
-    variants = aggregate(per_condition)
-    assert variants["peak_max"].tolist() == [3.0, 5.0]
-    assert variants["enrich_max"].tolist() == [2.0, 4.0]
-    assert variants["peak_K562"].tolist() == [1.0, 5.0]
-    assert variants["enrich_K562"].tolist() == [2.0, 0.5]
+    totals = {"K562": 2e6, "HeLa": 1e6}  # HeLa half as deep: its peaks count double
+    variants = aggregate(per_condition, eps_grid=(0.5, 1.0), totals=totals)
+    assert variants["peak_max"].tolist() == [3.0, 6.0]
+    assert variants["peak_norm_max"].tolist() == pytest.approx([3.0, 3.0])
+    assert variants["enrich_max_eps0.5"].tolist() == pytest.approx([3.0, 2.4])
+    assert variants["enrich_max_eps1"].tolist() == pytest.approx([2.0, 2.0])
+    assert variants["peak_K562"].tolist() == [1.0, 6.0]
+    assert variants["enrich_K562_eps1"].tolist() == pytest.approx([0.5, 2.0])
+    assert "peak_norm_max" not in aggregate(per_condition, eps_grid=(1.0,))
+    with pytest.raises(ValueError, match="total"):
+        aggregate(per_condition, eps_grid=(1.0,), totals={"K562": 1.0, "HeLa": 0.0})
+
+
+def test_selectable_variants_in_tie_break_order():
+    assert track_tis_eval.selectable((1e-3, 1.0), normalised=True) == (
+        "peak_max",
+        "peak_norm_max",
+        "enrich_max_eps0.001",
+        "enrich_max_eps1",
+    )
+    assert track_tis_eval.selectable((1 / 61,), normalised=False) == (
+        "peak_max",
+        "enrich_max_eps0.0163934",
+    )
+
+
+def test_track_total_sums_both_strands_inside_the_region(tmp_path):
+    tracks = tmp_path / "tracks"
+    # + : 10 and 199 inside [0, 200), 250 outside; - : file 200 is canonical 199 (inside),
+    # file 201 is canonical 200 (outside), file 0 is canonical -1 (outside)
+    _real(tracks, "K562", {"chr7": {10: 3, 199: 3, 250: 30}}, {"chr7": {200: 6, 201: 30, 0: 30}})
+    paths = track_tis_eval.real_paths(tracks)
+    region = {"chr7": [(0, 200)], "chrY": [(0, 50)]}
+    assert track_tis_eval.track_total(paths, "K562", region) == pytest.approx(12.0)
+    assert track_tis_eval.track_total(paths, "K562", region, chunk=7) == pytest.approx(12.0)
 
 
 def test_coverage_uses_the_codon_a_in_the_window_union():
@@ -168,7 +199,12 @@ def test_select_variant_by_recall_then_auprc_among_candidates():
         "peak_K562": [0.9, 0.0, 0.9, 0.0, 0.0, 0.0],  # perfect too, but reference only
     }
     block = _block(scores, labels, tx)
-    name, table = select_variant(block["scores"], block["labels"], block["transcripts"])
+    name, table = select_variant(
+        block["scores"],
+        block["labels"],
+        block["transcripts"],
+        candidates=("peak_max", "enrich_max"),
+    )
     assert name == "enrich_max"
     assert table["peak_max"]["recall"] == 1.0 and table["peak_max"]["auprc"] < 1.0
     assert set(table) == set(scores)
@@ -183,13 +219,14 @@ def test_protocol_selects_and_thresholds_on_operating_rows_only():
     test = _block(
         {"peak_max": [0.1, 0.9, 0.2, 0.85], "enrich_max": [0.9, 0.1, 0.8, 0.2]}, [1, 0, 1, 0], tx
     )
-    result = run_protocol(operating, test, budget=1.0)
+    candidates = ("peak_max", "enrich_max")
+    result = run_protocol(operating, test, candidates=candidates, budget=1.0)
     assert result["selected"] == "peak_max"
     assert result["threshold"] == pytest.approx(0.8)  # tightest threshold at full recall
     assert result["test"]["peak_max"]["all"]["recall"] == 0.0
     assert result["test"]["peak_max"]["all"]["threshold"] == pytest.approx(0.8)
     assert result["test"]["enrich_max"]["all"]["recall"] == 1.0  # reported, never selected
-    alone = run_protocol(operating, None, budget=1.0)
+    alone = run_protocol(operating, None, candidates=candidates, budget=1.0)
     assert alone["selected"] == "peak_max" and "test" not in alone
 
 
@@ -327,6 +364,10 @@ def _world(tmp_path):
     pd.DataFrame([{"arm": "ag_w8k", "metric": "recall", "ci_low": 0.29, "ci_high": 0.32}]).to_csv(
         base / "bootstrap_ci.tsv", sep="\t", index=False
     )
+    # baseline per-row test scores, written shuffled: the loader must align them on row_idx
+    calls = manifest.iloc[test_rows][["row_idx", "transcript_id", "label_tis"]].copy()
+    calls["p_tis"] = 0.9 * calls.label_tis + rng.uniform(0, 0.1, len(calls))
+    calls.sample(frac=1.0, random_state=1).to_parquet(base / "calls.parquet")
     return dict(store=store, base=base, tracks=tracks, windows=windows, out=tmp_path / "out")
 
 
@@ -352,6 +393,8 @@ def _argv(world, *extra):
         "20",
         "--profile-half",
         "5",
+        "--baseline-calls",
+        str(world["base"] / "calls.parquet"),
         *extra,
     ]
 
@@ -375,7 +418,9 @@ def test_cli_val_reports_offset_coverage_and_operating_selection(tmp_path, monke
     assert report["coverage"]["operating"]["positives"]["fraction"] == 1.0
     assert "test" not in report["coverage"]
     real = report["sources"]["real"]
-    assert real["selected"] in ("peak_max", "enrich_max")
+    assert real["selected"] in track_tis_eval.selectable(track_tis_eval.EPS_GRID, normalised=True)
+    assert "peak_norm_max" in real["operating"] and "enrich_max_eps1" in real["operating"]
+    assert real["totals"]["val"]["K562"] > 0
     assert real["operating"][real["selected"]]["recall"] == 1.0
     assert "test" not in real
     assert (world["out"] / "report.md").read_text().startswith("# P6 track TIS score")
@@ -400,5 +445,81 @@ def test_cli_test_reports_strata_cis_coverage_and_baseline(tmp_path, monkeypatch
     assert baseline["strata"]["codon_class:AUG"]["recall"] == pytest.approx(0.58)
     assert baseline["bootstrap_ci"]["recall"] == {"ci_low": 0.29, "ci_high": 0.32}
     assert baseline["files"]["metrics"].endswith("metrics.tsv")
+    # recomputed from the per-row calls at the stored ensemble threshold (0.2): perfect here,
+    # so it disagrees with the stored 0.306 and is flagged
+    recomputed = baseline["recomputed"]
+    assert recomputed["all"]["recall"] == 1.0 and recomputed["all"]["threshold"] == 0.2
+    assert recomputed["codon_class:AUG"]["recall"] == 1.0
+    assert recomputed["codon_class:near_cognate"]["positives"] == 0
+    assert baseline["agreement"]["ok"] is False
+    assert baseline["files"]["calls"].endswith("calls.parquet")
+    paired = report["paired"]["all"]["real-baseline"]
+    assert paired["recall"]["point"] == pytest.approx(7 / 8 - 1.0)
+    assert paired["recall"]["ci_low"] <= paired["recall"]["point"] <= paired["recall"]["ci_high"]
+    assert set(paired) == {"recall", "fp_per_transcript", "auprc"}
+    assert "codon_class:AUG" in report["paired"]
+    assert report["paired"]["all"]["arms"]["baseline"]["recall"]["ci_high"] == 1.0
     md = (world["out"] / "report.md").read_text()
     assert "baseline ag_w8k" in md and "real" in md
+    assert "DISAGREE" in md and "real-baseline" in md
+
+
+def test_paired_bootstrap_shares_resamples_with_representation_eval():
+    from tisiago.representation_eval import _bootstrap, near_neighbor_pairs
+
+    rng = np.random.default_rng(3)
+    tx = np.repeat([f"t{i}" for i in range(12)], 6)
+    labels = np.zeros(len(tx), dtype=bool)
+    labels[::6] = True
+    a = labels * 0.6 + rng.uniform(0, 0.5, len(tx))
+    b = labels * 0.2 + rng.uniform(0, 0.5, len(tx))
+    scores, thresholds = {"a": a, "b": b, "same": a.copy()}, {"a": 0.5, "b": 0.5, "same": 0.5}
+    out = track_tis_eval.paired_bootstrap(
+        scores, thresholds, labels, tx, reference="a", n_bootstrap=50
+    )
+    same = out["same-a"]
+    assert all(same[m]["ci_low"] == same[m]["ci_high"] == same[m]["point"] == 0 for m in same)
+    assert out["b-a"]["recall"]["point"] < 0 and out["b-a"]["recall"]["ci_high"] <= 0
+    frame = pd.DataFrame(
+        {"transcript_id": tx, "label_tis": labels, "mrna_index": np.arange(len(tx))}
+    )
+    _, _, groups = near_neighbor_pairs(frame, np.arange(len(frame)))
+    intervals, _ = _bootstrap(scores, thresholds, labels, tx, groups, n_bootstrap=50)
+    for arm in ("a", "b"):
+        for metric in ("recall", "auprc", "fp_per_transcript"):
+            row = intervals[(intervals.arm == arm) & (intervals.metric == metric)].iloc[0]
+            got = out["arms"][arm][metric]
+            assert (got["ci_low"], got["ci_high"]) == pytest.approx((row.ci_low, row.ci_high))
+
+
+def test_load_baseline_calls_aligns_on_row_idx_and_checks_labels(tmp_path):
+    calls = pd.DataFrame({"row_idx": [7, 3, 5], "label_tis": [0, 1, 0], "p_tis": [0.7, 0.3, 0.5]})
+    path = tmp_path / "calls.parquet"
+    calls.to_parquet(path)
+    got = track_tis_eval.load_baseline_calls(path, np.array([3, 5, 7]), np.array([1, 0, 0]))
+    assert got.tolist() == [0.3, 0.5, 0.7]
+    with pytest.raises(ValueError, match="row_idx"):
+        track_tis_eval.load_baseline_calls(path, np.array([3, 5, 8]), np.array([1, 0, 0]))
+    with pytest.raises(ValueError, match="label"):
+        track_tis_eval.load_baseline_calls(path, np.array([3, 5, 7]), np.array([0, 0, 0]))
+
+
+def test_predicted_dirs_reject_depth_matched_or_other_window_predictions(tmp_path):
+    def write(name, **meta):
+        out = tmp_path / name / "K562"
+        out.mkdir(parents=True)
+        base = {"mode": "float", "split": "val", "match_depth": False, "windows_dir": "win"}
+        (out / "predict_tracks.json").write_text(json.dumps(base | meta))
+        return f"{tmp_path / name}"
+
+    ok = write("ok")
+    windows = Path("win")
+    got = track_tis_eval.predicted_dirs({"K562": ok}, "val", ["K562"], windows)
+    assert got == {"K562": Path(ok)}
+    for name, meta, match in (
+        ("depth", {"match_depth": True}, "match-depth"),
+        ("other", {"windows_dir": "elsewhere"}, "windows"),
+        ("sampled", {"mode": "sample"}, "float"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            track_tis_eval.predicted_dirs({"K562": write(name, **meta)}, "val", ["K562"], windows)
