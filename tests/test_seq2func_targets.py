@@ -2,10 +2,13 @@
 
 from collections import Counter
 
+import pytest
+
 from tisiago.seq2func.targets import (
     channel_layout,
     library_channels,
     load_targets,
+    modulated_channels,
     read_window,
     strand_pairs,
 )
@@ -43,3 +46,20 @@ def test_library_channels_selects_chx_of_every_condition():
     layout = channel_layout(["HeLa", "K562"])
     assert library_channels(layout, "chx") == (2, 3, 8, 9)
     assert all(layout[i][1] == "chx" for i in library_channels(layout, "chx"))
+
+
+def test_modulated_channels_union_of_libraries_both_strands():
+    layout = channel_layout(["HeLa", "K562"])
+    assert modulated_channels(layout, ["chx"]) == library_channels(layout, "chx")
+    got = modulated_channels(layout, ["chx", "tis"])
+    assert got == (0, 1, 2, 3, 6, 7, 8, 9)
+    assert {(c, lib, s) for c, lib, s in (layout[i] for i in got)} == {
+        (c, lib, s) for c in ("HeLa", "K562") for lib in ("tis", "chx") for s in ("+", "-")
+    }
+    assert modulated_channels(layout, ["tis", "chx"]) == got
+
+
+@pytest.mark.parametrize("bad", [[], ["chx", "chx"], ["chx", "harr"], ["CHX"]])
+def test_modulated_channels_rejects_bad_libraries(bad):
+    with pytest.raises(ValueError, match="mod_libraries"):
+        modulated_channels(channel_layout(["HeLa"]), bad)

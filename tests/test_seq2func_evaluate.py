@@ -269,11 +269,12 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
         _params, _state = "params", "state"
 
     def fake_load_finetuned(
-        checkpoint, base, head, num_tracks, kind, device=None, mod_channels=None
+        checkpoint, base, head, num_tracks, kind, device=None, mod_channels=None, mod_scales=None
     ):
         calls["load"] = (checkpoint, base, head, num_tracks, kind)
         calls["device"] = device
         calls["mod_channels"] = mod_channels
+        calls["mod_scales"] = mod_scales
         return FakeModel()
 
     def fake_make_predict(model, head):
@@ -287,6 +288,7 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
     )
     assert calls["load"] == (str(tmp_path), "weights", "p6_hela", 6, "conv")
     assert calls["mod_channels"] is None
+    assert calls["mod_scales"] is None
     assert calls["device"] == "cpu0"
     assert calls["head"] == "p6_hela"
     out = predict({"sequences": np.zeros((1, 8, 4), np.float32)})
@@ -314,6 +316,7 @@ def test_load_predict_fn_passes_chx_channels_for_resid_chx(monkeypatch, tmp_path
     )
     want = library_channels(channel_layout(["K562"]), "chx")
     assert calls["mod_channels"] == want and len(want) == 2
+    assert calls["mod_scales"] == (model_mod.MOD_SCALE,) * 2
     (tmp_path / "run.json").write_text(json.dumps({"mod_channels": [0, 1]}))
     with pytest.raises(ValueError, match="mod_channels"):
         evaluate.load_predict_fn(
@@ -323,6 +326,46 @@ def test_load_predict_fn_passes_chx_channels_for_resid_chx(monkeypatch, tmp_path
     evaluate.load_predict_fn(
         tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
     )
+
+
+def test_load_predict_fn_rebuilds_mod_libraries_from_run_json(monkeypatch, tmp_path):
+    pytest.importorskip("alphagenome_ft")
+    model_mod = pytest.importorskip("tisiago.seq2func.model")
+    calls = {}
+
+    class FakeModel:
+        _params, _state = "params", "state"
+
+    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, **kwargs):
+        calls.update(kwargs)
+        return FakeModel()
+
+    monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
+    monkeypatch.setattr(model_mod, "make_predict", lambda model, head: None)
+    run = {"mod_libraries": ["chx", "tis"], "mod_scale_tis": 3.0}
+    (tmp_path / "run.json").write_text(json.dumps(run))
+
+    def load():
+        evaluate.load_predict_fn(
+            tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
+        )
+
+    load()
+    scale = model_mod.MOD_SCALE
+    assert calls["mod_channels"] == (0, 1, 2, 3)
+    assert calls["mod_scales"] == (3.0, 3.0, scale, scale)
+    recorded = {**run, "mod_channels": [0, 1, 2, 3], "mod_scales": [3.0, 3.0, scale, scale]}
+    (tmp_path / "run.json").write_text(json.dumps(recorded))
+    load()
+    (tmp_path / "run.json").write_text(json.dumps({**recorded, "mod_scales": [scale] * 4}))
+    with pytest.raises(ValueError, match="mod_scales"):
+        load()
+    (tmp_path / "run.json").write_text(json.dumps({**recorded, "mod_channels": [2, 3]}))
+    with pytest.raises(ValueError, match="mod_channels"):
+        load()
+    (tmp_path / "run.json").write_text(json.dumps({"mod_libraries": ["chx", "harr"]}))
+    with pytest.raises(ValueError, match="mod_libraries"):
+        load()
 
 
 def test_head_kind_read_from_run_json(tmp_path):

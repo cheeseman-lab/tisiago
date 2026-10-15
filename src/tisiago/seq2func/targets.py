@@ -25,6 +25,19 @@ def library_channels(layout: list[tuple[str, str, str]], library: str) -> tuple[
     return tuple(i for i, (_, lib, _) in enumerate(layout) if lib == library)
 
 
+def modulated_channels(
+    layout: list[tuple[str, str, str]], libraries: Sequence[str]
+) -> tuple[int, ...]:
+    """Indices of every channel of ``libraries`` in ``layout`` order (both strands)."""
+    known = {lib for _, lib, _ in layout}
+    libraries = list(libraries)
+    if not libraries or len(set(libraries)) != len(libraries) or not set(libraries) <= known:
+        raise ValueError(
+            f"mod_libraries must be unique names from {sorted(known)}, got {libraries!r}"
+        )
+    return tuple(i for i, (_, lib, _) in enumerate(layout) if lib in libraries)
+
+
 def strand_pairs(layout: list[tuple[str, str, str]]) -> list[tuple[int, int]]:
     """Index pairs (plus, minus) for each condition/library."""
     index = {channel: i for i, channel in enumerate(layout)}

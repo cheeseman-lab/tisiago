@@ -455,6 +455,68 @@ def test_cli_rejects_mod_learning_rate_without_mod_head(tmp_path, monkeypatch, b
     assert not (tmp_path / "r").exists()
 
 
+def test_cli_mod_libraries_and_scale_parse_with_none_defaults():
+    args = train.build_parser().parse_args(["--arm", "shared"])
+    assert args.mod_libraries is None and args.mod_scale_tis is None
+    args = train.build_parser().parse_args(
+        ["--arm", "shared", "--mod-libraries", "chx,tis", "--mod-scale-tis", "3"]
+    )
+    assert args.mod_libraries == "chx,tis" and args.mod_scale_tis == 3.0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        ["--head", "mlp", "--mod-libraries", "chx"],
+        ["--head", "resid_tx", "--mod-libraries", "chx,tis"],
+        ["--head", "resid_tx", "--mod-scale-tis", "3"],
+        ["--head", "resid_chx", "--mod-libraries", "chx,harr"],
+        ["--head", "resid_chx", "--mod-libraries", "chx,chx"],
+        ["--head", "resid_chx", "--mod-libraries", ""],
+        ["--head", "resid_chx", "--mod-libraries", "chx,tis", "--mod-scale-tis", "0"],
+        ["--head", "resid_chx", "--mod-scale-tis", "3"],
+    ],
+)
+def test_cli_rejects_bad_mod_libraries(tmp_path, monkeypatch, bad):
+    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--gtf", "a.gtf", "--out", str(tmp_path / "r"), *bad])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()
+
+
+def test_mod_libraries_parse():
+    assert train.mod_libraries_of(None) == ("chx",)
+    assert train.mod_libraries_of("chx,tis") == ("chx", "tis")
+    assert train.mod_libraries_of(" tis , chx ") == ("tis", "chx")
+    for bad in ("", "chx,", "chx,chx", "chx,harr"):
+        with pytest.raises(ValueError, match="mod-libraries"):
+            train.mod_libraries_of(bad)
+
+
+def test_channel_config_frame_stays_chx_and_records_modulation():
+    pytest.importorskip("alphagenome_ft")
+    from tisiago.seq2func.model import MOD_SCALE
+    from tisiago.seq2func.targets import channel_layout, library_channels
+
+    layout = channel_layout(["HeLa", "K562"])
+    chx = library_channels(layout, "chx")
+    cfg = train.channel_config("resid_chx", layout, ("chx", "tis"), 3.0)
+    assert cfg["frame_channels"] == list(chx)
+    assert cfg["mod_libraries"] == ["chx", "tis"]
+    assert cfg["mod_channels"] == [0, 1, 2, 3, 6, 7, 8, 9]
+    assert cfg["mod_scales"] == [
+        3.0 if layout[c][1] == "tis" else MOD_SCALE for c in cfg["mod_channels"]
+    ]
+    assert cfg["mod_scale_tis"] == 3.0
+    old = train.channel_config("resid_chx", layout, ("chx",), MOD_SCALE)
+    assert old["frame_channels"] == old["mod_channels"] == list(chx)
+    assert old["mod_scales"] == [MOD_SCALE] * 4
+    plain = train.channel_config("mlp", layout, ("chx",), MOD_SCALE)
+    assert plain == {"frame_channels": list(chx)}
+
+
 def test_cli_resid_chx_needs_gtf(tmp_path, monkeypatch):
     monkeypatch.delenv("TISIAGO_GTF", raising=False)
     argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]

@@ -40,7 +40,7 @@ from tisiago.seq2func.overfit import (
     finite_or_none,
     write_json_atomic,
 )
-from tisiago.seq2func.samples import CONDITIONS
+from tisiago.seq2func.samples import CONDITIONS, LIBRARIES
 
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
@@ -57,6 +57,35 @@ def parse_arm(arm: str) -> tuple[str, tuple[str, ...]]:
     if kind != "condition" or condition not in CONDITIONS:
         raise ValueError(f"arm must be 'shared' or 'condition:<one of {CONDITIONS}>', not {arm!r}")
     return f"p6_{condition.lower()}", (condition,)
+
+
+def mod_libraries_of(value: str | None) -> tuple[str, ...]:
+    """``--mod-libraries`` comma list -> library names (``None``: ``("chx",)``)."""
+    if value is None:
+        return ("chx",)
+    libraries = tuple(name.strip() for name in value.split(","))
+    if not all(libraries) or len(set(libraries)) != len(libraries):
+        raise ValueError(f"--mod-libraries must be a comma list of unique names, not {value!r}")
+    if not set(libraries) <= set(LIBRARIES):
+        raise ValueError(f"--mod-libraries must name libraries in {LIBRARIES}, not {value!r}")
+    return libraries
+
+
+def channel_config(head_kind: str, layout, mod_libraries, mod_scale_tis: float) -> dict:
+    """run.json channel fields: CHX ``frame_channels``; for ``resid_chx`` the modulation too."""
+    from tisiago.seq2func.model import resid_chx_spec
+    from tisiago.seq2func.targets import library_channels
+
+    out = {"frame_channels": list(library_channels(layout, "chx"))}
+    if head_kind in CHX_KINDS:
+        channels, scales = resid_chx_spec(layout, mod_libraries, mod_scale_tis)
+        out |= {
+            "mod_libraries": list(mod_libraries),
+            "mod_scale_tis": float(mod_scale_tis),
+            "mod_channels": list(channels),
+            "mod_scales": list(scales),
+        }
+    return out
 
 
 def window_profile_kl(pred: np.ndarray, target: np.ndarray, mask: np.ndarray) -> float:
@@ -302,6 +331,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="learning rate of the resid_tx / resid_chx mod_* branch (default: --learning-rate)",
     )
+    ap.add_argument(
+        "--mod-libraries",
+        default=None,
+        help="resid_chx: comma list of libraries the modulation applies to (default: chx)",
+    )
+    ap.add_argument(
+        "--mod-scale-tis",
+        type=float,
+        default=None,
+        help="resid_chx: modulation bound of the TIS channels (needs tis in --mod-libraries; "
+        "default 1.5 = MOD_SCALE)",
+    )
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--warmup-steps", type=int, default=300)
     ap.add_argument("--clip-norm", type=float, default=1.0)
@@ -358,6 +399,17 @@ def main() -> None:
         ap.error(f"--mod-learning-rate needs --head in {sorted(MOD_KINDS)}")
     if args.mod_learning_rate is not None and args.mod_learning_rate < 0:
         ap.error("--mod-learning-rate must be >= 0")
+    explicit_mod = args.mod_libraries is not None or args.mod_scale_tis is not None
+    if explicit_mod and args.head not in CHX_KINDS:
+        ap.error(f"--mod-libraries / --mod-scale-tis need --head in {sorted(CHX_KINDS)}")
+    try:
+        mod_libraries = mod_libraries_of(args.mod_libraries)
+    except ValueError as exc:
+        ap.error(str(exc))
+    if args.mod_scale_tis is not None and "tis" not in mod_libraries:
+        ap.error("--mod-scale-tis needs tis in --mod-libraries")
+    if args.mod_scale_tis is not None and not 0 < args.mod_scale_tis < math.inf:
+        ap.error("--mod-scale-tis must be positive and finite")
     if args.frame_weight < 0 or args.frame_block < 1:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     if not 0 <= args.freeze_backbone_steps < args.steps:
@@ -383,12 +435,13 @@ def main() -> None:
 
     from tisiago.seq2func.data import iterate
     from tisiago.seq2func.model import (
+        MOD_SCALE,
         load_model,
         make_predict,
         make_train_step,
         register_track_head,
     )
-    from tisiago.seq2func.targets import channel_layout, library_channels
+    from tisiago.seq2func.targets import channel_layout
 
     train_windows = pd.read_parquet(args.windows_dir / TRAIN_WINDOWS)
     val_windows = pd.read_parquet(args.windows_dir / VAL_WINDOWS).iloc[: args.eval_windows]
@@ -396,28 +449,33 @@ def main() -> None:
     genes = expression[expression.condition.isin(conditions)].reset_index(drop=True)
     layout = channel_layout(conditions)
     num_tracks = len(layout)
-    frame_channels = library_channels(layout, "chx")
+    mod_scale_tis = MOD_SCALE if args.mod_scale_tis is None else args.mod_scale_tis
+    channels = channel_config(args.head, layout, mod_libraries, mod_scale_tis)
+    frame_channels = tuple(channels["frame_channels"])
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),
         "head_name": head,
         "conditions": list(conditions),
         "num_tracks": num_tracks,
-        "frame_channels": list(frame_channels),
         "mod_learning_rate": args.mod_learning_rate,
+        **channels,
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
         "jax_devices": [str(d) for d in jax.devices()],
     }
-    mod_channels = frame_channels if args.head in CHX_KINDS else None
-    if mod_channels is not None:
-        run["mod_channels"] = list(mod_channels)
     if init is not None:
         run["init_from"] = init
     write_json_atomic(run, out / "run.json")
     print(json.dumps(run, indent=2), flush=True)
 
-    register_track_head(head, num_tracks, kind=args.head, mod_channels=mod_channels)
+    register_track_head(
+        head,
+        num_tracks,
+        kind=args.head,
+        mod_channels=channels.get("mod_channels"),
+        mod_scales=channels.get("mod_scales"),
+    )
     t0 = time.time()
     model = load_model(args.checkpoint, head, detach_backbone=not args.train_backbone)
     print(f"model load {time.time() - t0:.1f}s", flush=True)

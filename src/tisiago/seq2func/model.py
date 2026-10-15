@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from dataclasses import fields, replace
 from pathlib import Path
@@ -26,6 +27,7 @@ from alphagenome_research.model import dna_model
 
 from tisiago.seq2func.loss import poisson_multinomial
 from tisiago.seq2func.orf_features import orf_features
+from tisiago.seq2func.targets import modulated_channels
 from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 
 ORGANISM = Organism.HOMO_SAPIENS
@@ -147,15 +149,18 @@ class SeqConvTxTrackHead(ConvTrackHead):
         return ConvTrackHead.predict(self, embeddings, organism_index, sequence=sequence)
 
 
-def _modulation(embeddings, sequence, hidden: int, num_out: int):
-    """``exp(MOD_SCALE * tanh(delta))`` from the ``mod_hidden`` / zero-init ``mod_output`` convs."""
+def _modulation(embeddings, sequence, hidden: int, num_out: int, scale=MOD_SCALE):
+    """``exp(scale * tanh(delta))`` from the ``mod_hidden`` / zero-init ``mod_output`` convs.
+
+    ``scale``: a scalar or a static per-output array ``(num_out,)``.
+    """
     x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
     x = jnp.concatenate([x, sequence.astype(jnp.float32)], axis=-1)
     x = hk.Conv1D(hidden, kernel_shape=CONV_WIDTH, padding="SAME", name="mod_hidden")(x)
     x = jax.nn.relu(x)
     zeros = hk.initializers.Constant(0.0)
     delta = hk.Conv1D(num_out, kernel_shape=1, w_init=zeros, b_init=zeros, name="mod_output")(x)
-    return jnp.exp(MOD_SCALE * jnp.tanh(delta.astype(jnp.float32)))
+    return jnp.exp(scale * jnp.tanh(delta.astype(jnp.float32)))
 
 
 class ResidTxTrackHead(TrackHead):
@@ -179,12 +184,13 @@ class ResidTxTrackHead(TrackHead):
 
 
 class ResidChxTrackHead(TrackHead):
-    """:class:`ResidTxTrackHead` with the modulation on the CHX channels only.
+    """:class:`ResidTxTrackHead` with the modulation on selected channels only (CHX by default).
 
     The channels come from ``metadata["mod_channels"]`` (static indices, set by
     :func:`register_track_head`); every other channel returns the base output exactly. The
     modulation is Conv1D(256, 31) -> relu -> Conv1D(len(mod_channels), 1), zero-initialised,
-    with the same bounded factor and leaf names as :class:`ResidTxTrackHead`.
+    with the same leaf names as :class:`ResidTxTrackHead`. Channel ``k``'s factor is bounded by
+    ``metadata["mod_scales"][k]`` (default :data:`MOD_SCALE` for every channel).
     """
 
     def predict(self, embeddings, organism_index, **kwargs):
@@ -194,9 +200,11 @@ class ResidChxTrackHead(TrackHead):
             raise ValueError(
                 "resid_chx head needs unique metadata['mod_channels'] (CHX channel indices)"
             )
+        scales = self._metadata.get("mod_scales")
+        scale = MOD_SCALE if scales is None else jnp.asarray(scales, jnp.float32)
         sequence = _tx_sequence(embeddings, kwargs, "resid_chx")
         base = TrackHead.predict(self, embeddings, organism_index)
-        factor = _modulation(embeddings, sequence, MOD_HIDDEN_CHX, len(channels))
+        factor = _modulation(embeddings, sequence, MOD_HIDDEN_CHX, len(channels), scale)
         index = jnp.asarray(channels)
         return base.at[..., index].multiply(factor, unique_indices=True)
 
@@ -232,15 +240,48 @@ def _check_mod_channels(kind: str, num_tracks: int, mod_channels) -> tuple[int, 
     return channels
 
 
-def register_track_head(name: str, num_tracks: int, kind: str = "mlp", mod_channels=None) -> None:
+def _check_mod_scales(channels, mod_scales) -> tuple[float, ...] | None:
+    """Per-channel modulation bounds: positive and finite, default :data:`MOD_SCALE`."""
+    if channels is None:
+        if mod_scales is not None:
+            raise ValueError("mod_scales is only for resid_chx heads")
+        return None
+    if mod_scales is None:
+        return (MOD_SCALE,) * len(channels)
+    scales = tuple(float(s) for s in mod_scales)
+    if len(scales) != len(channels) or not all(math.isfinite(s) and s > 0 for s in scales):
+        raise ValueError(
+            f"mod_scales must be {len(channels)} positive finite values, got {mod_scales!r}"
+        )
+    return scales
+
+
+def resid_chx_spec(
+    layout, libraries=("chx",), scale_tis: float = MOD_SCALE
+) -> tuple[tuple[int, ...], tuple[float, ...]]:
+    """``(mod_channels, mod_scales)`` of a ``resid_chx`` head modulating ``libraries``.
+
+    Every channel of ``libraries`` in ``layout`` (both strands); TIS channels are bounded by
+    ``scale_tis``, the others by :data:`MOD_SCALE`.
+    """
+    channels = modulated_channels(layout, libraries)
+    scales = tuple(float(scale_tis) if layout[c][1] == "tis" else MOD_SCALE for c in channels)
+    return channels, scales
+
+
+def register_track_head(
+    name: str, num_tracks: int, kind: str = "mlp", mod_channels=None, mod_scales=None
+) -> None:
     """Register a track head of ``kind``; idempotent for the same arguments.
 
-    ``mod_channels`` (``resid_chx`` only, required there) are the modulated channel indices,
-    stored in the head config's metadata.
+    ``mod_channels`` (``resid_chx`` only, required there) are the modulated channel indices and
+    ``mod_scales`` their factor bounds (default :data:`MOD_SCALE` each), both stored in the head
+    config's metadata.
     """
     if kind not in HEAD_KINDS:
         raise ValueError(f"unknown head kind {kind!r}; expected one of {sorted(HEAD_KINDS)}")
     channels = _check_mod_channels(kind, num_tracks, mod_channels)
+    scales = _check_mod_scales(channels, mod_scales)
     existing = get_custom_head_config(name)
     if existing is not None:
         if existing.num_tracks != num_tracks:
@@ -259,6 +300,14 @@ def register_track_head(name: str, num_tracks: int, kind: str = "mlp", mod_chann
                 f"head {name!r} already registered with mod_channels={previous_channels}, "
                 f"not {channels}"
             )
+        previous_scales = (existing.metadata or {}).get("mod_scales")
+        if (
+            channels is not None
+            and tuple(previous_scales or (MOD_SCALE,) * len(channels)) != scales
+        ):
+            raise ValueError(
+                f"head {name!r} already registered with mod_scales={previous_scales}, not {scales}"
+            )
         return
     register_custom_head(
         name,
@@ -267,7 +316,7 @@ def register_track_head(name: str, num_tracks: int, kind: str = "mlp", mod_chann
             type=CustomHeadType.GENOME_TRACKS,
             output_type=dna_output.OutputType.RNA_SEQ,
             num_tracks=num_tracks,
-            metadata=None if channels is None else {"mod_channels": channels},
+            metadata=None if channels is None else {"mod_channels": channels, "mod_scales": scales},
         ),
     )
     _REGISTERED_KINDS[name] = kind
@@ -391,20 +440,23 @@ def load_finetuned(
     detach_backbone: bool = True,
     device=None,
     mod_channels=None,
+    mod_scales=None,
 ):
     """Rebuild the training model and restore a ``save_checkpoint(save_full_model=True)`` dir.
 
     agft 0.1.12 ``load_checkpoint`` wraps full-model checkpoints with the base model's forward,
     which has no custom heads, so the model is rebuilt with :func:`load_model` instead and every
-    saved ``(params, state)`` leaf is checked against it before the restore. ``mod_channels``:
-    see :func:`register_track_head` (``resid_chx``: the channels the run trained with).
+    saved ``(params, state)`` leaf is checked against it before the restore. ``mod_channels`` /
+    ``mod_scales``: see :func:`register_track_head` (``resid_chx``: the run's channels/bounds).
     """
     import orbax.checkpoint as ocp
 
     from tisiago.seq2func.checkpoint import check_restorable, saved_leaf_shapes, tree_leaf_shapes
 
     path = Path(checkpoint_dir).resolve() / "checkpoint"
-    register_track_head(head, num_tracks, kind=kind, mod_channels=mod_channels)
+    register_track_head(
+        head, num_tracks, kind=kind, mod_channels=mod_channels, mod_scales=mod_scales
+    )
     model = load_model(base_checkpoint, head, detach_backbone=detach_backbone, device=device)
     template = (model._params, model._state)
     check_restorable(tree_leaf_shapes(template), saved_leaf_shapes(path))

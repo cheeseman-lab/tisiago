@@ -42,7 +42,7 @@ from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
 from tisiago.seq2func.overfit import CHX_KINDS, HEAD_CHOICES, TRANSCRIPT_KINDS
 from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.samples import CONDITIONS
-from tisiago.seq2func.targets import channel_layout, library_channels
+from tisiago.seq2func.targets import channel_layout
 from tisiago.seq2func.train import parse_arm
 
 EXCLUDED = -1
@@ -329,24 +329,27 @@ def load_predict_fn(
 ) -> Callable[[dict], np.ndarray]:
     """``predict(batch) -> (1, S, C)`` from a ``save_checkpoint(save_full_model=True)`` dir.
 
-    A ``resid_chx`` head is rebuilt with the arm's CHX channels (as ``train.py`` derives them),
-    checked against ``mod_channels`` in the run's ``run.json`` when recorded.
+    A ``resid_chx`` head is rebuilt with the channels of the run's ``mod_libraries`` and
+    ``mod_scale_tis`` (as ``train.py`` derives them; runs without them: CHX, ``MOD_SCALE``),
+    checked against ``mod_channels`` / ``mod_scales`` in the run's ``run.json`` when recorded.
     """
     import jax.numpy as jnp
 
-    from tisiago.seq2func.model import load_finetuned, make_predict
+    from tisiago.seq2func.model import MOD_SCALE, load_finetuned, make_predict, resid_chx_spec
 
     head, conditions = parse_arm(arm)
     layout = channel_layout(conditions)
-    mod_channels = None
+    mod_channels = mod_scales = None
     if head_kind in CHX_KINDS:
-        mod_channels = library_channels(layout, "chx")
-        run = Path(checkpoint).parent / "run.json"
-        recorded = json.loads(run.read_text()).get("mod_channels") if run.exists() else None
-        if recorded is not None and tuple(recorded) != mod_channels:
-            raise ValueError(
-                f"{run} records mod_channels={recorded}, but arm {arm} gives {mod_channels}"
-            )
+        path = Path(checkpoint).parent / "run.json"
+        run = json.loads(path.read_text()) if path.exists() else {}
+        mod_channels, mod_scales = resid_chx_spec(
+            layout, run.get("mod_libraries") or ("chx",), run.get("mod_scale_tis", MOD_SCALE)
+        )
+        for key, value in (("mod_channels", mod_channels), ("mod_scales", mod_scales)):
+            recorded = run.get(key)
+            if recorded is not None and tuple(recorded) != value:
+                raise ValueError(f"{path} records {key}={recorded}, but arm {arm} gives {value}")
     model = load_finetuned(
         str(checkpoint),
         str(base_checkpoint),
@@ -355,6 +358,7 @@ def load_predict_fn(
         head_kind,
         device=device,
         mod_channels=mod_channels,
+        mod_scales=mod_scales,
     )
     predict = make_predict(model, head)
     params, state = model._params, model._state

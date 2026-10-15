@@ -906,10 +906,12 @@ def test_resid_tx_checkpoint_round_trip_and_matching_init(tmp_path):
 # --- resid_chx: resid_tx's modulation on the CHX channels only, own learning rate ---
 
 
-def _chx_forward(kind, emb, seq=None, channels=(1, 3)):
+def _chx_forward(kind, emb, seq=None, channels=(1, 3), scales=None):
     from tisiago.seq2func.model import HEAD_KINDS
 
     metadata = {"mod_channels": channels} if kind == "resid_chx" else None
+    if scales is not None:
+        metadata["mod_scales"] = scales
     head = HEAD_KINDS[kind](name="h", output_type=None, num_tracks=4, metadata=metadata)
     kwargs = {} if seq is None else {"sequence": seq}
     return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), **kwargs)
@@ -1161,6 +1163,134 @@ def test_resid_chx_checkpoint_round_trip_and_matching_init(tmp_path, monkeypatch
     mlp_pred = np.asarray(_mlp_predict(base, mlp_head, seq))
     chx_pred = np.asarray(make_predict(target, name)(target._params, target._state, seq))
     np.testing.assert_array_equal(chx_pred, mlp_pred)
+
+
+# --- resid_chx on more libraries: per-channel modulation bound (--mod-scale-tis) ---
+
+
+def test_resid_chx_per_channel_scales_bound_each_channel():
+    from tisiago.seq2func.model import MOD_HIDDEN_CHX, MOD_SCALE
+
+    mlp = hk.without_apply_rng(hk.transform(lambda e: _chx_forward("mlp", e)))
+    chx = hk.without_apply_rng(
+        hk.transform(lambda e, q: _chx_forward("resid_chx", e, q, scales=(MOD_SCALE, 3.0)))
+    )
+    rng = np.random.default_rng(0)
+    emb = jnp.asarray(rng.normal(size=(1, 40, 8)).astype(np.float32))
+    seq = _tx_sequences(rng, 1, 40)
+    mlp_params = mlp.init(jax.random.PRNGKey(0), emb)
+    params = {**chx.init(jax.random.PRNGKey(1), emb, seq), **mlp_params}
+    base = np.asarray(mlp.apply(mlp_params, emb))
+    np.testing.assert_array_equal(np.asarray(chx.apply(params, emb, seq)), base)
+    for sign in (1.0, -1.0):
+        big = {"w": sign * 1e4 * jnp.ones((1, MOD_HIDDEN_CHX, 2)), "b": sign * 1e4 * jnp.ones(2)}
+        out = np.asarray(chx.apply({**params, "h/~predict/mod_output": big}, emb, seq))
+        np.testing.assert_array_equal(out[..., [0, 2]], base[..., [0, 2]])
+        for channel, scale in ((1, MOD_SCALE), (3, 3.0)):
+            ratio = out[..., channel] / base[..., channel]
+            np.testing.assert_allclose(ratio, np.exp(sign * scale), rtol=1e-5)
+
+
+def test_resid_chx_default_scales_match_old_metadata():
+    from tisiago.seq2func.model import MOD_HIDDEN_CHX, MOD_SCALE
+
+    old = hk.without_apply_rng(hk.transform(lambda e, q: _chx_forward("resid_chx", e, q)))
+    new = hk.without_apply_rng(
+        hk.transform(lambda e, q: _chx_forward("resid_chx", e, q, scales=(MOD_SCALE,) * 2))
+    )
+    rng = np.random.default_rng(3)
+    emb = jnp.asarray(rng.normal(size=(1, 40, 8)).astype(np.float32))
+    seq = _tx_sequences(rng, 1, 40)
+    params = old.init(jax.random.PRNGKey(1), emb, seq)
+    params["h/~predict/mod_output"] = {
+        "w": jnp.asarray(rng.normal(size=(1, MOD_HIDDEN_CHX, 2)).astype(np.float32)),
+        "b": jnp.asarray([0.3, -0.7], jnp.float32),
+    }
+    np.testing.assert_array_equal(
+        np.asarray(old.apply(params, emb, seq)), np.asarray(new.apply(params, emb, seq))
+    )
+    register_track_head("p6_test_chx_old", 4, kind="resid_chx", mod_channels=(1, 3))
+    register_track_head(
+        "p6_test_chx_old", 4, kind="resid_chx", mod_channels=(1, 3), mod_scales=(MOD_SCALE,) * 2
+    )
+
+
+def test_resid_chx_mod_scales_validation():
+    with pytest.raises(ValueError, match="mod_scales"):
+        register_track_head(
+            "p6_test_sc_len", 4, kind="resid_chx", mod_channels=(1, 3), mod_scales=(1.5,)
+        )
+    for bad in ((1.5, 0.0), (1.5, -2.0), (1.5, float("nan")), (1.5, float("inf"))):
+        with pytest.raises(ValueError, match="mod_scales"):
+            register_track_head(
+                "p6_test_sc_bad", 4, kind="resid_chx", mod_channels=(1, 3), mod_scales=bad
+            )
+    with pytest.raises(ValueError, match="mod_scales"):
+        register_track_head("p6_test_sc_mlp", 4, kind="mlp", mod_scales=(1.5,))
+    register_track_head(
+        "p6_test_sc_ok", 4, kind="resid_chx", mod_channels=(1, 3), mod_scales=(1.5, 3)
+    )
+    with pytest.raises(ValueError, match="mod_scales"):
+        register_track_head(
+            "p6_test_sc_ok", 4, kind="resid_chx", mod_channels=(1, 3), mod_scales=(1.5, 2.0)
+        )
+
+
+def test_resid_chx_spec_from_libraries_and_tis_scale():
+    from tisiago.seq2func.model import MOD_SCALE, resid_chx_spec
+    from tisiago.seq2func.targets import channel_layout, library_channels
+
+    layout = channel_layout(["HeLa", "K562"])
+    channels, scales = resid_chx_spec(layout)
+    assert channels == library_channels(layout, "chx") and scales == (MOD_SCALE,) * 4
+    channels, scales = resid_chx_spec(layout, ("chx", "tis"), scale_tis=3.0)
+    assert channels == (0, 1, 2, 3, 6, 7, 8, 9)
+    assert scales == tuple(3.0 if layout[c][1] == "tis" else MOD_SCALE for c in channels)
+    assert scales.count(3.0) == 4
+
+
+def test_resid_chx_round_trip_with_scales(tmp_path, monkeypatch):
+    from alphagenome_ft.custom_heads import get_custom_head_config
+
+    from tisiago.seq2func import model as model_mod
+    from tisiago.seq2func.model import MOD_SCALE, make_predict
+
+    head = "p6_test_chx_ck_sc"
+    register_track_head(head, 2, kind="resid_chx", mod_channels=(0, 1), mod_scales=(3.0, MOD_SCALE))
+    source = _FakeModel([head], 2, kind="resid_chx", seq_len=48, width=24)
+    model_mod.install_sequence_forward(
+        source, [head], detach_backbone=False, backbone=_fake_backbone()
+    )
+    source._params = _perturbed(source._params, 0.25)
+    _save_model(source, tmp_path / "best")
+    seq = _tx_sequences(np.random.default_rng(1), 1, 48)
+    want = np.asarray(make_predict(source, head)(source._params, source._state, seq))
+
+    def fake_load_model(checkpoint, name, *, detach_backbone=True, device=None):
+        model = _FakeModel([name], 2, kind="resid_chx", width=24)
+        return model_mod.install_sequence_forward(
+            model, [name], detach_backbone=detach_backbone, backbone=_fake_backbone()
+        )
+
+    monkeypatch.setattr(model_mod, "load_model", fake_load_model)
+    loaded = model_mod.load_finetuned(
+        str(tmp_path / "best"),
+        "weights",
+        head,
+        2,
+        "resid_chx",
+        mod_channels=(0, 1),
+        mod_scales=(3.0, MOD_SCALE),
+    )
+    metadata = get_custom_head_config(head).metadata
+    assert tuple(metadata["mod_scales"]) == (3.0, MOD_SCALE)
+    np.testing.assert_array_equal(
+        np.asarray(make_predict(loaded, head)(loaded._params, loaded._state, seq)), want
+    )
+    with pytest.raises(ValueError, match="mod_scales"):
+        model_mod.load_finetuned(
+            str(tmp_path / "best"), "weights", head, 2, "resid_chx", mod_channels=(0, 1)
+        )
 
 
 def _mlp_predict(model, head, seq):
