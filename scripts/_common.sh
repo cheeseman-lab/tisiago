@@ -19,6 +19,7 @@ export TISIAGO_REPO REPO_ROOT
 if [[ -f "$REPO_ROOT/.env" ]]; then
     while IFS='=' read -r key value; do
         [[ -z "$key" || "$key" == \#* ]] && continue
+        [[ "$value" == \"*\" ]] && value="${value:1:${#value}-2}"
         [[ -n "${!key:-}" ]] || export "$key=$value"
     done < "$REPO_ROOT/.env"
 fi
