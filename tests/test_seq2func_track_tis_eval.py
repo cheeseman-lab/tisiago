@@ -420,7 +420,7 @@ def test_cli_val_reports_offset_coverage_and_operating_selection(tmp_path, monke
     real = report["sources"]["real"]
     assert real["selected"] in track_tis_eval.selectable(track_tis_eval.EPS_GRID, normalised=True)
     assert "peak_norm_max" in real["operating"] and "enrich_max_eps1" in real["operating"]
-    assert real["totals"]["val"]["K562"] > 0
+    assert real["depth_normalisation"]["totals"]["K562"] > 0
     assert real["operating"][real["selected"]]["recall"] == 1.0
     assert "test" not in real
     assert (world["out"] / "report.md").read_text().startswith("# P6 track TIS score")
@@ -429,8 +429,22 @@ def test_cli_val_reports_offset_coverage_and_operating_selection(tmp_path, monke
 def test_cli_test_reports_strata_cis_coverage_and_baseline(tmp_path, monkeypatch):
     world = _world(tmp_path)
     monkeypatch.setattr(sys, "argv", _argv(world, "--split", "test", "--i-am-final"))
+    regions_read = []
+    real_total = track_tis_eval.track_total
+
+    def spy(paths, condition, region, *args, **kwargs):
+        regions_read.append(dict(region))
+        return real_total(paths, condition, region, *args, **kwargs)
+
+    monkeypatch.setattr(track_tis_eval, "track_total", spy)
     track_tis_eval.main()
     report = json.loads((world["out"] / "report.json").read_text())
+    # depth normalisation uses the val windows only, for operating and test alike
+    assert regions_read and all(r == {"chr7": [(0, 400)]} for r in regions_read)
+    norm = report["sources"]["real"]["depth_normalisation"]
+    assert norm["region"] == "val" and set(norm["factor"]) == {"operating", "test"}
+    assert norm["factor"]["test"] == norm["factor"]["operating"]
+    assert norm["factor"]["test"]["K562"] == pytest.approx(1e6 / norm["totals"]["K562"])
     covered = report["coverage"]["test"]
     assert covered["positives"]["n"] == 8 and covered["positives"]["covered"] == 7
     real = report["sources"]["real"]
@@ -523,3 +537,8 @@ def test_predicted_dirs_reject_depth_matched_or_other_window_predictions(tmp_pat
     ):
         with pytest.raises(ValueError, match=match):
             track_tis_eval.predicted_dirs({"K562": write(name, **meta)}, "val", ["K562"], windows)
+
+
+def test_default_eps_grid_reaches_well_past_one():
+    assert track_tis_eval.EPS_GRID == pytest.approx((1e-3, 1 / 61, 0.1, 1.0, 3.0, 10.0, 30.0))
+    assert track_tis_eval.build_parser().parse_args([]).eps == list(track_tis_eval.EPS_GRID)

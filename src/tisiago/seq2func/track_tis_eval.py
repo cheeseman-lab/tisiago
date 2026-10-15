@@ -13,8 +13,10 @@ position ``offset`` nt 3' of it in transcript orientation, in the tracks' Ribo-T
 (minus strand at canonical + ``RIBOTISH_MINUS_SHIFT``). The offset is the argmax of the summed
 real-track TIS profile (rep1 + rep2, all conditions) around covered calibration positives and is
 used for both sources. Per condition ``peak`` sums the track over offset +-1 and ``enrich``
-divides it by the mean over offset +-30 plus ``--eps``; variants take the max over conditions
+divides it by the mean over offset +-30 plus each ``--eps``; variants take the max over conditions
 (``*_max``, the labels are a union over lines) or K562 alone (``*_K562``, reference only).
+``peak_norm_max`` scales each condition's peak per million of that source's TIS total over the
+VAL windows, the same constant for operating and test rows (no test totals are read).
 
 A source is ``predicted`` (``--mode float`` pooled TIS bigWigs from
 :mod:`tisiago.seq2func.predict_tracks`) or ``real`` (rep1 + rep2 real tracks). Rows whose A lies
@@ -58,7 +60,7 @@ PEAK_HALF = 1
 CONTEXT_HALF = 30
 PROFILE_HALF = 30
 EPS = 1e-3
-EPS_GRID = (1e-3, 1 / 61, 0.1, 1.0)
+EPS_GRID = (1e-3, 1 / 61, 0.1, 1.0, 3.0, 10.0, 30.0)
 PER_MILLION = 1e6
 CHUNK = 10_000_000
 BOOTSTRAP_SEED = 20260909
@@ -870,17 +872,16 @@ def main() -> None:
         )
         report["offset"]["predicted_profile_argmax"] = estimate_offset(predicted_profile)
 
-    # depth: each source's own TIS total over the split's windows (predicted: predicted totals)
+    # depth: each source's own TIS total over the VAL windows (predicted: predicted totals); the
+    # same constant scales operating and test, so the operating threshold transfers to test
     totals = {
         source: {
-            split: {
-                c: track_total(paths_by_source[source](split), c, regions[split])
-                for c in args.conditions
-            }
-            for split in regions
+            c: track_total(paths_by_source[source]("val"), c, regions["val"])
+            for c in args.conditions
         }
         for source in args.sources
     }
+    factors: dict[str, dict[str, dict[str, float]]] = {source: {} for source in args.sources}
 
     def block(key: str, source: str) -> dict:
         frame = frames[key]
@@ -888,8 +889,9 @@ def main() -> None:
         split = split_of[key]
         paths = paths_by_source[source](split)
         scores = score_rows(
-            frame, covered[key], paths, args.conditions, offset, args.eps, totals[source][split]
+            frame, covered[key], paths, args.conditions, offset, args.eps, totals[source]
         )
+        factors[source][key] = {c: PER_MILLION / t for c, t in totals[source].items()}
         return {
             "scores": scores,
             "labels": frame.label_tis.to_numpy().astype(bool),
@@ -918,7 +920,11 @@ def main() -> None:
             candidates=selectable(args.eps),
             budget=args.budget,
         )
-        result["totals"] = totals[source]
+        result["depth_normalisation"] = {
+            "region": "val",
+            "totals": totals[source],
+            "factor": factors[source],
+        }
         if final:
             selected_scores[source] = test_block["scores"][result["selected"]]
             selected_thresholds[source] = result["threshold"]
