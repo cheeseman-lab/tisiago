@@ -4,6 +4,8 @@ Usage::
 
     python -m tisiago.seq2func.predict_tracks --checkpoint data/p6/runs/<run>/best \
         --arm condition:K562 --split val
+    python -m tisiago.seq2func.predict_tracks --checkpoint data/p6/runs/rnacond_k562/best \
+        --arm rnacond:K562 --condition K562 --split val --mode float
 
 Writes ``<out>/<C>/{tis,chx}_rep{1,2}.{plus,minus}.bw`` (default ``<out>`` =
 ``<run>/predicted_<split>``) with the chromosome sizes of the real tracks and the Ribo-TISH
@@ -30,6 +32,9 @@ same-pipeline noise ceiling for the comparison; it needs no checkpoint
 Overlapping windows are stitched by nearest centre: each position takes the prediction of the
 window whose centre is nearest (ties to the earlier window), i.e. the central part of every
 window, and is written once. The written region is the union of the split's windows.
+
+An ``rnacond:<group>`` checkpoint predicts any ``--condition`` (held out or not) from that
+condition's pooled RNA; the manifest records ``heldout``.
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ import pyBigWig
 
 from tisiago.seq2func.data import iterate
 from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
-from tisiago.seq2func.targets import STRAND_FILES, channel_layout
+from tisiago.seq2func.targets import STRAND_FILES, channel_layout, rnacond_layout
 from tisiago.seq2func.tracks import track_prefix
 from tisiago.seq2func.windows import merge_spans
 
@@ -229,6 +234,7 @@ def predict_condition(
     transcripts=None,
     prefetch: int = 4,
     meta: dict | None = None,
+    rna_conditioned: bool = False,
 ) -> dict:
     """Write ``condition``'s predicted per-replicate TIS/CHX bigWigs; return the manifest.
 
@@ -239,6 +245,8 @@ def predict_condition(
     real pooled total there (one factor per library; the whole prediction is held in memory).
     ``source="real-resample"`` replaces the model by the real pooled tracks as the expectation
     (the same-pipeline noise ceiling); ``predict_fn``, ``fasta``, ``genes`` are then unused.
+    ``rna_conditioned`` (``rnacond`` models): batches carry ``condition``'s RNA and predictions
+    are in :func:`tisiago.seq2func.targets.rnacond_layout` order; ``conditions`` is unused.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
@@ -249,7 +257,11 @@ def predict_condition(
     model = source == "model"
     channel = {}
     if model:
-        layout = channel_layout(conditions)
+        if rna_conditioned:
+            conditions = (condition,)
+            layout = rnacond_layout(condition)
+        else:
+            layout = channel_layout(conditions)
         channel = {
             (lib, s): i
             for i, (c, lib, s) in enumerate(layout)
@@ -298,6 +310,7 @@ def predict_condition(
             loop=False,
             prefetch=prefetch,
             transcripts=transcripts,
+            rna_conditioned=rna_conditioned,
         )
         try:
             for i, batch in enumerate(batches):
@@ -395,6 +408,7 @@ def predict_condition(
         "copies": copies,
         "mask_unexpressed": mask_unexpressed,
         "match_depth": match_depth,
+        "rna_conditioned": rna_conditioned,
         "depth_factors": factors if match_depth else None,
         "unscaled_expected_totals": unscaled,
         "stitching": "nearest_centre",
@@ -422,8 +436,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--checkpoint", type=Path, help="run's best/ or last/ (required for --source model)"
     )
-    ap.add_argument("--arm", help="'shared' or 'condition:<C>' (required for --source model)")
-    ap.add_argument("--condition", help="condition to write (default: the arm's only one)")
+    ap.add_argument(
+        "--arm",
+        help="'shared', 'condition:<C>' or 'rnacond:<group>' (required for --source model)",
+    )
+    ap.add_argument(
+        "--condition",
+        help="condition to write (default: the arm's only one; required for rnacond arms)",
+    )
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
     ap.add_argument("--windows-dir", type=Path, help="default: run.json, else data/p6/windows")
@@ -469,14 +489,24 @@ def main() -> None:
         ap.error("--checkpoint and --arm are required for --source model")
     if not model and not (args.condition or args.arm):
         ap.error("--source real-resample needs --condition (or --arm)")
-    conditions: tuple[str, ...] = ()
-    if args.arm:
-        from tisiago.seq2func.train import parse_arm
+    from tisiago.seq2func.samples import CONDITIONS
+    from tisiago.seq2func.train import is_rnacond_arm, parse_arm, parse_rnacond_arm
 
+    conditions: tuple[str, ...] = ()
+    rnacond = bool(args.arm) and is_rnacond_arm(args.arm)
+    trained: tuple[str, ...] = ()
+    if args.arm:
         try:
-            _, conditions = parse_arm(args.arm)
+            if rnacond:
+                _, _, trained = parse_rnacond_arm(args.arm)
+            else:
+                _, conditions = parse_arm(args.arm)
         except ValueError as exc:
             ap.error(str(exc))
+    if rnacond:
+        if args.condition not in CONDITIONS:
+            ap.error(f"rnacond arms need --condition, one of {CONDITIONS}")
+        conditions = (args.condition,)
     condition = args.condition or (conditions[0] if len(conditions) == 1 else None)
     if condition is None or (conditions and condition not in conditions):
         ap.error(f"--condition must be one of {conditions}" if conditions else "--condition needed")
@@ -518,6 +548,8 @@ def main() -> None:
         "windows_dir": str(windows_dir),
         "tracks_dir": str(tracks_dir),
     }
+    if rnacond:
+        meta["heldout"] = condition not in trained
     kwargs = {}
     if model:
         from tisiago.seq2func.evaluate import head_kind_of, load_predict_fn, load_transcripts
@@ -536,6 +568,7 @@ def main() -> None:
             genes=genes,
             conditions=conditions,
             transcripts=load_transcripts(head_kind, args.gtf),
+            rna_conditioned=rnacond,
         )
         meta |= {"head": head_kind, "expression": str(expression)}
     manifest = predict_condition(

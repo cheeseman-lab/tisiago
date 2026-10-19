@@ -13,7 +13,14 @@ import pandas as pd
 from tisiago.seq2func.augment import reverse_complement, shift
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
-from tisiago.seq2func.targets import STRAND_FILES, channel_layout, strand_pairs
+from tisiago.seq2func.samples import LIBRARIES
+from tisiago.seq2func.targets import (
+    RNACOND_LIBRARIES,
+    STRAND_FILES,
+    channel_layout,
+    rnacond_layout,
+    strand_pairs,
+)
 from tisiago.seq2func.tracks import track_prefix
 
 _LOOKUP = np.zeros((256, 4), dtype=np.float32)
@@ -47,11 +54,15 @@ class TrackReader:
     """Reads :func:`tisiago.seq2func.targets.load_targets` windows from cached bigWig handles."""
 
     def __init__(
-        self, tracks_dir: str | Path, conditions: Sequence[str], rep: int | str = "pooled"
+        self,
+        tracks_dir: str | Path,
+        conditions: Sequence[str],
+        rep: int | str = "pooled",
+        libraries: Sequence[str] = LIBRARIES,
     ):
         """Resolve the per-channel paths; handles are opened lazily on first read."""
         self.channels = []
-        for condition, library, strand in channel_layout(conditions):
+        for condition, library, strand in channel_layout(conditions, libraries):
             prefix = track_prefix(tracks_dir, condition, library, rep)
             shift_ = RIBOTISH_MINUS_SHIFT if strand == "-" and library != "rna" else 0
             self.channels.append((f"{prefix}.{STRAND_FILES[strand]}.bw", shift_))
@@ -89,6 +100,51 @@ class TrackReader:
         self._handles.clear()
 
 
+class RnaCondReaders:
+    """Per-condition readers of ``rnacond`` examples: TIS/CHX targets and the RNA input."""
+
+    def __init__(self, tracks_dir: str | Path):
+        """Readers are created on first use of a condition."""
+        self.tracks_dir = tracks_dir
+        self._readers: dict[str, tuple[TrackReader, TrackReader]] = {}
+
+    def get(self, condition: str) -> tuple[TrackReader, TrackReader]:
+        """``(targets reader, RNA reader)`` of ``condition``."""
+        if condition not in self._readers:
+            self._readers[condition] = (
+                TrackReader(self.tracks_dir, [condition], libraries=RNACOND_LIBRARIES),
+                TrackReader(self.tracks_dir, [condition], libraries=("rna",)),
+            )
+        return self._readers[condition]
+
+    def close(self) -> None:
+        """Close every reader."""
+        for readers in self._readers.values():
+            for reader in readers:
+                reader.close()
+        self._readers.clear()
+
+
+def _window_sequence(fasta, chrom: str, start: int, end: int, transcripts=None) -> np.ndarray:
+    """One-hot (plus transcript features) of ``[start, end)`` from a path or an open handle."""
+
+    def read(handle):
+        sequence = one_hot(fetch_sequence(handle, chrom, start, end))
+        if transcripts is None:
+            return sequence
+        return np.concatenate([sequence, transcripts.window(handle, chrom, start, end)], axis=1)
+
+    if isinstance(fasta, (str, Path)):
+        from pyfaidx import Fasta
+
+        handle = Fasta(str(fasta), as_raw=True)
+        try:
+            return read(handle)
+        finally:
+            handle.close()
+    return read(fasta)
+
+
 def make_example(
     fasta: str | Path | object,
     tracks_dir: str | Path,
@@ -106,23 +162,7 @@ def make_example(
     :class:`tisiago.seq2func.tx_features.TranscriptFeatures`) ``sequences`` is ``(S, 4 + 20)``:
     one-hot, then the transcript-coordinate open-frame features.
     """
-
-    def read(handle):
-        sequence = one_hot(fetch_sequence(handle, chrom, start, end))
-        if transcripts is None:
-            return sequence
-        return np.concatenate([sequence, transcripts.window(handle, chrom, start, end)], axis=1)
-
-    if isinstance(fasta, (str, Path)):
-        from pyfaidx import Fasta
-
-        handle = Fasta(str(fasta), as_raw=True)
-        try:
-            sequences = read(handle)
-        finally:
-            handle.close()
-    else:
-        sequences = read(fasta)
+    sequences = _window_sequence(fasta, chrom, start, end, transcripts)
     layout = channel_layout(conditions)
     if reader is None:
         reader = TrackReader(tracks_dir, conditions)
@@ -136,6 +176,40 @@ def make_example(
         "sequences": sequences,
         "targets": targets,
         "mask": expression_mask(layout, genes, chrom, start, end),
+    }
+
+
+def make_rnacond_example(
+    fasta: str | Path | object,
+    tracks_dir: str | Path,
+    condition: str,
+    genes: pd.DataFrame,
+    chrom: str,
+    start: int,
+    end: int,
+    readers: RnaCondReaders | None = None,
+) -> dict[str, np.ndarray]:
+    """One (window, condition) pair: ``sequences (S, 6)``, ``targets (S, 4)``, ``mask (S, 4)``.
+
+    ``sequences`` is the one-hot, then ``condition``'s raw pooled RNA 5'-end counts on the plus
+    and minus strand (read like the ``rna`` target channels: no minus-strand shift). ``targets``
+    are its pooled TIS+, TIS-, CHX+, CHX- (:func:`tisiago.seq2func.targets.rnacond_layout`,
+    canonical P-sites) and ``mask`` their expression mask. Pass ``readers`` to reuse handles.
+    """
+    sequence = _window_sequence(fasta, chrom, start, end)
+    own = readers is None
+    readers = RnaCondReaders(tracks_dir) if own else readers
+    try:
+        target_reader, rna_reader = readers.get(condition)
+        targets = target_reader.read(chrom, start, end)
+        rna = rna_reader.read(chrom, start, end)
+    finally:
+        if own:
+            readers.close()
+    return {
+        "sequences": np.concatenate([sequence, rna], axis=1),
+        "targets": targets,
+        "mask": expression_mask(rnacond_layout(condition), genes, chrom, start, end),
     }
 
 
@@ -167,31 +241,42 @@ def _produce(out, stop, worker, workers, windows, cfg, seed, augment_examples, l
 
     reader = handle = None
     try:
-        fasta, tracks_dir, conditions, genes, transcripts = cfg
+        fasta, tracks_dir, conditions, genes, transcripts, rna_conditioned = cfg
         handle = Fasta(str(fasta), as_raw=True)
-        reader = TrackReader(tracks_dir, conditions)
-        pairs = strand_pairs(channel_layout(conditions))
+        if rna_conditioned:
+            reader = RnaCondReaders(tracks_dir)
+            pairs = strand_pairs(rnacond_layout(conditions[0]))
+            items = [(w, c) for c in conditions for w in range(len(windows))]
+        else:
+            reader = TrackReader(tracks_dir, conditions)
+            pairs = strand_pairs(channel_layout(conditions))
+            items = [(w, None) for w in range(len(windows))]
         rng = np.random.default_rng([seed, worker])
         epoch = 0
         while not stop.is_set():
-            order = np.arange(len(windows))
+            order = np.arange(len(items))
             if loop:
                 order = np.random.default_rng(seed + epoch).permutation(order)
             for i in order[worker::workers]:
                 if stop.is_set():
                     return
-                row = windows.iloc[i]
-                example = make_example(
-                    handle,
-                    tracks_dir,
-                    conditions,
-                    genes,
-                    row.chrom,
-                    int(row.start),
-                    int(row.end),
-                    reader=reader,
-                    transcripts=transcripts,
-                )
+                w, condition = items[i]
+                row = windows.iloc[w]
+                window = (row.chrom, int(row.start), int(row.end))
+                if rna_conditioned:
+                    example = make_rnacond_example(
+                        handle, tracks_dir, condition, genes, *window, readers=reader
+                    )
+                else:
+                    example = make_example(
+                        handle,
+                        tracks_dir,
+                        conditions,
+                        genes,
+                        *window,
+                        reader=reader,
+                        transcripts=transcripts,
+                    )
                 if augment_examples:
                     example = augment(example, rng, pairs)
                 if not _put(out, {k: v[None] for k, v in example.items()}, stop):
@@ -222,6 +307,7 @@ def iterate(
     loop: bool = True,
     workers: int = 4,
     transcripts=None,
+    rna_conditioned: bool = False,
 ) -> Iterator[dict[str, np.ndarray]]:
     """Yield batch-1 dicts (leading axis 1) prefetched by daemon threads into a bounded queue.
 
@@ -231,11 +317,17 @@ def iterate(
     Worker errors are re-raised here; closing the generator stops and joins the workers.
     ``transcripts`` (shared by the workers) adds the ``seqconv_tx`` channels: see
     :func:`make_example`.
+
+    ``rna_conditioned`` yields :func:`make_rnacond_example` (window, condition) pairs over every
+    window and every condition in ``conditions`` instead: shuffled jointly per epoch with
+    ``loop=True``; condition-major (each condition's windows in order) with ``loop=False``.
     """
+    if rna_conditioned and transcripts is not None:
+        raise ValueError("rna_conditioned examples take no transcripts")
     workers = max(1, workers) if loop else 1
     out: queue.Queue = queue.Queue(maxsize=prefetch)
     stop = threading.Event()
-    cfg = (fasta, tracks_dir, conditions, genes, transcripts)
+    cfg = (fasta, tracks_dir, conditions, genes, transcripts, rna_conditioned)
     threads = [
         threading.Thread(
             target=_produce,

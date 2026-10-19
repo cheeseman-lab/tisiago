@@ -7,6 +7,8 @@ Usage::
         --split val
     python -m tisiago.seq2func.evaluate --checkpoint data/p6/runs/shared/best --arm shared \
         --split test --i-am-final
+    python -m tisiago.seq2func.evaluate --checkpoint data/p6/runs/rnacond_hela/best \
+        --arm rnacond:HeLa --split val --condition HeLa,K562
 
 Writes one row per channel to ``data/p6/eval/<arm>_<split>.tsv`` (model prediction vs pooled
 targets), ``data/p6/eval/ceiling_<split>.tsv`` (replicate 1 observed; the profile prediction is
@@ -20,6 +22,10 @@ fraction over MANE CDS of genes expressed in the channel's condition, assigned t
 same way (canonical P-sites, no shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a
 truncated reference never stands in for the full one; a reused reference must match the
 ``ceiling_version``, window count and tracks directory.
+
+An ``rnacond:<group>`` checkpoint is evaluated on any condition (held out or not) by feeding
+that condition's RNA: one ``<arm>_<condition>_<split>.tsv`` per ``--condition`` (default: all
+six), rows for its TIS/CHX channels in the same format plus ``heldout``.
 """
 
 from __future__ import annotations
@@ -39,11 +45,16 @@ import pandas as pd
 from tisiago.seq2func.data import TrackReader, iterate
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
-from tisiago.seq2func.overfit import CHX_KINDS, HEAD_CHOICES, TRANSCRIPT_KINDS
+from tisiago.seq2func.overfit import CHX_KINDS, HEAD_CHOICES, RNA_KINDS, TRANSCRIPT_KINDS
 from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.samples import CONDITIONS
-from tisiago.seq2func.targets import channel_layout
-from tisiago.seq2func.train import parse_arm
+from tisiago.seq2func.targets import channel_layout, rnacond_layout
+from tisiago.seq2func.train import (
+    check_rnacond_run,
+    is_rnacond_arm,
+    parse_arm,
+    parse_rnacond_arm,
+)
 
 EXCLUDED = -1
 OUTSIDE = -2
@@ -337,8 +348,18 @@ def load_predict_fn(
 
     from tisiago.seq2func.model import MOD_SCALE, load_finetuned, make_predict, resid_chx_spec
 
-    head, conditions = parse_arm(arm)
-    layout = channel_layout(conditions)
+    rnacond = is_rnacond_arm(arm)
+    if rnacond != (head_kind in RNA_KINDS):
+        raise ValueError(f"arm {arm} and head kind {head_kind}: rnacond arms need rnacond heads")
+    if rnacond:
+        head, _, conditions = parse_rnacond_arm(arm)
+        layout = rnacond_layout(conditions[0])
+        path = Path(checkpoint).parent / "run.json"
+        if path.exists():
+            check_rnacond_run(json.loads(path.read_text()), arm)
+    else:
+        head, conditions = parse_arm(arm)
+        layout = channel_layout(conditions)
     mod_channels = mod_scales = None
     if head_kind in CHX_KINDS:
         path = Path(checkpoint).parent / "run.json"
@@ -380,21 +401,33 @@ def evaluate_checkpoint(
     head_kind: str = "mlp",
     prefetch: int = 4,
     transcripts=None,
+    condition: str | None = None,
 ) -> pd.DataFrame:
     """Per-channel metrics of the arm's predictions against pooled targets.
 
     ``predict_fn(batch)`` maps an ``iterate`` batch to ``(1, S, C)`` predictions; when omitted
     it is loaded from ``checkpoint`` with :func:`load_predict_fn`. ``transcripts`` (see
-    :func:`load_transcripts`) adds the ``seqconv_tx`` input channels.
+    :func:`load_transcripts`) adds the ``seqconv_tx`` input channels. ``rnacond`` arms need
+    ``condition`` (any of :data:`CONDITIONS`): its RNA is the input, its TIS/CHX the targets.
     """
-    _, conditions = parse_arm(arm)
+    rnacond = is_rnacond_arm(arm)
+    if rnacond:
+        parse_rnacond_arm(arm)
+        if condition not in CONDITIONS:
+            raise ValueError(f"{arm} needs a condition from {CONDITIONS}, not {condition!r}")
+        conditions, layout = (condition,), rnacond_layout(condition)
+    else:
+        if condition is not None:
+            raise ValueError(f"condition is only for rnacond arms, not {arm}")
+        _, conditions = parse_arm(arm)
+        layout = channel_layout(conditions)
     if predict_fn is None:
         predict_fn = load_predict_fn(
             checkpoint, arm, base_checkpoint=base_checkpoint, head_kind=head_kind
         )
     windows = windows.reset_index(drop=True)
     genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
-    metrics = ChannelMetrics(channel_layout(conditions), genes, windows, cds, cds_genes)
+    metrics = ChannelMetrics(layout, genes, windows, cds, cds_genes)
     batches = iterate(
         windows,
         fasta=fasta,
@@ -406,6 +439,7 @@ def evaluate_checkpoint(
         loop=False,
         prefetch=prefetch,
         transcripts=transcripts,
+        rna_conditioned=rnacond,
     )
     try:
         for i, batch in enumerate(batches):
@@ -417,17 +451,23 @@ def evaluate_checkpoint(
 
 
 def output_paths(
-    out_dir: str | Path, arm: str | None, split: str, max_windows: int | None = None
+    out_dir: str | Path,
+    arm: str | None,
+    split: str,
+    max_windows: int | None = None,
+    condition: str | None = None,
 ) -> dict[str, Path]:
     """``{"model": <arm>_<split>.tsv, "ceiling"|"uniform": <kind>_<split>.tsv}`` in ``out_dir``.
 
     With ``max_windows`` both names gain ``_max<N>`` so truncated runs never take the full names.
+    A ``condition`` (rnacond arms) is added to the model name: ``<arm>_<condition>_<split>``.
     """
     out_dir = Path(out_dir)
     suffix = f"{split}_max{max_windows}" if max_windows is not None else split
     paths = {kind: out_dir / f"{kind}_{suffix}.tsv" for kind in REFERENCES}
     if arm is not None:
-        paths["model"] = out_dir / f"{arm.replace(':', '_').lower()}_{suffix}.tsv"
+        name = arm.replace(":", "_") + (f"_{condition}" if condition else "")
+        paths["model"] = out_dir / f"{name.lower()}_{suffix}.tsv"
     return paths
 
 
@@ -488,7 +528,12 @@ def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, help="run's best/ or last/ directory")
-    ap.add_argument("--arm", help="'shared' or 'condition:<C>'")
+    ap.add_argument("--arm", help="'shared', 'condition:<C>' or 'rnacond:<held-out group>'")
+    ap.add_argument(
+        "--condition",
+        default=None,
+        help="rnacond arms: comma list of conditions to evaluate (default: all six)",
+    )
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
     ap.add_argument(
@@ -523,18 +568,35 @@ def main() -> None:
     args = ap.parse_args()
     if args.split == "test" and not args.i_am_final:
         ap.error("--split test reads the held-out chromosomes; pass --i-am-final to confirm")
+    rnacond = args.arm is not None and is_rnacond_arm(args.arm)
     if not args.ceiling_only:
         if args.arm is None or args.checkpoint is None:
             ap.error("--arm and --checkpoint are required unless --ceiling-only")
         try:
-            parse_arm(args.arm)
+            parse_rnacond_arm(args.arm) if rnacond else parse_arm(args.arm)
         except ValueError as exc:
             ap.error(str(exc))
+    if args.condition is not None and not (rnacond and not args.ceiling_only):
+        ap.error("--condition is only for rnacond arms")
+    conditions: list[str | None] = [None]
+    if rnacond:
+        conditions = args.condition.split(",") if args.condition else list(CONDITIONS)
+        unknown = sorted(set(conditions) - set(CONDITIONS))
+        if unknown or len(set(conditions)) != len(conditions):
+            ap.error(f"--condition must list distinct conditions from {CONDITIONS}")
     arm = None if args.ceiling_only else args.arm
     paths = output_paths(args.out_dir, arm, args.split, args.max_windows)
-    targets = [paths[k] for k in REFERENCES] if args.ceiling_only else [paths["model"]]
-    if all(t.exists() for t in targets) and not args.overwrite:
-        ap.error(f"{', '.join(map(str, targets))} exist; pass --overwrite to replace")
+    models = {
+        c: output_paths(args.out_dir, arm, args.split, args.max_windows, c) for c in conditions
+    }
+    if args.ceiling_only:
+        targets = [paths[k] for k in REFERENCES]
+        if all(t.exists() for t in targets) and not args.overwrite:
+            ap.error(f"{', '.join(map(str, targets))} exist; pass --overwrite to replace")
+    else:
+        existing = [str(p["model"]) for p in models.values() if p["model"].exists()]
+        if existing and not args.overwrite:
+            ap.error(f"{', '.join(existing)} exist; pass --overwrite to replace")
     required = ("gtf",) if args.ceiling_only else ("genome", "gtf", "base_checkpoint")
     for flag in required:
         if not getattr(args, flag):
@@ -567,24 +629,34 @@ def main() -> None:
 
     t0 = time.time()
     head_kind = args.head or head_kind_of(args.checkpoint)
-    table = evaluate_checkpoint(
-        args.checkpoint,
-        args.arm,
-        windows,
-        fasta=args.genome,
-        tracks_dir=tracks_dir,
-        genes=genes,
-        cds=cds,
-        cds_genes=cds_genes,
-        base_checkpoint=args.base_checkpoint,
-        head_kind=head_kind,
-        prefetch=args.prefetch,
-        transcripts=load_transcripts(head_kind, args.gtf),
+    transcripts = load_transcripts(head_kind, args.gtf)
+    predict_fn = load_predict_fn(
+        args.checkpoint, args.arm, base_checkpoint=args.base_checkpoint, head_kind=head_kind
     )
-    table = table.assign(source="model", arm=args.arm, checkpoint=str(args.checkpoint), **meta)
-    write_tsv(table, paths["model"])
-    print(f"model {time.time() - t0:.0f}s -> {paths['model']}", flush=True)
-    print(table.to_string(index=False), flush=True)
+    trained = set(parse_rnacond_arm(args.arm)[2]) if rnacond else set()
+    for condition in conditions:
+        t0 = time.time()
+        table = evaluate_checkpoint(
+            args.checkpoint,
+            args.arm,
+            windows,
+            fasta=args.genome,
+            tracks_dir=tracks_dir,
+            genes=genes,
+            cds=cds,
+            cds_genes=cds_genes,
+            predict_fn=predict_fn,
+            prefetch=args.prefetch,
+            transcripts=transcripts,
+            condition=condition,
+        )
+        table = table.assign(source="model", arm=args.arm, checkpoint=str(args.checkpoint), **meta)
+        if rnacond:
+            table["heldout"] = condition not in trained
+        path = models[condition]["model"]
+        write_tsv(table, path)
+        print(f"model {time.time() - t0:.0f}s -> {path}", flush=True)
+        print(table.to_string(index=False), flush=True)
 
 
 if __name__ == "__main__":

@@ -5,11 +5,13 @@ from collections import Counter
 import pytest
 
 from tisiago.seq2func.targets import (
+    RNACOND_LIBRARIES,
     channel_layout,
     library_channels,
     load_targets,
     modulated_channels,
     read_window,
+    rnacond_layout,
     strand_pairs,
 )
 from tisiago.seq2func.tracks import track_prefix, write_bigwigs
@@ -22,6 +24,20 @@ def test_channel_layout_and_pairs():
     assert layout[:3] == [("HeLa", "tis", "+"), ("HeLa", "tis", "-"), ("HeLa", "chx", "+")]
     assert len(layout) == 12
     assert strand_pairs(layout)[:2] == [(0, 1), (2, 3)]
+
+
+def test_rnacond_layout_is_tis_chx_of_one_condition():
+    assert RNACOND_LIBRARIES == ("tis", "chx")
+    assert rnacond_layout("K562") == [
+        ("K562", "tis", "+"),
+        ("K562", "tis", "-"),
+        ("K562", "chx", "+"),
+        ("K562", "chx", "-"),
+    ]
+    assert rnacond_layout("K562") == channel_layout(["K562"], RNACOND_LIBRARIES)
+    assert strand_pairs(rnacond_layout("HeLa")) == [(0, 1), (2, 3)]
+    assert library_channels(rnacond_layout("HeLa"), "chx") == (2, 3)
+    assert channel_layout(["HeLa"], ("rna",)) == [("HeLa", "rna", "+"), ("HeLa", "rna", "-")]
 
 
 def test_read_window_pads_outside_chromosome(tmp_path):

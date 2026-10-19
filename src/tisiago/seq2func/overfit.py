@@ -25,10 +25,11 @@ HEAD = "p6_overfit"
 WINDOW = 131_072
 TIMING_SKIP = 2
 PROFILE_KL_MAX = 1.0
-HEAD_CHOICES = ("mlp", "conv", "seqconv", "seqconv_tx", "resid_tx", "resid_chx")
+HEAD_CHOICES = ("mlp", "conv", "seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond")
 TRANSCRIPT_KINDS = frozenset({"seqconv_tx", "resid_tx", "resid_chx"})
 MOD_KINDS = frozenset({"resid_tx", "resid_chx"})
 CHX_KINDS = frozenset({"resid_chx"})
+RNA_KINDS = frozenset({"rnacond"})
 
 
 def fetch_onehot(genome: str, chrom: str, start: int, end: int) -> np.ndarray:
@@ -109,6 +110,8 @@ def main() -> None:
         ap.error("--genome is required (or set TISIAGO_GENOME)")
     if args.head in TRANSCRIPT_KINDS:
         ap.error(f"--head {args.head} needs transcript features; use train.py")
+    if args.head in RNA_KINDS:
+        ap.error(f"--head {args.head} needs the RNA input; use train.py --arm rnacond:<group>")
     if args.steps <= TIMING_SKIP:
         ap.error(f"--steps must be > {TIMING_SKIP}")
     out = args.out or Path(f"data/p6/overfit/{args.condition}.json")

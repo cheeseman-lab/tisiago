@@ -8,6 +8,12 @@ from pathlib import Path
 import pandas as pd
 
 CONDITIONS = ("HeLa", "K562", "U2OS", "RPE1_Async", "RPE1_Que", "RPE1_Sen")
+CELL_LINE_GROUPS = {
+    "HeLa": ("HeLa",),
+    "K562": ("K562",),
+    "U2OS": ("U2OS",),
+    "RPE1": ("RPE1_Async", "RPE1_Que", "RPE1_Sen"),
+}
 LIBRARIES = ("tis", "chx", "rna")
 REPLICATES = (1, 2)
 _RPE1 = {"Async": "RPE1_Async", "Quiescent": "RPE1_Que", "Senescent": "RPE1_Sen"}

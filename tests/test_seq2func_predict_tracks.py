@@ -494,3 +494,114 @@ def test_float_mode_cli_default_out_dir(monkeypatch, tmp_path):
     predict_tracks.main()
     assert seen["mode"] == "float"
     assert seen["out_dir"] == tmp_path / "run" / "predicted_val_float"
+
+
+# --- rnacond: TIS/CHX tracks of any condition from the condition's RNA ---
+
+
+def test_rnacond_float_mode_matches_oracle_and_feeds_rna(world):
+    plus = {"chr7": {10: 3, 77: 1}}
+    minus = {"chr7": {31: 2}}
+    _write_reps(world["tracks"], plus, minus)
+    _write_reps(world["tracks"], {"chr7": {10: 6, 77: 2}}, {"chr7": {31: 4}}, reps=("pooled",))
+    seen = []
+
+    def oracle(batch):
+        seen.append(batch["sequences"][0])
+        return batch["targets"]
+
+    manifest = predict_condition(
+        oracle,
+        WINDOWS,
+        fasta=world["fasta"],
+        tracks_dir=world["tracks"],
+        genes=_genes(),
+        condition="K562",
+        conditions=("K562",),
+        out_dir=world["out"],
+        mode="float",
+        rna_conditioned=True,
+    )
+    widths = [x.shape[-1] for x in seen]
+    assert seen[0][10, 4] == 6.0 and seen[0][31, 5] == 4.0  # the pooled RNA, plus and minus
+    assert widths == [6, 6, 6]
+    assert manifest["rna_conditioned"] is True
+    for library in ("tis", "chx"):
+        prefix = predict_tracks.pooled_prefix(world["out"], "K562", library)
+        got_plus = {p: v for p, v in read_bigwig_counts(f"{prefix}.plus.bw")["chr7"].items() if v}
+        got_minus = {p: v for p, v in read_bigwig_counts(f"{prefix}.minus.bw")["chr7"].items() if v}
+        assert got_plus == {10: 6.0, 77: 2.0}
+        assert got_minus == {31: 4.0}
+    assert not (world["out"] / "K562" / "rna_pooled.plus.bw").exists()
+
+
+def test_rnacond_channels_map_to_tis_and_chx(world):
+    _write_reps(world["tracks"], {"chr7": {10: 1}}, {}, reps=(1, 2, "pooled"))
+
+    def by_channel(batch):
+        pred = np.zeros((1, batch["targets"].shape[1], 4))
+        pred[0, :, 0], pred[0, :, 3] = 0.5, 0.25  # TIS+ and CHX-
+        return pred
+
+    _run(world, world["out"], by_channel, mode="float", rna_conditioned=True)
+    tis = predict_tracks.pooled_prefix(world["out"], "K562", "tis")
+    chx = predict_tracks.pooled_prefix(world["out"], "K562", "chx")
+    assert set(read_bigwig_counts(f"{tis}.plus.bw")["chr7"].values()) == {0.5}
+    assert set(read_bigwig_counts(f"{chx}.minus.bw")["chr7"].values()) == {0.25}
+    assert not any(read_bigwig_counts(f"{tis}.minus.bw")["chr7"].values())
+
+
+def test_rnacond_cli_any_condition(monkeypatch, tmp_path, capsys):
+    seen = {}
+
+    def fake_predict(predict_fn, windows, **kwargs):
+        seen.update(kwargs)
+        return {}
+
+    def fake_load(checkpoint, arm, *, base_checkpoint, head_kind="mlp", device=None):
+        seen["loaded"] = (arm, head_kind)
+        return "predict"
+
+    from tisiago.seq2func import evaluate
+
+    windows_dir = tmp_path / "win"
+    windows_dir.mkdir()
+    WINDOWS.to_parquet(windows_dir / "val.parquet")
+    expression = tmp_path / "expression.parquet"
+    pd.concat([_genes(), _genes().assign(condition="HeLa")]).to_parquet(expression)
+    monkeypatch.setattr(predict_tracks, "predict_condition", fake_predict)
+    monkeypatch.setattr(evaluate, "load_predict_fn", fake_load)
+    base = [
+        "predict_tracks",
+        "--arm",
+        "rnacond:K562",
+        "--checkpoint",
+        str(tmp_path / "run" / "best"),
+        "--tracks-dir",
+        str(tmp_path / "tracks"),
+        "--windows-dir",
+        str(windows_dir),
+        "--expression",
+        str(expression),
+        "--genome",
+        "g.fa",
+        "--base-checkpoint",
+        "w",
+        "--head",
+        "rnacond",
+    ]
+    monkeypatch.setattr(sys, "argv", [*base, "--condition", "K562"])
+    predict_tracks.main()
+    assert seen["loaded"] == ("rnacond:K562", "rnacond")
+    assert seen["condition"] == "K562" and seen["conditions"] == ("K562",)
+    assert seen["rna_conditioned"] is True and set(seen["genes"].condition) == {"K562"}
+    assert seen["meta"]["heldout"] is True
+    assert seen["out_dir"] == tmp_path / "run" / "predicted_val"
+    monkeypatch.setattr(sys, "argv", [*base, "--condition", "HeLa"])
+    predict_tracks.main()
+    assert seen["condition"] == "HeLa" and seen["meta"]["heldout"] is False
+    for bad in ([], ["--condition", "Nope"]):
+        monkeypatch.setattr(sys, "argv", [*base, *bad])
+        with pytest.raises(SystemExit):
+            predict_tracks.main()
+    assert "--condition" in capsys.readouterr().err

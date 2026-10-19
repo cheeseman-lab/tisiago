@@ -13,11 +13,19 @@ from tisiago.seq2func.samples import LIBRARIES
 from tisiago.seq2func.tracks import track_prefix
 
 STRAND_FILES = {"+": "plus", "-": "minus"}
+RNACOND_LIBRARIES = ("tis", "chx")
 
 
-def channel_layout(conditions: Sequence[str]) -> list[tuple[str, str, str]]:
+def channel_layout(
+    conditions: Sequence[str], libraries: Sequence[str] = LIBRARIES
+) -> list[tuple[str, str, str]]:
     """Channels in model order: condition, then library, then (plus, minus)."""
-    return [(c, lib, s) for c in conditions for lib in LIBRARIES for s in ("+", "-")]
+    return [(c, lib, s) for c in conditions for lib in libraries for s in ("+", "-")]
+
+
+def rnacond_layout(condition: str) -> list[tuple[str, str, str]]:
+    """The 4 output channels of an ``rnacond`` example: TIS+, TIS-, CHX+, CHX- of ``condition``."""
+    return channel_layout([condition], RNACOND_LIBRARIES)
 
 
 def library_channels(layout: list[tuple[str, str, str]], library: str) -> tuple[int, ...]:

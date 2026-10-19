@@ -27,6 +27,7 @@ from alphagenome_research.model import dna_model
 
 from tisiago.seq2func.loss import poisson_multinomial
 from tisiago.seq2func.orf_features import orf_features
+from tisiago.seq2func.rna_features import rna_features
 from tisiago.seq2func.targets import modulated_channels
 from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 
@@ -36,6 +37,7 @@ MOD_HIDDEN = 64
 MOD_HIDDEN_CHX = 256
 MOD_SCALE = 1.5
 INIT_SEQ_LEN = 2**14
+RNACOND_WIDTH = 4 + 2
 _SEQUENCE_FREE_INIT = False
 
 
@@ -118,9 +120,8 @@ class SeqConvTrackHead(ConvTrackHead):
         return ConvTrackHead.predict(self, embeddings, organism_index, sequence=extra)
 
 
-def _tx_sequence(embeddings, kwargs, kind: str):
-    """``kwargs["sequence"]`` ``(B, S, 4 + 20)`` for a transcript head (zeros inside init)."""
-    width = 4 + NUM_TX_CHANNELS
+def _head_sequence(embeddings, kwargs, kind: str, width: int, extra: str):
+    """``kwargs["sequence"]`` ``(B, S, width)`` for a sequence head (zeros inside init)."""
     sequence = kwargs.get("sequence")
     if sequence is None:
         if not _SEQUENCE_FREE_INIT:
@@ -129,10 +130,15 @@ def _tx_sequence(embeddings, kwargs, kind: str):
         sequence = jnp.zeros((*x.shape[:2], width), jnp.float32)
     if sequence.shape[-1] != width:
         raise ValueError(
-            f"{kind} head needs sequences with {width} channels (one-hot + transcript "
-            f"features: iterate(..., transcripts=...)), got {sequence.shape[-1]}"
+            f"{kind} head needs sequences with {width} channels ({extra}), got {sequence.shape[-1]}"
         )
     return sequence
+
+
+def _tx_sequence(embeddings, kwargs, kind: str):
+    """``kwargs["sequence"]`` ``(B, S, 4 + 20)`` for a transcript head (zeros inside init)."""
+    extra = "one-hot + transcript features: iterate(..., transcripts=...)"
+    return _head_sequence(embeddings, kwargs, kind, 4 + NUM_TX_CHANNELS, extra)
 
 
 class SeqConvTxTrackHead(ConvTrackHead):
@@ -209,6 +215,28 @@ class ResidChxTrackHead(TrackHead):
         return base.at[..., index].multiply(factor, unique_indices=True)
 
 
+class RnaCondTrackHead(TrackHead):
+    """concat(1-bp embeddings, RNA features) -> Linear(256) -> relu -> Linear(C) -> softplus.
+
+    Needs ``kwargs["sequence"]`` ``(B, S, 6)``: the one-hot plus the condition's raw pooled RNA
+    counts (plus, minus), built by ``iterate(..., rna_conditioned=True)``; the backbone sees only
+    the one-hot (:func:`make_sequence_forward`). The RNA enters through
+    :func:`tisiago.seq2func.rna_features.rna_features` (10 channels, computed here so they follow
+    augmentation). Outputs TIS+, TIS-, CHX+, CHX- (``targets.rnacond_layout``).
+    """
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, num_tracks)``."""
+        extra = "one-hot + RNA plus/minus: iterate(..., rna_conditioned=True)"
+        sequence = _head_sequence(embeddings, kwargs, "rnacond", RNACOND_WIDTH, extra)
+        x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
+        x = jnp.concatenate([x, rna_features(sequence[..., 4:])], axis=-1)
+        x = hk.Linear(256, name="hidden")(x)
+        x = jax.nn.relu(x)
+        x = hk.Linear(self._num_tracks, name="output")(x)
+        return jax.nn.softplus(x.astype(jnp.float32))
+
+
 HEAD_KINDS = {
     "mlp": TrackHead,
     "conv": ConvTrackHead,
@@ -216,12 +244,14 @@ HEAD_KINDS = {
     "seqconv_tx": SeqConvTxTrackHead,
     "resid_tx": ResidTxTrackHead,
     "resid_chx": ResidChxTrackHead,
+    "rnacond": RnaCondTrackHead,
 }
-SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx"})
+SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond"})
 SEQUENCE_WIDTHS = {
     "seqconv_tx": 4 + NUM_TX_CHANNELS,
     "resid_tx": 4 + NUM_TX_CHANNELS,
     "resid_chx": 4 + NUM_TX_CHANNELS,
+    "rnacond": RNACOND_WIDTH,
 }
 _REGISTERED_KINDS: dict[str, str] = {}
 
@@ -370,7 +400,7 @@ def make_sequence_forward(heads, *, detach_backbone: bool, backbone=None):
     Same Haiku transform and module names as ``create_model_with_heads`` (``alphagenome/...``
     backbone, ``head/<name>/...`` heads), so it applies to that model's ``(params, state)``.
     ``backbone`` (tests) replaces AlphaGenome inside the transform. The backbone gets
-    ``dna_sequence[..., :4]``; heads get every channel (``seqconv_tx`` adds 20).
+    ``dna_sequence[..., :4]``; heads get every channel (``seqconv_tx`` adds 20, ``rnacond`` 2).
     """
     backbone = backbone or _alphagenome_backbone()
     num_organisms = len(dna_model.Organism)

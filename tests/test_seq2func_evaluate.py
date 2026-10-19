@@ -628,3 +628,211 @@ def test_load_transcripts_only_for_transcript_heads(tmp_path):
         evaluate.load_transcripts("seqconv_tx", None)
     loaded = evaluate.load_transcripts("seqconv_tx", gtf)
     assert [t.transcript_id for t in loaded.overlapping("chr7", 0, 100)] == ["T"]
+
+
+# --- rnacond: one model, evaluated on any condition by feeding that condition's RNA ---
+
+
+@pytest.fixture
+def rna_world(world):
+    _write(world["tracks_dir"], "K562", "pooled", seed=20)
+    genes = pd.concat([world["genes"], _genes("K562")], ignore_index=True)
+    return {**world, "genes": genes}
+
+
+def _rna_oracle(world, condition, seen):
+    from tisiago.seq2func.data import TrackReader
+
+    reader = TrackReader(world["tracks_dir"], [condition], libraries=("rna",))
+
+    def predict(batch):
+        seq = batch["sequences"][0]
+        assert seq.shape[1] == 6 and batch["targets"].shape[-1] == 4
+        start = int(WINDOWS.start.iloc[len(seen)])
+        np.testing.assert_array_equal(seq[:, 4:], reader.read("chr7", start, start + 100))
+        seen.append(start)
+        return batch["targets"]
+
+    return predict
+
+
+def test_evaluate_checkpoint_rnacond_on_held_out_condition(rna_world):
+    seen = []
+    table = evaluate_checkpoint(
+        None,
+        "rnacond:K562",
+        WINDOWS,
+        condition="K562",
+        fasta=rna_world["fasta"],
+        tracks_dir=rna_world["tracks_dir"],
+        genes=rna_world["genes"],
+        cds=rna_world["cds"],
+        cds_genes=rna_world["cds_genes"],
+        predict_fn=_rna_oracle(rna_world, "K562", seen),
+    )
+    assert seen == [0, 50, 100]
+    assert table[["condition", "library", "strand", "channel"]].values.tolist() == [
+        ["K562", "tis", "+", 0],
+        ["K562", "tis", "-", 1],
+        ["K562", "chx", "+", 2],
+        ["K562", "chx", "-", 3],
+    ]
+    assert np.allclose(table.profile_kl, 0.0, atol=1e-9)
+    assert np.allclose(table.log_pearson[table.strand == "+"], 1.0)
+    # same row format as an old-arm table, so the existing metrics and readers apply
+    old = evaluate_checkpoint(
+        None,
+        "condition:HeLa",
+        WINDOWS,
+        fasta=rna_world["fasta"],
+        tracks_dir=rna_world["tracks_dir"],
+        genes=rna_world["genes"],
+        cds=rna_world["cds"],
+        cds_genes=rna_world["cds_genes"],
+        predict_fn=lambda batch: batch["targets"],
+    )
+    assert list(table.columns) == list(old.columns)
+    # an in-distribution condition of the same fold uses its own RNA and targets
+    seen = []
+    hela = evaluate_checkpoint(
+        None,
+        "rnacond:K562",
+        WINDOWS,
+        condition="HeLa",
+        fasta=rna_world["fasta"],
+        tracks_dir=rna_world["tracks_dir"],
+        genes=rna_world["genes"],
+        predict_fn=_rna_oracle(rna_world, "HeLa", seen),
+    )
+    assert set(hela.condition) == {"HeLa"} and len(hela) == 4
+
+
+def test_evaluate_checkpoint_rnacond_needs_one_known_condition(rna_world):
+    kwargs = dict(
+        fasta=rna_world["fasta"],
+        tracks_dir=rna_world["tracks_dir"],
+        genes=rna_world["genes"],
+        predict_fn=lambda batch: batch["targets"],
+    )
+    with pytest.raises(ValueError, match="condition"):
+        evaluate_checkpoint(None, "rnacond:K562", WINDOWS, **kwargs)
+    with pytest.raises(ValueError, match="condition"):
+        evaluate_checkpoint(None, "rnacond:K562", WINDOWS, condition="Nope", **kwargs)
+    with pytest.raises(ValueError, match="condition"):
+        evaluate_checkpoint(None, "condition:HeLa", WINDOWS, condition="HeLa", **kwargs)
+
+
+def test_evaluate_rnacond_with_a_tiny_model(rna_world):
+    pytest.importorskip("alphagenome_ft")
+    import haiku as hk
+    import jax
+    import jax.numpy as jnp
+    from alphagenome_research.model.embeddings import Embeddings
+
+    from tisiago.seq2func.model import make_sequence_forward, register_track_head
+
+    def backbone(dna_sequence, organism_index):
+        return Embeddings(embeddings_1bp=hk.Linear(8, name="fb")(dna_sequence))
+
+    head = "p6_test_rnacond_eval"
+    register_track_head(head, 4, kind="rnacond")
+    forward = make_sequence_forward([head], detach_backbone=True, backbone=backbone)
+    org = jnp.zeros((1,), jnp.int32)
+    params, state = forward.init(jax.random.PRNGKey(0), jnp.zeros((1, 100, 6)), org)
+
+    def predict(batch):
+        (preds, _), _ = forward.apply(params, state, None, jnp.asarray(batch["sequences"]), org)
+        return np.asarray(preds[head])
+
+    table = evaluate_checkpoint(
+        None,
+        "rnacond:K562",
+        WINDOWS,
+        condition="K562",
+        fasta=rna_world["fasta"],
+        tracks_dir=rna_world["tracks_dir"],
+        genes=rna_world["genes"],
+        cds=rna_world["cds"],
+        cds_genes=rna_world["cds_genes"],
+        predict_fn=predict,
+    )
+    assert len(table) == 4 and set(table.condition) == {"K562"}
+    assert np.isfinite(table.profile_kl).all() and (table.profile_kl > 0).all()
+    assert table[table.library == "chx"].frame0_pred.notna().all()
+
+
+def test_load_predict_fn_rnacond(monkeypatch, tmp_path):
+    pytest.importorskip("alphagenome_ft")
+    model_mod = pytest.importorskip("tisiago.seq2func.model")
+    from tisiago.seq2func import train
+
+    calls = {}
+
+    class FakeModel:
+        _params, _state = "params", "state"
+
+    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, **kwargs):
+        calls["load"] = (head, num_tracks, kind, kwargs.get("mod_channels"))
+        return FakeModel()
+
+    monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
+    monkeypatch.setattr(model_mod, "make_predict", lambda model, head: None)
+
+    def load(arm="rnacond:HeLa", kind="rnacond"):
+        evaluate.load_predict_fn(tmp_path / "best", arm, base_checkpoint="w", head_kind=kind)
+
+    load()
+    assert calls["load"] == ("p6_rnacond_hela", 4, "rnacond", None)
+    with pytest.raises(ValueError, match="rnacond"):
+        load(kind="mlp")
+    with pytest.raises(ValueError, match="rnacond"):
+        load(arm="condition:HeLa", kind="rnacond")
+    run = {"args": {"arm": "rnacond:HeLa"}, **train.arm_fields("rnacond:HeLa", "rnacond")}
+    (tmp_path / "run.json").write_text(json.dumps(run))
+    load()
+    with pytest.raises(ValueError, match="heldout_group"):
+        load(arm="rnacond:K562")
+
+
+def test_output_paths_per_condition():
+    out = evaluate.output_paths("e", "rnacond:RPE1", "val", condition="RPE1_Que")
+    assert str(out["model"]) == "e/rnacond_rpe1_rpe1_que_val.tsv"
+    out = evaluate.output_paths("e", "rnacond:HeLa", "val", 5, condition="HeLa")
+    assert str(out["model"]) == "e/rnacond_hela_hela_val_max5.tsv"
+    assert str(out["ceiling"]) == "e/ceiling_val_max5.tsv"
+
+
+def test_cli_rnacond_writes_one_table_per_condition(cli_world, monkeypatch, capsys):
+    seq = ("ATGAAACCC" * 30)[:SIZE]
+    fasta = cli_world["root"] / "g.fa"
+    fasta.write_text(f">chr7\n{seq}\n")
+    Fasta(str(fasta)).close()
+    loaded = []
+
+    def fake_load(checkpoint, arm, *, base_checkpoint, head_kind="mlp", device=None):
+        loaded.append((arm, head_kind))
+        return lambda batch: batch["targets"]
+
+    monkeypatch.setattr(evaluate, "load_predict_fn", fake_load)
+    tracks = ["--tracks-dir", str(cli_world["tracks"])]
+    cli_world["run"]("--ceiling-only", *tracks)
+    model = ["--arm", "rnacond:RPE1", "--checkpoint", str(cli_world["root"] / "best")]
+    fakes = ["--genome", str(fasta), "--base-checkpoint", "w", "--head", "rnacond"]
+    cli_world["run"](*model, *fakes, *tracks, "--condition", "RPE1_Sen,HeLa")
+    assert loaded == [("rnacond:RPE1", "rnacond")]  # the model is loaded once
+    out = cli_world["out"]
+    ceiling = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
+    for condition, heldout in (("RPE1_Sen", True), ("HeLa", False)):
+        table = pd.read_csv(out / f"rnacond_rpe1_{condition.lower()}_val.tsv", sep="\t")
+        assert set(table.condition) == {condition} and len(table) == 4
+        assert set(table.heldout) == {heldout} and set(table.arm) == {"rnacond:RPE1"}
+        assert set(table.library) == {"tis", "chx"} and np.allclose(table.profile_kl, 0.0)
+        assert set(ceiling.columns) >= set(table.columns) - {"arm", "checkpoint", "heldout"}
+    # refuses to overwrite, and an unknown condition or a --condition on an old arm
+    for extra in (["--condition", "HeLa"], ["--condition", "Nope"]):
+        with pytest.raises(SystemExit):
+            cli_world["run"](*model, *fakes, *tracks, *extra)
+    old = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    with pytest.raises(SystemExit):
+        cli_world["run"](*old, *fakes, *tracks, "--condition", "HeLa")
+    assert "--condition" in capsys.readouterr().err

@@ -390,7 +390,7 @@ def test_seqconv_registered_and_choices_match():
     from tisiago.seq2func.model import HEAD_KINDS, SEQUENCE_KINDS, SeqConvTrackHead
 
     assert HEAD_KINDS["seqconv"] is SeqConvTrackHead
-    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx", "resid_tx", "resid_chx"}
+    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond"}
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
         assert set(action.choices) == set(HEAD_KINDS)
@@ -538,7 +538,9 @@ def test_seqconv_jitted_train_step_has_finite_grads():
     assert pred.shape == (2, 48, 2) and bool(jnp.isfinite(pred).all())
 
 
-@pytest.mark.parametrize("kind", ["mlp", "conv", "seqconv", "seqconv_tx", "resid_tx", "resid_chx"])
+@pytest.mark.parametrize(
+    "kind", ["mlp", "conv", "seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond"]
+)
 def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatch, kind):
     import types
 
@@ -562,7 +564,7 @@ def test_load_model_installs_sequence_forward_only_for_sequence_kinds(monkeypatc
     monkeypatch.setattr(model_mod, "install_sequence_forward", fake_install)
     model = model_mod.load_model("ckpt", head, detach_backbone=False)
     assert model_mod._SEQUENCE_FREE_INIT is False
-    if kind in ("seqconv", "seqconv_tx", "resid_tx", "resid_chx"):
+    if kind in ("seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond"):
         assert seen == {"free_init": True, "installed": ((head,), False)}
         assert model._predict == "sequence-forward"
     else:
@@ -1410,3 +1412,161 @@ def test_restore_init_new_head_kind_starts_fresh(tmp_path):
     assert any(m.startswith(f"head/{new}/") for m in target._params)
     with pytest.raises(ValueError, match="missing"):
         restore_init(target, str(tmp_path / "best"), new, reuse_head=True)
+
+
+# --- rnacond: embeddings + RNA features of the condition's raw pooled RNA input ---
+
+
+def _rna_sequences(rng, batch, length):
+    onehot = np.asarray(_random_onehot(rng, batch, length))
+    rna = rng.poisson(1.5, (batch, length, 2)).astype(np.float32)
+    return jnp.asarray(np.concatenate([onehot, rna], axis=-1))
+
+
+def _rnacond_forward(emb, seq=None, num_tracks=4):
+    from tisiago.seq2func.model import RnaCondTrackHead
+
+    head = RnaCondTrackHead(name="r", output_type=None, num_tracks=num_tracks)
+    kwargs = {} if seq is None else {"sequence": seq}
+    return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), **kwargs)
+
+
+def test_rnacond_registered_as_sequence_kind():
+    from tisiago.seq2func.model import (
+        HEAD_KINDS,
+        SEQUENCE_KINDS,
+        SEQUENCE_WIDTHS,
+        RnaCondTrackHead,
+    )
+
+    assert HEAD_KINDS["rnacond"] is RnaCondTrackHead
+    assert "rnacond" in SEQUENCE_KINDS and SEQUENCE_WIDTHS["rnacond"] == 6
+    register_track_head("p6_test_rnacond_reg", 4, kind="rnacond")
+    register_track_head("p6_test_rnacond_reg", 4, kind="rnacond")
+    with pytest.raises(ValueError, match="kind"):
+        register_track_head("p6_test_rnacond_reg", 4, kind="mlp")
+    with pytest.raises(ValueError, match="mod_channels"):
+        register_track_head("p6_test_rnacond_mod", 4, kind="rnacond", mod_channels=(2,))
+
+
+def test_rnacond_head_input_is_embeddings_and_rna_features():
+    from tisiago.seq2func.rna_features import NUM_RNA_FEATURES, rna_features
+
+    fn = hk.without_apply_rng(hk.transform(_rnacond_forward))
+    emb = jnp.asarray(np.random.default_rng(2).normal(size=(1, 40, 8)), jnp.bfloat16)
+    rng = np.random.default_rng(0)
+    seq = _rna_sequences(rng, 1, 40)
+    params = fn.init(jax.random.PRNGKey(0), emb, seq)
+    assert NUM_RNA_FEATURES == 10
+    assert params["r/~predict/hidden"]["w"].shape == (8 + 10, 256)
+    assert params["r/~predict/output"]["w"].shape == (256, 4)
+    pred = fn.apply(params, emb, seq)
+    assert pred.shape == (1, 40, 4) and pred.dtype == jnp.float32 and bool((pred >= 0).all())
+    # the RNA channels are used; the one-hot reaches the head only through the backbone
+    other_rna = seq.at[..., 4:].set(0.0)
+    assert not np.allclose(np.asarray(pred), np.asarray(fn.apply(params, emb, other_rna)))
+    other_dna = seq.at[..., :4].set(_random_onehot(np.random.default_rng(9), 1, 40))
+    np.testing.assert_array_equal(np.asarray(pred), np.asarray(fn.apply(params, emb, other_dna)))
+    # the documented definition, by hand
+    x = jnp.concatenate([emb.astype(jnp.float32), rna_features(seq[..., 4:])], axis=-1)
+    hidden, output = params["r/~predict/hidden"], params["r/~predict/output"]
+    h = jax.nn.relu(x @ hidden["w"] + hidden["b"])
+    expected = jax.nn.softplus(h @ output["w"] + output["b"])
+    np.testing.assert_allclose(np.asarray(pred), np.asarray(expected), rtol=1e-5, atol=1e-6)
+
+
+def test_rnacond_head_requires_six_channel_sequence():
+    from tisiago.seq2func.model import sequence_free_init
+
+    fn = hk.without_apply_rng(hk.transform(_rnacond_forward))
+    emb = jnp.zeros((1, 16, 8), jnp.float32)
+    seq = _rna_sequences(np.random.default_rng(0), 1, 16)
+    with pytest.raises(ValueError, match="sequence"):
+        fn.init(jax.random.PRNGKey(0), emb)
+    with sequence_free_init(True):
+        free = fn.init(jax.random.PRNGKey(0), emb)
+    assert free["r/~predict/hidden"]["w"].shape == (8 + 10, 256)
+    params = fn.init(jax.random.PRNGKey(0), emb, seq)
+    with pytest.raises(ValueError, match="6 channels"):
+        fn.apply(params, emb, seq[..., :4])
+
+
+def test_rnacond_jitted_train_step_has_finite_grads_and_frame_loss():
+    from tisiago.seq2func.model import install_sequence_forward, make_predict, make_train_step
+
+    head = "p6_test_rnacond_train"
+    register_track_head(head, 4, kind="rnacond")
+    model = _FakeModel([head], 4, kind="rnacond", width=6)
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    rng = np.random.default_rng(0)
+    mask = np.ones((2, 48, 4), bool)
+    mask[0, :10, :2] = False
+    batch = {
+        "sequences": _rna_sequences(rng, 2, 48),
+        "targets": jnp.asarray(rng.poisson(2, (2, 48, 4)).astype(np.float32)),
+        "mask": jnp.asarray(mask),
+    }
+    step, opt_state = make_train_step(
+        model,
+        head,
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=False,
+        frame_weight=5.0,
+        frame_channels=(2, 3),
+        frame_block=2,
+    )
+    params, state = model._params, model._state
+
+    def loss(p):
+        preds = model._predict(
+            p,
+            state,
+            batch["sequences"],
+            jnp.zeros((2,), jnp.int32),
+            requested_outputs=(),
+            negative_strand_mask=jnp.zeros((2,), bool),
+            strand_reindexing=None,
+        )[head]
+        return model.create_loss_fn_for_head(head)(
+            preds, {"targets": batch["targets"], "mask": batch["mask"]}
+        )["loss"]
+
+    grads = jax.grad(loss)(params)
+    assert all(bool(jnp.isfinite(g).all()) for g in jax.tree_util.tree_leaves(grads))
+    w = grads[f"head/{head}/~predict/hidden"]["w"]
+    assert w.shape == (8 + 10, 256)
+    assert float(jnp.abs(w[-10:]).sum()) > 0  # gradient reaches the RNA-feature rows
+    assert float(jnp.abs(grads["fake_backbone"]["w"]).sum()) > 0
+    assert grads["fake_backbone"]["w"].shape == (4, 8)  # the backbone sees the one-hot only
+    new_params, _, aux = step(params, state, opt_state, batch)
+    assert np.isfinite(float(aux["loss"])) and float(aux["frame"]) > 0
+    before = np.asarray(params[f"head/{head}/~predict/hidden"]["w"])
+    assert not np.allclose(before, np.asarray(new_params[f"head/{head}/~predict/hidden"]["w"]))
+    pred = make_predict(model, head)(new_params, state, batch["sequences"])
+    assert pred.shape == (2, 48, 4) and bool(jnp.isfinite(pred).all())
+
+
+def test_rnacond_checkpoint_round_trip(tmp_path):
+    from tisiago.seq2func.model import install_sequence_forward, make_predict, restore_init
+
+    head = "p6_test_rnacond_ck"
+    register_track_head(head, 4, kind="rnacond")
+
+    def build():
+        model = _FakeModel([head], 4, kind="rnacond", width=6)
+        return install_sequence_forward(
+            model, [head], detach_backbone=False, backbone=_fake_backbone()
+        )
+
+    source = build()
+    source._params = _perturbed(source._params, 0.25)
+    _save_model(source, tmp_path / "best")
+    same = build()
+    n = restore_init(same, str(tmp_path / "best"), head, reuse_head="all")
+    assert n == len(jax.tree_util.tree_leaves((source._params, source._state)))
+    seq = _rna_sequences(np.random.default_rng(1), 1, 48)
+    np.testing.assert_array_equal(
+        np.asarray(make_predict(same, head)(same._params, same._state, seq)),
+        np.asarray(make_predict(source, head)(source._params, source._state, seq)),
+    )

@@ -3,7 +3,13 @@
 import pandas as pd
 import pytest
 
-from tisiago.seq2func.samples import CONDITIONS, condition_name, load_samples, parse_para
+from tisiago.seq2func.samples import (
+    CELL_LINE_GROUPS,
+    CONDITIONS,
+    condition_name,
+    load_samples,
+    parse_para,
+)
 
 
 def test_condition_name_maps_rpe1_states():
@@ -11,6 +17,17 @@ def test_condition_name_maps_rpe1_states():
     assert condition_name("RPE1", "Senescent") == "RPE1_Sen"
     assert condition_name("RPE1", "Async") == "RPE1_Async"
     assert condition_name("HeLa", "") == "HeLa"
+
+
+def test_cell_line_groups_partition_the_conditions():
+    assert CELL_LINE_GROUPS == {
+        "HeLa": ("HeLa",),
+        "K562": ("K562",),
+        "U2OS": ("U2OS",),
+        "RPE1": ("RPE1_Async", "RPE1_Que", "RPE1_Sen"),
+    }
+    flat = [c for group in CELL_LINE_GROUPS.values() for c in group]
+    assert sorted(flat) == sorted(CONDITIONS) and len(flat) == len(set(flat))
 
 
 def test_parse_para_splits_m0_table(tmp_path):

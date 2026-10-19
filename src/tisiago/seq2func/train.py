@@ -7,12 +7,19 @@ Usage::
     python -m tisiago.seq2func.train --arm shared --heads-only --out data/p6/runs/shared_frozen
     python -m tisiago.seq2func.train --arm condition:K562 --init-from data/p6/runs/k562_base/best \
         --head seqconv --freeze-backbone-steps 1000 --out data/p6/runs/k562_seqconv_2stage
+    python -m tisiago.seq2func.train --arm rnacond:HeLa --head rnacond --steps 30000 \
+        --out data/p6/runs/rnacond_hela
 
 Model selection reads only ``val.parquet`` (chr7); the held-out test split is never loaded.
 ``--head seqconv_tx`` adds spliced MANE transcript features (``--gtf``) to the input.
 ``best/`` is selected on ``val_profile_kl``; ``val_frame`` (the codon-phase block KL on CHX
 channels) and the per-component train losses are logged, not selected on. ``--init-from`` starts
 from a finished run's parameters (``init_from`` in ``run.json``).
+
+``--arm rnacond:<group>`` (with ``--head rnacond``) trains one model on every condition outside
+the held-out cell-line group (``samples.CELL_LINE_GROUPS``): examples are (window, condition)
+pairs, the condition's pooled RNA is an input and its TIS/CHX tracks the 4 targets. Model
+selection uses the val windows of the training conditions only.
 """
 
 from __future__ import annotations
@@ -36,11 +43,12 @@ from tisiago.seq2func.overfit import (
     CHX_KINDS,
     HEAD_CHOICES,
     MOD_KINDS,
+    RNA_KINDS,
     TRANSCRIPT_KINDS,
     finite_or_none,
     write_json_atomic,
 )
-from tisiago.seq2func.samples import CONDITIONS, LIBRARIES
+from tisiago.seq2func.samples import CELL_LINE_GROUPS, CONDITIONS, LIBRARIES
 
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
@@ -49,10 +57,33 @@ LOSS_COMPONENTS = ("poisson", "multinomial", "frame")
 RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
+RNACOND = "rnacond"
+
+
+def is_rnacond_arm(arm: str) -> bool:
+    """True for ``"rnacond:<group>"`` arms (valid or not)."""
+    return arm.partition(":")[0] == RNACOND
+
+
+def parse_rnacond_arm(arm: str) -> tuple[str, str, tuple[str, ...]]:
+    """``"rnacond:<G>"`` -> ``(head name, held-out group, training conditions)``."""
+    kind, _, group = arm.partition(":")
+    if kind != RNACOND or group not in CELL_LINE_GROUPS:
+        raise ValueError(f"arm must be 'rnacond:<one of {tuple(CELL_LINE_GROUPS)}>', not {arm!r}")
+    held = CELL_LINE_GROUPS[group]
+    return f"p6_rnacond_{group.lower()}", group, tuple(c for c in CONDITIONS if c not in held)
+
+
 def parse_arm(arm: str) -> tuple[str, tuple[str, ...]]:
-    """``"shared"`` or ``"condition:<C>"`` -> ``(head name, conditions)``."""
+    """``"shared"`` or ``"condition:<C>"`` -> ``(head name, conditions)``.
+
+    ``rnacond`` arms are refused: they have no per-condition channel layout (see
+    :func:`parse_rnacond_arm`).
+    """
     if arm == "shared":
         return "p6_shared", tuple(CONDITIONS)
+    if is_rnacond_arm(arm):
+        raise ValueError(f"{arm!r} is an rnacond arm; this command does not support it")
     kind, _, condition = arm.partition(":")
     if kind != "condition" or condition not in CONDITIONS:
         raise ValueError(f"arm must be 'shared' or 'condition:<one of {CONDITIONS}>', not {arm!r}")
@@ -73,11 +104,12 @@ def mod_libraries_of(value: str | None) -> tuple[str, ...]:
 
 def channel_config(head_kind: str, layout, mod_libraries, mod_scale_tis: float) -> dict:
     """run.json channel fields: CHX ``frame_channels``; for ``resid_chx`` the modulation too."""
-    from tisiago.seq2func.model import resid_chx_spec
     from tisiago.seq2func.targets import library_channels
 
     out = {"frame_channels": list(library_channels(layout, "chx"))}
     if head_kind in CHX_KINDS:
+        from tisiago.seq2func.model import resid_chx_spec
+
         channels, scales = resid_chx_spec(layout, mod_libraries, mod_scale_tis)
         out |= {
             "mod_libraries": list(mod_libraries),
@@ -86,6 +118,62 @@ def channel_config(head_kind: str, layout, mod_libraries, mod_scale_tis: float) 
             "mod_scales": list(scales),
         }
     return out
+
+
+def arm_fields(
+    arm: str, head_kind: str, mod_libraries=("chx",), mod_scale_tis: float | None = None
+) -> dict:
+    """run.json fields of ``arm``: head name, conditions, ``num_tracks``, channel config.
+
+    ``mod_scale_tis`` (``resid_chx``) defaults to ``MOD_SCALE``. ``rnacond`` arms add the
+    held-out group and conditions, the training conditions, the output ``channel_layout``
+    (library, strand) and the ``rna_input`` description.
+    """
+    from tisiago.seq2func.targets import channel_layout, rnacond_layout
+
+    if mod_scale_tis is None and head_kind in CHX_KINDS:
+        from tisiago.seq2func.model import MOD_SCALE
+
+        mod_scale_tis = MOD_SCALE
+
+    if not is_rnacond_arm(arm):
+        head, conditions = parse_arm(arm)
+        layout = channel_layout(conditions)
+        return {
+            "head_name": head,
+            "conditions": list(conditions),
+            "num_tracks": len(layout),
+            **channel_config(head_kind, layout, mod_libraries, mod_scale_tis),
+        }
+    from tisiago.seq2func.rna_features import RNA_FEATURE_NAMES, RNA_WIDTHS
+
+    head, group, conditions = parse_rnacond_arm(arm)
+    layout = rnacond_layout(conditions[0])
+    return {
+        "head_name": head,
+        "conditions": list(conditions),
+        "num_tracks": len(layout),
+        **channel_config(head_kind, layout, mod_libraries, mod_scale_tis),
+        "heldout_group": group,
+        "heldout_conditions": list(CELL_LINE_GROUPS[group]),
+        "train_conditions": list(conditions),
+        "channel_layout": [[library, strand] for _, library, strand in layout],
+        "rna_input": {
+            "library": "rna",
+            "rep": "pooled",
+            "strands": ["+", "-"],
+            "features": list(RNA_FEATURE_NAMES),
+            "box_widths": list(RNA_WIDTHS),
+        },
+    }
+
+
+def check_rnacond_run(run: dict, arm: str) -> None:
+    """Raise ``ValueError`` if a run.json's recorded rnacond fields disagree with ``arm``."""
+    expected = arm_fields(arm, RNACOND)
+    for key in ("heldout_group", "train_conditions", "channel_layout", "head_name"):
+        if key in run and run[key] != expected[key]:
+            raise ValueError(f"run.json records {key}={run[key]}, but {arm} gives {expected[key]}")
 
 
 def window_profile_kl(pred: np.ndarray, target: np.ndarray, mask: np.ndarray) -> float:
@@ -302,7 +390,9 @@ def git_commit() -> str | None:
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser; defaults are the P6.2 primary configuration (backbone fine-tuning)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--arm", required=True, help="'shared' or 'condition:<C>'")
+    ap.add_argument(
+        "--arm", required=True, help="'shared', 'condition:<C>' or 'rnacond:<held-out group>'"
+    )
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--eval-every", type=int, default=1_000)
     ap.add_argument("--eval-windows", type=int, default=100)
@@ -389,10 +479,16 @@ def main() -> None:
         ap.error("--checkpoint is required (or set ALPHAGENOME_WEIGHTS_PATH)")
     if not args.genome:
         ap.error("--genome is required (or set TISIAGO_GENOME)")
+    rnacond = is_rnacond_arm(args.arm)
     try:
-        head, conditions = parse_arm(args.arm)
+        if rnacond:
+            head, _, conditions = parse_rnacond_arm(args.arm)
+        else:
+            head, conditions = parse_arm(args.arm)
     except ValueError as exc:
         ap.error(str(exc))
+    if rnacond != (args.head in RNA_KINDS):
+        ap.error("--arm rnacond:<group> and --head rnacond go together")
     if args.head in TRANSCRIPT_KINDS and not args.gtf:
         ap.error(f"--head {args.head} needs --gtf (or set TISIAGO_GTF)")
     if args.mod_learning_rate is not None and args.head not in MOD_KINDS:
@@ -441,25 +537,21 @@ def main() -> None:
         make_train_step,
         register_track_head,
     )
-    from tisiago.seq2func.targets import channel_layout
 
     train_windows = pd.read_parquet(args.windows_dir / TRAIN_WINDOWS)
     val_windows = pd.read_parquet(args.windows_dir / VAL_WINDOWS).iloc[: args.eval_windows]
     expression = pd.read_parquet(args.expression)
     genes = expression[expression.condition.isin(conditions)].reset_index(drop=True)
-    layout = channel_layout(conditions)
-    num_tracks = len(layout)
     mod_scale_tis = MOD_SCALE if args.mod_scale_tis is None else args.mod_scale_tis
-    channels = channel_config(args.head, layout, mod_libraries, mod_scale_tis)
-    frame_channels = tuple(channels["frame_channels"])
+    fields = arm_fields(args.arm, args.head, mod_libraries, mod_scale_tis)
+    num_tracks = fields["num_tracks"]
+    channels = {k: fields[k] for k in ("mod_channels", "mod_scales") if k in fields}
+    frame_channels = tuple(fields["frame_channels"])
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),
-        "head_name": head,
-        "conditions": list(conditions),
-        "num_tracks": num_tracks,
         "mod_learning_rate": args.mod_learning_rate,
-        **channels,
+        **fields,
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
         "jax_devices": [str(d) for d in jax.devices()],
@@ -505,7 +597,11 @@ def main() -> None:
     predict = make_predict(model, head)
 
     data_kwargs = dict(
-        fasta=args.genome, tracks_dir=args.tracks_dir, conditions=conditions, genes=genes
+        fasta=args.genome,
+        tracks_dir=args.tracks_dir,
+        conditions=conditions,
+        genes=genes,
+        rna_conditioned=rnacond,
     )
     if args.head in TRANSCRIPT_KINDS:
         from tisiago.seq2func.tx_features import TranscriptFeatures

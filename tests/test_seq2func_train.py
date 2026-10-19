@@ -524,3 +524,96 @@ def test_cli_resid_chx_needs_gtf(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         train.main()
     assert exc.value.code != 0
+
+
+# --- rnacond: one model across cell lines, one cell-line group held out ---
+
+
+def test_parse_rnacond_arm_holds_out_a_group():
+    assert train.parse_rnacond_arm("rnacond:HeLa") == (
+        "p6_rnacond_hela",
+        "HeLa",
+        ("K562", "U2OS", "RPE1_Async", "RPE1_Que", "RPE1_Sen"),
+    )
+    assert train.parse_rnacond_arm("rnacond:RPE1") == (
+        "p6_rnacond_rpe1",
+        "RPE1",
+        ("HeLa", "K562", "U2OS"),
+    )
+    for group in ("HeLa", "K562", "U2OS", "RPE1"):
+        _, _, conditions = train.parse_rnacond_arm(f"rnacond:{group}")
+        held = set(CONDITIONS) - set(conditions)
+        assert held and not held & set(conditions)
+    for bad in ("rnacond:", "rnacond:RPE1_Que", "rnacond:hela", "condition:HeLa", "shared"):
+        with pytest.raises(ValueError):
+            train.parse_rnacond_arm(bad)
+    assert train.is_rnacond_arm("rnacond:K562") and not train.is_rnacond_arm("shared")
+
+
+def test_parse_arm_refuses_rnacond_arms():
+    """Old callers (6-channel layouts) must not silently take an rnacond arm."""
+    with pytest.raises(ValueError, match="rnacond"):
+        parse_arm("rnacond:HeLa")
+
+
+def test_arm_fields_old_arms_unchanged():
+    fields = train.arm_fields("condition:K562", "mlp")
+    assert fields == {
+        "head_name": "p6_k562",
+        "conditions": ["K562"],
+        "num_tracks": 6,
+        "frame_channels": [2, 3],
+    }
+    assert train.arm_fields("shared", "mlp")["num_tracks"] == 36
+
+
+def test_arm_fields_rnacond_round_trip_through_run_json(tmp_path):
+    from tisiago.seq2func.overfit import write_json_atomic
+    from tisiago.seq2func.rna_features import RNA_FEATURE_NAMES, RNA_WIDTHS
+
+    fields = train.arm_fields("rnacond:RPE1", "rnacond")
+    assert fields["head_name"] == "p6_rnacond_rpe1"
+    assert fields["conditions"] == fields["train_conditions"] == ["HeLa", "K562", "U2OS"]
+    assert fields["heldout_group"] == "RPE1"
+    assert fields["heldout_conditions"] == ["RPE1_Async", "RPE1_Que", "RPE1_Sen"]
+    assert fields["num_tracks"] == 4
+    assert fields["channel_layout"] == [["tis", "+"], ["tis", "-"], ["chx", "+"], ["chx", "-"]]
+    assert fields["frame_channels"] == [2, 3]
+    assert fields["rna_input"] == {
+        "library": "rna",
+        "rep": "pooled",
+        "strands": ["+", "-"],
+        "features": list(RNA_FEATURE_NAMES),
+        "box_widths": list(RNA_WIDTHS),
+    }
+    write_json_atomic(
+        {"args": {"arm": "rnacond:RPE1", "head": "rnacond"}, **fields}, tmp_path / "run.json"
+    )
+    (tmp_path / "best").mkdir()
+    loaded = json.loads((tmp_path / "run.json").read_text())
+    assert {k: loaded[k] for k in fields} == fields
+    assert train.check_rnacond_run(loaded, "rnacond:RPE1") is None
+    with pytest.raises(ValueError, match="heldout_group"):
+        train.check_rnacond_run(loaded, "rnacond:HeLa")
+    bad = {**loaded, "channel_layout": [["chx", "+"], ["chx", "-"], ["tis", "+"], ["tis", "-"]]}
+    with pytest.raises(ValueError, match="channel_layout"):
+        train.check_rnacond_run(bad, "rnacond:RPE1")
+
+
+@pytest.mark.parametrize(
+    ("arm", "head"),
+    [("rnacond:HeLa", "mlp"), ("rnacond:HeLa", "seqconv_tx"), ("condition:HeLa", "rnacond")],
+)
+def test_cli_rnacond_arm_and_head_go_together(tmp_path, monkeypatch, arm, head):
+    argv = ["train", "--arm", arm, "--checkpoint", "x", "--genome", "y", "--gtf", "a.gtf"]
+    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), "--head", head])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()
+
+
+def test_cli_accepts_rnacond_arm():
+    args = train.build_parser().parse_args(["--arm", "rnacond:U2OS", "--head", "rnacond"])
+    assert (args.arm, args.head) == ("rnacond:U2OS", "rnacond")
+    assert train.default_out("rnacond:U2OS", True) == Path("data/p6/runs/rnacond_u2os")
