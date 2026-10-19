@@ -36,6 +36,9 @@ tracks = [
     "pysam>=0.22",
     "pyBigWig>=0.3.22",
 ]
+plots = [
+    "matplotlib>=3.8",
+]
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
