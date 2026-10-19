@@ -377,11 +377,69 @@ custom heads, `custom_model.py:2338`).
 - Alignment check: top TIS+ peaks sit on the GAPDH ATG (A 11,182 / T 16,720 counts; the +13 offset
   puts the max on the T); CHX downstream frame-0 fraction 0.59. P6.0 QC: replicate r 0.96-0.99;
   CHX frame-0 0.45-0.67 after the Ribo-TISH minus-strand +1 correction.
-- The P6.0 round trip against Jimmy's Ribo-TISH calls is still running; not yet a result.
+- The P6.0 round trip result is in §12 (fails 0.95 on all six conditions).
 
 Deviations from the spec found by the spike: own training loop (agft 0.1.12 trainer is broken);
 agft LoRA is head-side only; full fine-tuning fits at 131 kb in ~17 GiB on a 48 GB card (the spec's
 >=76 GB was for 1 Mb inputs); A100 queue unavailable, so all runs used L40S.
+
+## 12. P6 experiment 1 — per-condition track models (2026-10-10 to 2026-10-17)
+
+The first full P6 experiment: one alphagenome-ft model per condition (6 channels: TIS/CHX/RNA x
+strand, 1-bp, replicate-pooled targets, Poisson-multinomial loss, end-to-end fine-tuning), trained on
+all chromosomes except chr7/8/9 and scored on val (chr7). Ledger:
+`.superpowers/sdd/2026-10-10-p6-autoresearch/progress.md`; per-trial scores
+`autoresearch/p6/results.tsv`. Run directories are kept under `data/p6/runs/` (list below).
+
+**Data fix first.** K562/U2OS libraries 718-733 had been built from one sequencing run copied twice
+(every read duplicated; the other run unused). Rebuilt from both runs (+56-66% unique reads);
+canonical Ribo-TISH calls are now `ribotish/results/2026-10-09_reprocessed`. HeLa/RPE1 unaffected.
+
+**Base model (the tutorial recipe).** Fits the tracks, but has no codon periodicity: CHX
+dominant-frame agreement with the data 0.43 on K562 (chance 0.33; replicate vs replicate 0.87).
+
+**Periodicity search (K562, ~25 trials).** What worked: a residual head on the base model that
+multiplies only the CHX channels by a bounded, sequence- and transcript-feature-driven factor
+(`resid_chx`), a codon-phase loss at weight 200, a gentle second stage (backbone lr 1e-5), 30k steps.
+What did not: fresh heads (lose fit on every channel), second stage at full lr (loses fit even with
+no new loss), an unbounded modulation (loss blow-up), higher modulation lr.
+
+| condition | gene log-Pearson base -> winner | CHX frame agreement base -> winner | replicate |
+|---|---|---|---|
+| K562 | 0.904 -> 0.909 | 0.43 -> 0.89 | 0.87 |
+| HeLa | 0.834 -> 0.839 | 0.35 -> 0.59 | 0.61 |
+| U2OS | 0.877 -> 0.880 | 0.42 -> 0.64 | 0.74 |
+| RPE1 Async | 0.936 -> 0.934 | 0.40 -> 0.52 | 0.61 |
+| RPE1 Que | 0.904 -> 0.902 | 0.42 -> 0.69 | 0.46 |
+| RPE1 Sen | 0.918 -> 0.920 | 0.39 -> 0.50 | 0.62 |
+
+All six pass the fit gate (profile KL <= base + 0.02, gene log-Pearson >= base - 0.005). Predicted
+codon amplitude stays too weak (count-weighted frame-0 share e.g. K562 0.52 vs 0.70 observed).
+
+**RNA channels (base models).** Gene-level log-Pearson 0.83-0.94 vs replicate 0.94-0.99; RPE1
+closest, HeLa furthest.
+
+**Start sites from predicted tracks: negative.**
+- Round trip (real tracks -> synthetic BAMs -> Ribo-TISH vs real-BAM calls): Jaccard 0.85-0.89 in
+  all six conditions (recovers 95-97%, adds 8-12%); fails the 0.95 bar. Comparisons below use the
+  same synthetic route for both arms.
+- Ribo-TISH on predicted vs real K562 tracks (chr7, depth-matched): Jaccard 0.15 (annotated starts:
+  precision 0.77-0.79, recall 0.41); same-pipeline resample of the real data reaches 0.66-0.67.
+- Cause: predicted harringtonine peaks are at the right nucleotide but ~6x too flat (share of local
+  signal at real starts 0.044 vs 0.252); modulating the TIS channels too raised it only to 0.055.
+- On the frozen baseline's protocol (val operating half, recall @ ~1 FP/transcript): predicted tracks
+  0.035 (all lines) / 0.099 (K562 only); real tracks 0.254; frozen `ag7` 0.306 (test). Test
+  chromosomes not touched.
+
+**Conclusion.** Fine-tuned AlphaGenome is a good Ribo-seq *track* model (fit, and with the residual
+CHX head, replicate-level periodicity in K562), but reading start sites off its tracks does not beat
+predicting labels directly — and even real tracks, scored that way, fall below the baseline.
+Next (ROADMAP P6): condition on the cell line's RNA track (cheap to generate) and predict
+harringtonine + CHX, evaluated leave-one-cell-line-out.
+
+Kept runs (`data/p6/runs/`): `k562_base`, `ar_<c>_base` (hela, u2os, rpe1_async, rpe1_que, rpe1_sen),
+`ar_resid_chx_w200_30k` (K562 winner) and `ar_<c>_resid_chx_w200_30k`, `ar_resid_chxtis_s{3,1.5}_w200_30k`;
+round trip `data/p6/roundtrip_reproc/`; baseline-protocol eval `data/p6/track_tis_eval/val/`.
 
 ## Takeaways for downstream modeling
 

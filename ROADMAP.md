@@ -11,11 +11,11 @@ floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution); and (
 
 _Last updated: 2026-10-05._
 
-> **Current (2026-10-05): new direction — seq2func on raw Ribo-seq tracks (P6).** The frozen
-> embedding + binary head line is closed at ≈0.30 recall @ ≈1 FP/transcript (clean protocol,
-> FINDINGS §10): heads don't help (§9), and a sparse binary target on frozen features is the
-> limiting design. Next: fine-tune AlphaGenome to predict raw Ribo-seq tracks across 5 cell lines
-> × 2 replicates, then derive start-site calls on top. The frozen `ag7` head is the baseline.
+> **Current (2026-10-18): P6 experiment 1 done; next is an RNA-conditioned model.** Per-condition
+> fine-tuned AlphaGenome models predict Ribo-seq tracks well (FINDINGS §12) but start calls read off
+> them do not beat the frozen `ag7` baseline (≈0.30 recall @ ≈1 FP/transcript, §10). Next: give the
+> model the cell line's RNA track (cheap) and predict harringtonine + CHX (expensive), evaluated on
+> held-out cell lines.
 
 ---
 
@@ -32,7 +32,7 @@ _Last updated: 2026-10-05._
 | **P3.5** | **Head exploration — richer classifiers @ dense 2M** | 🟢 **DONE (2026-06-24): XGBoost 0.303 / LightGBM 0.304 AUPRC were within noise of logistic 0.307 in this single-seed comparison; no evidence that head capacity was limiting. §9.** | `head_xgb.py`, `compare_heads.py`, `FINDINGS.md §9` |
 | **P4** | TIS efficiency regression (HeLa first) | 🟡 **first result (2026-06-24): Ridge on log1p(max_norm_HeLa) — in-dist ρ 0.30 / R² 0.24, but dense ranking collapses to AUPRC 0.098 (curated→dense shift, not absence of signal). §9.** | `efficiency_head.py`, `FINDINGS.md §9` |
 | **P5** | Frozen-inference correctness + speed | ✅ **TXP extractor + backend contract; Evo2 0.6 / Vortex 1.1 pinned. TXP ≈ W8k on dense accuracy (AUPRC 0.299 vs 0.304, CIs overlap) at ~6.7× less Evo2 model time. §10.** | `extract_transcript.py`, `backend_contract.py`, `docs/INFERENCE_AND_EVALUATION.md` |
-| **P6** | **Seq2func: fine-tune AlphaGenome on raw Ribo-seq tracks, call TIS on top** | 🟡 **P6.0 data + P6.1 agft core done (2026-10-06): fine-tuned AG memorizes one window to profile KL 0.76 (frozen heads cannot). P6.2 (held-out chromosomes) next. FINDINGS §11.** | `src/tisiago/seq2func/` |
+| **P6** | **Seq2func: fine-tune AlphaGenome on raw Ribo-seq tracks, call TIS on top** | 🟡 **Experiment 1 done (2026-10-17, FINDINGS §12): per-condition track models fit well and reach replicate-level CHX periodicity (K562), but start calls from predicted tracks do not beat the frozen baseline. Next: RNA-conditioned model (RNA in, harringtonine + CHX out), leave-one-cell-line-out.** | `src/tisiago/seq2func/` |
 
 ---
 
@@ -150,7 +150,7 @@ tracks directly instead of regressing a summary label on frozen features.
 
 ---
 
-## P6 — seq2func on raw Ribo-seq tracks 🟡 (P6.0/P6.1 done, FINDINGS §11)
+## P6 — seq2func on raw Ribo-seq tracks 🟡 (experiment 1 done, FINDINGS §11-12)
 
 Fine-tune AlphaGenome to predict the raw Ribo-seq coverage tracks (5 cell lines × 2 replicates)
 rather than training a binary head on sparse, frozen start-site labels. Start-site calls are then
@@ -163,7 +163,18 @@ window (GAPDH, 131 kb). Frozen-backbone heads stall at profile KL 3.7-4.6; the f
 with warmup-cosine + gradient clipping reaches 0.76 (replicate floor ~0.6). One window,
 memorization only; generalization is P6.2. All runs on L40S (A100 queue unavailable).
 
-**Open questions for the spec:**
+**Experiment 1 (2026-10-10 to 10-17, FINDINGS §12).** Per-condition models; codon periodicity
+recovered with a residual CHX head (K562 frame agreement 0.89 vs replicate 0.87, fit kept); start
+calling from predicted tracks fails (val recall 0.04-0.10 vs baseline 0.31; predicted start peaks
+~6x too flat).
+
+**Next (2026-10-18): RNA-conditioned model.** RNA-seq is cheap to generate for new cell lines;
+high-quality Ribo-seq is not. One shared alphagenome-ft model takes DNA plus the cell line's RNA
+track and predicts harringtonine + CHX; evaluated leave-one-cell-line-out (HeLa, K562, U2OS,
+RPE1 as one group) against replicate agreement and an RNA-scaled baseline, reported in plain
+units (Pearson at gene / 30-nt / codon / 1-nt). Spec first.
+
+**Original open questions (2026-10-05):**
 - One model per cell line vs one multi-output model. The working hypothesis is that cross-line
   differences are mainly driven by which genes are transcribed — an unexpressed gene has a blank
   Ribo-seq track, which is missing data, not zero initiation.
