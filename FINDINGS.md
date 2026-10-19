@@ -441,6 +441,41 @@ Kept runs (`data/p6/runs/`): `k562_base`, `ar_<c>_base` (hela, u2os, rpe1_async,
 `ar_resid_chx_w200_30k` (K562 winner) and `ar_<c>_resid_chx_w200_30k`, `ar_resid_chxtis_s{3,1.5}_w200_30k`;
 round trip `data/p6/roundtrip_reproc/`; baseline-protocol eval `data/p6/track_tis_eval/val/`.
 
+## 13. P6 experiment 2 — RNA-conditioned model, leave-one-cell-line-out (2026-10-19)
+
+Spec: `docs/superpowers/specs/2026-10-19-p6-rna-conditioned-design.md`. One alphagenome-ft model
+(tutorial MLP head, Poisson-multinomial, end-to-end, 30k steps) takes DNA plus the condition's pooled
+RNA track (depth-scaled to 5e7 reads; log1p and box-smoothed features at 9/33/129/513 nt) and predicts
+harringtonine (TIS) and CHX, both strands. Four folds hold out HeLa, K562, U2OS or RPE1 (all three
+RPE1 conditions). Scored on val (chr7) with the concordance scorecard: Pearson r vs replicate 2 as a
+percent of replicate 1 vs replicate 2, over MANE transcripts of expressed genes
+(`data/p6/scorecard/heldout_val/summary.{tsv,md}`; ledger `.superpowers/sdd/2026-10-19-p6-rnacond/`).
+
+Mean percent of replicate agreement over the six conditions (held-out model = the fold that never
+saw that cell line; per-line models = experiment 1, trained on that line from DNA only):
+
+| track | scale | held-out RNA-conditioned | seen | per-line base | per-line + CHX head | RNA scaled |
+|---|---|---|---|---|---|---|
+| TIS | gene | 98% | 98% | 89% | 89% | 96% |
+| TIS | 30-nt bins | 71% | 72% | 68% | 69% | 12% |
+| TIS | codon | 45% | 50% | 46% | 48% | 4% |
+| TIS | 1 nt | 37% | 43% | 39% | 42% | 2% |
+| CHX | gene | 98% | 98% | 89% | 89% | 97% |
+| CHX | 30-nt bins | 84% | 86% | 80% | 82% | 38% |
+| CHX | codon | 71% | 74% | 67% | 74% | 19% |
+| CHX | 1 nt | 63% | 67% | 59% | 79% | 12% |
+| CHX | reading frame | 59% | 60% | 62% | 82% | 54% |
+
+- **Generalises to unseen cell lines.** Held-out scores are within 1-6 points of the folds that
+  trained on the line, and at or above the per-line DNA-only models at gene and 30-nt scale.
+- **Gene level is solved by the RNA input** (98% of replicate; the DNA-only models reach 89%), and the
+  model adds a little over the RNA-scaled baseline (96-97%).
+- **Shape along transcripts comes from the model, not the RNA** (30-nt: 71-84% vs 12-38% for scaled RNA).
+- **Fine scale is the gap**: TIS codon/1-nt 37-45%, the start-peak problem of §12. Codon
+  periodicity needs the CHX head of §12 (reading frame 82% vs 59%), which is not yet in this model.
+- Caveats: the RNA input is matched RNA-input from the same lysate; val chromosome only; test (chr8/9)
+  not yet scored.
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest
