@@ -166,41 +166,90 @@ def test_library_rows_metric_math_and_yardstick():
     nt = by[("m", "nt")]
     assert nt["value"] == pytest.approx(np.median([pearson(pred[i], rep2[i]) for i in keep]))
     assert by[("m", "bin30")]["n"] == 4
-    assert {r["scale"] for r in rows} == {"gene", "bin30", "codon", "nt", "frame"}
+    assert {r["scale"] for r in rows} == {"gene", "gene_mrna", "bin30", "codon", "nt", "frame"}
+    mrna = lambda vs: np.log1p([v.sum() for v in vs])  # noqa: E731
+    assert by[("m", "gene_mrna")]["value"] == pytest.approx(
+        np.corrcoef(mrna(pred), mrna(rep2))[0, 1]
+    )
     # rows are per prediction source; the replicates only enter as value / yardstick
     assert {r["source"] for r in rows} == {"m"}
 
 
-def test_library_rows_tis_uses_whole_mrna_totals_and_has_no_frame_row():
+def test_library_rows_tis_gene_over_cds_whole_mrna_extra_and_no_frame_row():
     units = [_unit(str(i), 60, (30, 45)) for i in range(3)]
     rep2 = [np.r_[np.full(30, float(i + 1)), np.zeros(30)] for i in range(3)]
     rep1 = [v.copy() for v in rep2]
     rows = library_rows(units, {"rep1": rep1, "rep2": rep2, "m": rep2}, "tis", min_reads=1)
     by = {r["scale"]: r for r in rows}
     assert "frame" not in by
-    # CDS totals are all zero (constant -> 0); whole-mRNA totals correlate perfectly
-    assert by["gene"]["value"] == pytest.approx(1.0)
-    assert by["gene"]["percent"] == pytest.approx(100.0)
+    # CDS totals are all zero (constant -> r 0, yardstick 0 -> no percent)
+    assert by["gene"]["value"] == 0.0 and np.isnan(by["gene"]["percent"])
+    # whole-mRNA totals correlate perfectly
+    assert by["gene_mrna"]["value"] == pytest.approx(1.0)
+    assert by["gene_mrna"]["percent"] == pytest.approx(100.0)
 
 
-def test_frame_agreement_counts_codons_with_enough_reads():
+def test_codon_bins_follow_a_cds_start_off_the_3nt_grid():
+    rng = np.random.default_rng(3)
+    units = [_unit(str(i), 61, (4, 61)) for i in range(3)]  # CDS frame offset 4 % 3 = 1
+    rep1 = [rng.poisson(3.0, 61).astype(float) for _ in units]
+    rep2 = [rng.poisson(3.0, 61).astype(float) for _ in units]
+    pred = [rng.poisson(3.0, 61).astype(float) for _ in units]
+    rows = library_rows(units, {"rep1": rep1, "rep2": rep2, "m": pred}, "tis", min_reads=1)
+    codon = next(r for r in rows if r["scale"] == "codon")
+    expected = np.median(
+        [pearson(bin_sums(p, 3, 1), bin_sums(t, 3, 1)) for p, t in zip(pred, rep2)]
+    )
+    on_grid = np.median([pearson(bin_sums(p, 3), bin_sums(t, 3)) for p, t in zip(pred, rep2)])
+    assert codon["value"] == pytest.approx(expected)
+    assert codon["value"] != pytest.approx(on_grid)
+
+
+def test_frame_agreement_scores_value_and_yardstick_on_the_same_codons():
     unit = _unit("a", 30, (0, 30))
     rep2 = np.zeros(30)
     rep2[0::3] = 6.0  # frame 0 dominant, 10 codons with 6 reads
     rep2[4] = 1.0  # codon 1 now has 7 reads, still frame 0
+    rep2[24:27] = [1.0, 1.0, 0.0]  # codon 8: 2 reads, below min_frame_reads
     rep1 = np.zeros(30)
-    rep1[0:15:3] = 5.0  # agrees on codons 0-4
-    rep1[16:30:3] = 5.0  # frame 1 on codons 5-9
+    rep1[0:15:3] = 5.0  # frame 0 on codons 0-4
+    rep1[[16, 19]] = 5.0  # frame 1 on codons 5-6
+    rep1[21:24] = [1.0, 1.0, 0.0]  # codon 7 tied: undefined
+    # codon 9 empty in rep1: undefined
     pred = np.zeros(30)
     pred[0::3] = 1.0
+    tied = pred.copy()
+    tied[1] = 1.0  # codon 0 tied in this prediction
     rows = library_rows(
-        [unit], {"rep1": [rep1], "rep2": [rep2], "m": [pred]}, "chx", min_frame_reads=5
+        [unit],
+        {"rep1": [rep1], "rep2": [rep2], "m": [pred], "t": [tied]},
+        "chx",
+        min_frame_reads=5,
     )
-    frame = next(r for r in rows if r["scale"] == "frame")
-    assert frame["n"] == 10
-    assert frame["value"] == pytest.approx(1.0)
-    assert frame["yardstick"] == pytest.approx(0.5)
-    assert frame["percent"] == pytest.approx(200.0)
+    frame = {r["source"]: r for r in rows if r["scale"] == "frame"}
+    # m: codons 0-6 (rep2, rep1 and m all defined): rep1 agrees on 5 of 7, m on 7 of 7
+    assert frame["m"]["n"] == 7
+    assert frame["m"]["value"] == pytest.approx(1.0)
+    assert frame["m"]["yardstick"] == pytest.approx(5 / 7)
+    assert frame["m"]["percent"] == pytest.approx(140.0)
+    # t: its tie drops codon 0 from both value and yardstick
+    assert frame["t"]["n"] == 6
+    assert frame["t"]["value"] == pytest.approx(1.0)
+    assert frame["t"]["yardstick"] == pytest.approx(4 / 6)
+
+
+def test_percent_needs_a_yardstick_of_at_least_the_floor():
+    assert scorecard.percent_of(0.5, 0.25) == pytest.approx(200.0)
+    assert np.isnan(scorecard.percent_of(0.1, 0.05))
+    assert np.isnan(scorecard.percent_of(-0.2, -0.5))
+    assert np.isnan(scorecard.percent_of(0.2, float("nan")))
+    assert scorecard.PERCENT_MIN_YARDSTICK == 0.1
+    table = pd.DataFrame(
+        [["HeLa", True, "tis", "m", "nt", 0.1, 0.05, scorecard.percent_of(0.1, 0.05), 9]],
+        columns=list(scorecard.COLUMNS),
+    )
+    md = scorecard.render_markdown(table, {"split": "val", "min_reads": 50, "heldout": ["HeLa"]})
+    assert "| HeLa* | tis | 9 | 0.050 | 0.100 (n/a) |" in md
 
 
 def _genes(rows):
@@ -352,25 +401,30 @@ def _scorecard_fixture(tmp_path):
 def test_run_scorecard_writes_tsv_markdown_and_plots(tmp_path):
     tracks, windows_dir, expression, pred_dir = _scorecard_fixture(tmp_path)
     out = tmp_path / "out"
-    table = scorecard.run_scorecard(
-        conditions=CONDITIONS,
-        sources={"model": {"HeLa": str(pred_dir), "K562": str(pred_dir)}},
-        split="val",
-        windows_dir=windows_dir,
-        expression=expression,
-        tracks_dir=tracks,
-        gtf=_gtf(tmp_path),
-        out_dir=out,
-        heldout=("HeLa",),
-        fit_conditions=("K562",),
-        min_reads=10,
-        example_genes_n=2,
-    )
+    with pytest.warns(UserWarning, match="ghost"):
+        table = scorecard.run_scorecard(
+            conditions=CONDITIONS,
+            sources={
+                "model": {"HeLa": str(pred_dir), "K562": str(pred_dir)},
+                "ghost": {"K562": str(tmp_path / "missing")},
+            },
+            split="val",
+            windows_dir=windows_dir,
+            expression=expression,
+            tracks_dir=tracks,
+            gtf=_gtf(tmp_path),
+            out_dir=out,
+            heldout=("HeLa",),
+            fit_conditions=("K562",),
+            min_reads=10,
+            example_genes_n=2,
+        )
     assert list(table.columns) == list(scorecard.COLUMNS)
     written = pd.read_csv(out / "scorecard.tsv", sep="\t")
     assert list(written.columns) == list(scorecard.COLUMNS)
     assert set(written.source) == {"model", "rna_scaled"}
-    assert set(written.scale) == {"gene", "bin30", "codon", "nt", "frame"}
+    assert set(written.scale) == {"gene", "gene_mrna", "bin30", "codon", "nt", "frame"}
+    assert written.groupby("condition").heldout.all().to_dict() == {"HeLa": True, "K562": False}
     model = written[(written.source == "model") & (written.scale != "frame")]
     # the prediction is replicate 2 itself
     assert model.value.to_numpy() == pytest.approx(1.0)
@@ -384,6 +438,7 @@ def test_run_scorecard_writes_tsv_markdown_and_plots(tmp_path):
     # HeLa held out: its scalar is fit on K562 only; K562 (evaluated) cannot fit on itself
     assert meta["rna_scaled"]["HeLa"]["fit_conditions"] == ["K562"]
     assert meta["rna_scaled"]["K562"] is None
+    assert meta["skipped"] == [{"source": "ghost", "condition": "K562", "reason": "missing"}]
     assert not ((written.condition == "K562") & (written.source == "rna_scaled")).any()
     plots = sorted(p.name for p in (out / "plots").glob("*.png"))
     assert len(plots) == 4 and all(p.startswith(("HeLa_", "K562_")) for p in plots)

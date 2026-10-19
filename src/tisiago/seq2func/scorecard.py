@@ -17,17 +17,20 @@ table ``expressed``), whose genomic span lies inside the union of the split's wi
 condition x library (``tis``, ``chx``) every unit gives spliced, 5'->3' 1-nt vectors of the
 prediction and of replicates 1 and 2 (canonical P-sites). Each metric is Pearson r of the
 prediction with replicate 2 (``value``) and of replicate 1 with replicate 2 (``yardstick``, the
-same units), and ``percent = 100 * value / yardstick``:
+same units), and ``percent = 100 * value / yardstick`` (NaN, "n/a" in the markdown, when the
+yardstick is below ``PERCENT_MIN_YARDSTICK`` = 0.1 or not finite):
 
-- ``gene``: log1p totals across units, over the CDS for CHX and over the whole mRNA for TIS
-  (initiation signal includes 5'UTR starts); ``n`` = units.
+- ``gene``: log1p CDS totals across units; ``n`` = units. ``gene_mrna``: the same over the whole
+  mRNA (TIS signal includes 5'UTR starts).
 - ``bin30`` / ``codon`` / ``nt``: per-unit r along the mRNA (30-nt bins from the 5' end; 3-nt bins
   in the annotated CDS frame; single nt; trailing partial bins dropped), median over units with
   at least ``--min-reads`` replicate-2 reads on the mRNA; ``n`` = those units. A constant vector
   has r = 0.
-- ``frame`` (CHX only): fraction of CDS codons with at least ``--min-frame-reads`` replicate-2
-  reads and a unique dominant replicate-2 frame where the other track's dominant frame matches
-  (:func:`tisiago.seq2func.periodicity.dominant_phases`); ``n`` = codons.
+- ``frame`` (CHX only): dominant-frame agreement with replicate 2 over CDS codons
+  (:func:`tisiago.seq2func.periodicity.dominant_phases`). Per source, value and yardstick use the
+  same codons: replicate 2 has at least ``--min-frame-reads`` reads and a unique dominant frame,
+  and replicate 1 and the prediction each have a unique dominant frame (ties and empty codons are
+  undefined); ``n`` = those codons.
 
 Built-in comparator ``rna_scaled``: the condition's pooled RNA 5'-end track (no minus shift) in
 counts per million of its genome-wide pooled RNA total (:func:`rna_cpm`), times one scalar per
@@ -37,10 +40,15 @@ pooled over the fit conditions. The fit conditions are ``--fit-conditions`` (def
 baseline; with none left the comparator is skipped for that condition. The scalar only moves the
 ``gene`` metric (log1p), the within-transcript correlations are scale-free.
 
-Writes ``scorecard.tsv`` (long: condition, library, source, scale, value, yardstick, percent, n),
+A source missing a condition's prediction directory is skipped for that condition with a warning
+(listed under ``skipped`` in ``scorecard.json``).
+
+Writes ``scorecard.tsv`` (long: condition, heldout, library, source, scale, value, yardstick,
+percent, n),
 ``scorecard.md`` (one table per scale), ``scorecard.json`` (inputs, fit conditions, scalars) and
 ``plots/<C>_<rank>_<gene>.png`` for the ``--example-genes`` units with the highest RNA count in
-the split (ties by gene_id): rows replicate 1, replicate 2, each source, RNA (CPM); TIS and CHX
+the split (ties by gene_id): rows replicate 1, replicate 2, each source, ``rna_scaled`` (RNA CPM
+where no scalar was fit); TIS and CHX
 columns; transcript coordinates with the CDS shaded. Default output ``data/p6/scorecard/<split>``.
 """
 
@@ -50,6 +58,7 @@ import argparse
 import json
 import os
 import re
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -68,15 +77,27 @@ from tisiago.seq2func.targets import STRAND_FILES
 from tisiago.seq2func.tracks import track_prefix
 
 LIBRARIES = ("tis", "chx")
-SCALES = ("gene", "bin30", "codon", "nt")
+SCALES = ("gene", "gene_mrna", "bin30", "codon", "nt")
+WITHIN_SCALES = ("bin30", "codon", "nt")
 FRAME = "frame"
 BIN = 30
 MIN_READS = 50
 MIN_FRAME_READS = 5
 EXAMPLE_GENES = 4
 RNA_SCALED = "rna_scaled"
+PERCENT_MIN_YARDSTICK = 0.1
 RESERVED = ("rep1", "rep2", "rna", RNA_SCALED)
-COLUMNS = ("condition", "library", "source", "scale", "value", "yardstick", "percent", "n")
+COLUMNS = (
+    "condition",
+    "heldout",
+    "library",
+    "source",
+    "scale",
+    "value",
+    "yardstick",
+    "percent",
+    "n",
+)
 _GENE_ID = re.compile(r'gene_id "([^"]+)"')
 _GENE_NAME = re.compile(r'gene_name "([^"]+)"')
 _TRANSCRIPT_ID = re.compile(r'transcript_id "([^"]+)"')
@@ -244,8 +265,11 @@ def _within(unit: Unit, values: np.ndarray, scale: str) -> np.ndarray:
     return values
 
 
-def _percent(value: float, yardstick: float) -> float:
-    if not np.isfinite(value) or not np.isfinite(yardstick) or yardstick == 0:
+def percent_of(value: float, yardstick: float) -> float:
+    """``100 * value / yardstick``; NaN below :data:`PERCENT_MIN_YARDSTICK` or if not finite."""
+    if not np.isfinite(value) or not np.isfinite(yardstick):
+        return float("nan")
+    if yardstick < PERCENT_MIN_YARDSTICK:
         return float("nan")
     return 100.0 * value / yardstick
 
@@ -274,25 +298,26 @@ def library_rows(
                 "scale": scale,
                 "value": value,
                 "yardstick": yardstick,
-                "percent": _percent(value, yardstick),
+                "percent": percent_of(value, yardstick),
                 "n": int(n),
             }
         )
 
-    def total(unit, values):
-        if library == "chx":
-            lo, hi = unit.cds_range
-            return float(values[lo:hi].sum())
-        return float(values.sum())
+    def totals(values, cds_only):
+        out = []
+        for unit, v in zip(units, values, strict=True):
+            lo, hi = unit.cds_range if cds_only else (0, len(v))
+            out.append(float(v[lo:hi].sum()))
+        return np.log1p(out)
 
-    obs = np.log1p([total(u, v) for u, v in zip(units, rep2, strict=True)])
-    yard = pearson(np.log1p([total(u, v) for u, v in zip(units, rep1, strict=True)]), obs)
-    for source in sources:
-        pred = np.log1p([total(u, v) for u, v in zip(units, vectors[source], strict=True)])
-        add(source, "gene", pearson(pred, obs), yard, len(units))
+    for scale, cds_only in (("gene", True), ("gene_mrna", False)):
+        obs = totals(rep2, cds_only)
+        yard = pearson(totals(rep1, cds_only), obs)
+        for source in sources:
+            add(source, scale, pearson(totals(vectors[source], cds_only), obs), yard, len(units))
 
     eligible = [i for i, v in enumerate(rep2) if v.sum() >= min_reads]
-    for scale in SCALES[1:]:
+    for scale in WITHIN_SCALES:
         pairs = []
         for i in eligible:
             unit = units[i]
@@ -307,22 +332,27 @@ def library_rows(
             add(source, scale, float(median[k + 1]), float(median[0]), len(pairs))
 
     if library == "chx":
-        matches = np.zeros(1 + len(sources))
-        codons = 0
+        # per source: [model matches, replicate-1 matches, codons], over the same codons
+        counts = np.zeros((len(sources), 3))
         for i, unit in enumerate(units):
             lo, hi = unit.cds_range
             target = dominant_phases(rep2[i][lo:hi], 1, min_frame_reads)
-            keep = target >= 0
-            if not keep.any():
+            yard = dominant_phases(rep1[i][lo:hi], 1, 0.0)
+            base = (target >= 0) & (yard >= 0)
+            if not base.any():
                 continue
-            codons += int(keep.sum())
-            others = [rep1[i]] + [vectors[s][i] for s in sources]
-            for k, values in enumerate(others):
-                phases = dominant_phases(values[lo:hi], 1, 0.0)
-                matches[k] += int((phases[keep] == target[keep]).sum())
-        share = matches / codons if codons else np.full(1 + len(sources), np.nan)
+            for k, source in enumerate(sources):
+                phases = dominant_phases(vectors[source][i][lo:hi], 1, 0.0)
+                keep = base & (phases >= 0)
+                counts[k] += [
+                    (phases[keep] == target[keep]).sum(),
+                    (yard[keep] == target[keep]).sum(),
+                    keep.sum(),
+                ]
         for k, source in enumerate(sources):
-            add(source, FRAME, float(share[k + 1]), float(share[0]), codons)
+            model, replicate, n = counts[k]
+            value = model / n if n else float("nan")
+            add(source, FRAME, float(value), float(replicate / n) if n else float("nan"), n)
     return rows
 
 
@@ -414,26 +444,25 @@ def plot_unit(
     path: str | Path,
     unit: Unit,
     panels: Mapping[str, Mapping[str, np.ndarray]],
-    rna: np.ndarray,
     title: str,
 ) -> None:
-    """One PNG: rows = tracks of ``panels[library]`` then RNA; columns = libraries."""
+    """One PNG: rows = the tracks of ``panels[library]`` in order; columns = libraries."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     names = list(next(iter(panels.values())))
-    nrows = len(names) + 1
+    nrows = len(names)
     fig, axes = plt.subplots(
         nrows, len(panels), sharex=True, figsize=(6 * len(panels), 1.1 * nrows + 0.8), squeeze=False
     )
     x = np.arange(unit.length)
     lo, hi = unit.cds_range
     for col, (library, tracks) in enumerate(panels.items()):
-        for row, name in enumerate([*names, "RNA (CPM)"]):
+        for row, name in enumerate(names):
             ax = axes[row, col]
-            values = rna if row == len(names) else tracks[name]
+            values = tracks[name]
             ax.vlines(x, 0, values, lw=0.6, color="C0" if row < 2 else "C1")
             ax.axvspan(lo, hi, color="0.85", lw=0, zorder=0)
             ax.set_ylabel(name, rotation=0, ha="right", va="center", fontsize=8)
@@ -451,7 +480,7 @@ def plot_unit(
 def _fmt(value: float, percent: float) -> str:
     if not np.isfinite(value):
         return "n/a"
-    return f"{value:.3f} ({percent:.0f}%)" if np.isfinite(percent) else f"{value:.3f}"
+    return f"{value:.3f} ({percent:.0f}%)" if np.isfinite(percent) else f"{value:.3f} (n/a)"
 
 
 def render_markdown(table: pd.DataFrame, meta: Mapping) -> str:
@@ -462,7 +491,8 @@ def render_markdown(table: pd.DataFrame, meta: Mapping) -> str:
         "",
         "Each cell: prediction vs replicate 2 (percent of replicate 1 vs replicate 2). Pearson r,",
         "except `frame`: dominant-frame agreement over CHX CDS codons. Units: MANE transcripts of",
-        "expressed genes inside the split's windows. `gene` totals: CDS for CHX, mRNA for TIS.",
+        "expressed genes inside the split's windows. `gene`: log1p CDS totals; `gene_mrna`: whole",
+        f"mRNA. Percent is n/a when the yardstick is below {PERCENT_MIN_YARDSTICK}.",
         f"Within-transcript scales: median over transcripts with >= {meta['min_reads']}",
         "replicate-2 reads. Held-out conditions are marked `*`.",
     ]
@@ -513,10 +543,18 @@ def run_scorecard(
     leaked = sorted(set(fit) & set(heldout))
     if leaked:
         raise ValueError(f"fit conditions {leaked} are held out")
-    resolved = {
-        name: predicted_dirs(templates, split, list(templates), windows_dir)
-        for name, templates in sources.items()
-    }
+    resolved: dict[str, dict[str, Path]] = {}
+    skipped = []
+    for name, templates in sources.items():
+        resolved[name] = {}
+        for condition, template in templates.items():
+            try:
+                found = predicted_dirs({condition: template}, split, [condition], windows_dir)
+            except FileNotFoundError as exc:
+                warnings.warn(f"{name} {condition}: skipped, no prediction ({exc})", stacklevel=2)
+                skipped.append({"source": name, "condition": condition, "reason": "missing"})
+                continue
+            resolved[name].update(found)
     windows = pd.read_parquet(Path(windows_dir) / SPLIT_FILES[split])
     train_windows = None
     genes = pd.read_parquet(expression)
@@ -536,6 +574,7 @@ def run_scorecard(
         "min_reads": min_reads,
         "min_frame_reads": min_frame_reads,
         "sources": {n: {c: str(p) for c, p in d.items()} for n, d in resolved.items()},
+        "skipped": skipped,
         "units": {},
         "rna_scaled": {},
         "plots": {},
@@ -597,7 +636,7 @@ def run_scorecard(
                 if scalars is not None:
                     vectors[RNA_SCALED] = [v * scalars[library] for v in rna]
                 for row in library_rows(units, vectors, library, min_reads, min_frame_reads):
-                    rows.append({"condition": condition, **row})
+                    rows.append({"condition": condition, "heldout": condition in heldout, **row})
                 panels[library] = vectors
 
             index = {u.transcript_id: i for i, u in enumerate(units)}
@@ -610,10 +649,16 @@ def run_scorecard(
                     path,
                     unit,
                     {
-                        lib: {k: v[i] for k, v in vecs.items() if k != RNA_SCALED}
+                        lib: {
+                            **{k: v[i] for k, v in vecs.items() if k != RNA_SCALED},
+                            **(
+                                {f"{RNA_SCALED}": vecs[RNA_SCALED][i]}
+                                if RNA_SCALED in vecs
+                                else {"RNA (CPM)": rna[i]}
+                            ),
+                        }
                         for lib, vecs in panels.items()
                     },
-                    rna[i],
                     f"{condition} {unit.gene_name} ({unit.transcript_id}, {unit.strand} strand, "
                     f"{split})",
                 )
