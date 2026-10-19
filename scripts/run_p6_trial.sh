@@ -12,6 +12,10 @@
 #   bash scripts/run_p6_trial.sh --queue --after 11125770 seqconv_w50_2stage \
 #       --init-from data/p6/runs/k562_base/best --head seqconv --frame-weight 50 --steps 10000
 #
+# rnacond arms (--arm rnacond:<group> --head rnacond) submit train -> evaluate only: evaluate
+# writes eval/<arm>_<condition>_val.tsv for every condition; periodicity and trial_score take
+# per-condition arms and are skipped.
+#
 # Output: data/p6/runs/ar_<name>/ (train records, eval/, periodicity/, trial_score.json) and one
 # row appended to autoresearch/p6/results.tsv. Train args default to --arm condition:K562
 # --eval-every 1000 --eval-windows 100 (later args win); --windows-dir, --expression and --out
@@ -220,6 +224,12 @@ DATA=(--windows-dir "$WINDOWS_DIR" --expression "$EXPRESSION")
 submit EVAL '<evaluate>' "${GPU[@]}" --comment="ar_${NAME} evaluate" \
     --dependency="$EVAL_DEP" scripts/run_p6_evaluate.sh --checkpoint "$RUN/best" --arm "$ARM" \
     --split val "${DATA[@]}" --out-dir "$RUN/eval"
+if [[ "$ARM" == rnacond:* ]]; then
+    echo "# $ARM: periodicity and trial_score skipped (per-condition arms only)" >&2
+    echo "trial $(basename "$RUN"): train=${TRAIN:-none} evaluate=$EVAL"
+    echo "run dir: $RUN"
+    exit 0
+fi
 submit PERIOD '<periodicity>' "${CPU[@]}" --job-name="${USER}_tisiago_p6ar_periodicity" \
     ${PERIOD_DEP:+--dependency="$PERIOD_DEP"} scripts/run_p6_periodicity.sh \
     --checkpoint "$RUN/best" --arm "$ARM" --split val --max-windows 100 "${DATA[@]}" \

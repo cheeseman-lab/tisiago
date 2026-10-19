@@ -253,3 +253,15 @@ def test_all_gpu_calls_use_lane_partition(fake):
     proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=f"800|{lane_name(0)}|{A6}|g\n"
                           f"801|{lane_name(1)}|{A6}|g\n", P6_TRIAL_LANES=LANES3)
     assert partition(calls[0]) == L40 and partition(calls[1]) == L40
+
+
+def test_rnacond_trial_is_train_then_evaluate_on_every_condition(fake, tmp_path):
+    proc, calls, _ = fake("rnacond_hela", "--arm", "rnacond:HeLa", "--head", "rnacond")
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 2  # no periodicity / trial_score: they take per-condition arms only
+    train, evaluate = calls
+    assert "run_p6_train.sh" in train and "--arm rnacond:HeLa --head rnacond" in train
+    assert "run_p6_evaluate.sh" in evaluate and "--arm rnacond:HeLa" in evaluate
+    assert "--condition" not in evaluate  # evaluate defaults to all six conditions
+    assert dependency(evaluate) == "afterok:901,singleton"
+    assert "periodicity and trial_score skipped" in proc.stderr
