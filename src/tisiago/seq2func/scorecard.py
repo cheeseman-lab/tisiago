@@ -464,7 +464,7 @@ def render_markdown(table: pd.DataFrame, meta: Mapping) -> str:
         "except `frame`: dominant-frame agreement over CHX CDS codons. Units: MANE transcripts of",
         "expressed genes inside the split's windows. `gene` totals: CDS for CHX, mRNA for TIS.",
         f"Within-transcript scales: median over transcripts with >= {meta['min_reads']}",
-        "replicate-2 reads.",
+        "replicate-2 reads. Held-out conditions are marked `*`.",
     ]
     for scale in (*SCALES, FRAME):
         part = table[table.scale == scale]
@@ -480,9 +480,10 @@ def render_markdown(table: pd.DataFrame, meta: Mapping) -> str:
         for (condition, library), group in part.groupby(["condition", "library"], sort=False):
             by = {r.source: r for r in group.itertuples()}
             first = group.iloc[0]
+            label = f"{condition}*" if condition in meta.get("heldout", ()) else condition
             cells = [_fmt(by[s].value, by[s].percent) if s in by else "-" for s in sources]
             lines.append(
-                f"| {condition} | {library} | {int(first.n)} | {first.yardstick:.3f} | "
+                f"| {label} | {library} | {int(first.n)} | {first.yardstick:.3f} | "
                 + " | ".join(cells)
                 + " |"
             )

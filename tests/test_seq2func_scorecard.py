@@ -379,6 +379,7 @@ def test_run_scorecard_writes_tsv_markdown_and_plots(tmp_path):
     for scale in ("gene", "bin30", "codon", "nt", "frame"):
         assert f"## {scale}" in md
     assert "rna_scaled" in md and "%)" in md
+    assert "| HeLa* | tis |" in md and "| K562 | tis |" in md
     meta = json.loads((out / "scorecard.json").read_text())
     # HeLa held out: its scalar is fit on K562 only; K562 (evaluated) cannot fit on itself
     assert meta["rna_scaled"]["HeLa"]["fit_conditions"] == ["K562"]
