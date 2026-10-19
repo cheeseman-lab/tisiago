@@ -16,9 +16,11 @@ cycloheximide (CHX) Ribo-seq tracks — including for a cell line it never saw i
 - **One shared model across cell lines.** Each training example is (window, condition): DNA ->
   backbone; the condition's pooled RNA track (both strands) enters the head as extra input channels.
 - Head kind `rnacond`: the tutorial-style MLP (Linear 256 -> relu -> Linear) on
-  concat(1-bp embeddings, RNA features). RNA features (computed in JAX from the raw pooled RNA counts,
-  so they follow augmentation): per strand log1p(counts) and log1p of box-smoothed counts at widths
-  9, 33, 129, 513 nt. 10 channels. Outputs 4 channels: TIS +/-, CHX +/- (no RNA output).
+  concat(1-bp embeddings, RNA features). RNA input: the pooled RNA counts depth-scaled to a
+  5e7-read library (x 5e7 / the condition's genome-wide pooled RNA reads, from the pooled bigWig
+  headers; read units, so log1p compresses), so lines of different RNA depth are comparable.
+  RNA features (computed in JAX from that input, so they follow augmentation): per strand
+  log1p(counts) and log1p of box-smoothed counts at widths 9, 33, 129, 513 nt. 10 channels. Outputs 4 channels: TIS +/-, CHX +/- (no RNA output).
 - The backbone sees DNA only; RNA never reaches the backbone.
 
 ## 3. Data and protocol

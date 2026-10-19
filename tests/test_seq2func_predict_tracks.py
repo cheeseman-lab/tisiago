@@ -523,12 +523,12 @@ def test_rnacond_float_mode_matches_oracle_and_feeds_rna(world):
         rna_conditioned=True,
     )
     widths = [x.shape[-1] for x in seen]
-    # the pooled RNA in CPM: 6 + 2 (+) and 4 (-) reads in the window, plus 2 x 2 end reads
-    scale = 1e6 / 16
+    # pooled RNA scaled to 5e7 reads: 6 + 2 (+) and 4 (-) in the window, plus 2 x 2 end reads
+    scale = 5e7 / 16
     assert seen[0][10, 4] == pytest.approx(6 * scale) and seen[0][31, 5] == pytest.approx(4 * scale)
     assert widths == [6, 6, 6]
     assert manifest["rna_conditioned"] is True
-    assert manifest["rna_cpm_scale"] == pytest.approx(scale)
+    assert manifest["rna_depth_scale"] == pytest.approx(scale)
     for library in ("tis", "chx"):
         prefix = predict_tracks.pooled_prefix(world["out"], "K562", library)
         got_plus = {p: v for p, v in read_bigwig_counts(f"{prefix}.plus.bw")["chr7"].items() if v}

@@ -202,17 +202,17 @@ def test_iterate_multi_worker_loop_and_error(world, tmp_path):
 
 RNA_VALUES = {"HeLa": 5.0, "K562": 7.0}
 # genome-wide pooled RNA totals: value (+) and value + 1 (-) reads
-CPM = {c: 1e6 / (2 * v + 1) for c, v in RNA_VALUES.items()}
+DEPTH = {c: 5e7 / (2 * v + 1) for c, v in RNA_VALUES.items()}
 
 
 def _raw(rna, condition):
-    """RNA input (CPM) back to read counts."""
-    return np.rint(np.asarray(rna, np.float64) / CPM[condition])
+    """Depth-scaled RNA input back to read counts."""
+    return np.rint(np.asarray(rna, np.float64) / DEPTH[condition])
 
 
 def _which(value):
-    """Condition and raw count of a plus-strand RNA CPM value."""
-    condition = min(CPM, key=lambda c: abs(RNA_VALUES[c] * CPM[c] - value))
+    """Condition and raw count of a plus-strand depth-scaled RNA value."""
+    condition = min(DEPTH, key=lambda c: abs(RNA_VALUES[c] * DEPTH[c] - value))
     return RNA_VALUES[condition], condition
 
 
@@ -393,21 +393,23 @@ def test_iterate_rnacond_held_out_condition_never_read(rna_world, tmp_path):
     assert all(_raw(b["sequences"][0, :, 4].max(), "HeLa") == 5.0 for b in batches)
 
 
-def test_rna_cpm_scale_is_genome_wide_pooled_total(rna_world, tmp_path):
-    from tisiago.seq2func.data import rna_cpm_scale, rna_cpm_scales
+def test_rna_depth_scale_is_genome_wide_pooled_total(rna_world, tmp_path):
+    from tisiago.seq2func.data import RNA_REFERENCE_DEPTH, rna_depth_scale, rna_depth_scales
+
+    assert RNA_REFERENCE_DEPTH == 5e7  # a 50M-read library keeps its read units
 
     # HeLa pooled RNA: 5 (+) and 6 (-) reads on chr1
-    assert rna_cpm_scale(rna_world["tracks_dir"], "HeLa") == pytest.approx(1e6 / 11)
-    assert rna_cpm_scales(rna_world["tracks_dir"], ["HeLa", "K562"]) == pytest.approx(
-        {"HeLa": 1e6 / 11, "K562": 1e6 / 15}
+    assert rna_depth_scale(rna_world["tracks_dir"], "HeLa") == pytest.approx(5e7 / 11)
+    assert rna_depth_scales(rna_world["tracks_dir"], ["HeLa", "K562"]) == pytest.approx(
+        {"HeLa": 5e7 / 11, "K562": 5e7 / 15}
     )
     empty = tmp_path / "empty"
     write_bigwigs({}, SIZES, track_prefix(empty, "HeLa", "rna", "pooled"))
     with pytest.raises(ValueError, match="RNA"):
-        rna_cpm_scale(empty, "HeLa")
+        rna_depth_scale(empty, "HeLa")
 
 
-def test_rnacond_rna_input_is_cpm_and_depth_invariant(tmp_path):
+def test_rnacond_rna_input_is_depth_scaled_and_depth_invariant(tmp_path):
     """Two conditions that differ only by RNA depth give identical head inputs."""
     from tisiago.seq2func.data import make_rnacond_example
 
@@ -440,6 +442,7 @@ def test_rnacond_rna_input_is_cpm_and_depth_invariant(tmp_path):
     a = make_rnacond_example(str(fasta), tracks, "HeLa", genes, "chr1", 0, 32)
     b = make_rnacond_example(str(fasta), tracks, "K562", genes, "chr1", 0, 32)
     np.testing.assert_allclose(b["sequences"], a["sequences"], rtol=1e-6)
-    assert a["sequences"][20, 4] == pytest.approx(2 * 1e6 / 10)  # CPM of a 10-read library
-    assert a["sequences"][25, 5] == pytest.approx(3 * 1e6 / 10)
+    # a 10-read library scaled to 5e7 reads
+    assert a["sequences"][20, 4] == pytest.approx(2 * 5e7 / 10)
+    assert a["sequences"][25, 5] == pytest.approx(3 * 5e7 / 10)
     assert b["targets"][20, 0] == 7 * a["targets"][20, 0]  # targets stay raw counts

@@ -218,9 +218,9 @@ class ResidChxTrackHead(TrackHead):
 class RnaCondTrackHead(TrackHead):
     """concat(1-bp embeddings, RNA features) -> Linear(256) -> relu -> Linear(C) -> softplus.
 
-    Needs ``kwargs["sequence"]`` ``(B, S, 6)``: the one-hot plus the condition's raw pooled RNA
-    counts (plus, minus), built by ``iterate(..., rna_conditioned=True)``; the backbone sees only
-    the one-hot (:func:`make_sequence_forward`). The RNA enters through
+    Needs ``kwargs["sequence"]`` ``(B, S, 6)``: the one-hot plus the condition's pooled RNA counts
+    (plus, minus) scaled to a 5e7-read library, built by ``iterate(..., rna_conditioned=True)``;
+    the backbone sees only the one-hot (:func:`make_sequence_forward`). The RNA enters through
     :func:`tisiago.seq2func.rna_features.rna_features` (10 channels, computed here so they follow
     augmentation). Outputs TIS+, TIS-, CHX+, CHX- (``targets.rnacond_layout``).
     """

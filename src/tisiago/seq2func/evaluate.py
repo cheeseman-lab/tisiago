@@ -25,8 +25,8 @@ truncated reference never stands in for the full one; a reused reference must ma
 
 An ``rnacond:<group>`` checkpoint is evaluated on any condition (held out or not) by feeding
 that condition's RNA: one ``<arm>_<condition>_<split>.tsv`` per ``--condition`` (default: all
-six), rows for its TIS/CHX channels in the same format plus ``heldout``, ``rna_cpm_scale`` and
-``rna_total`` (the RNA input's normalisation; checked against the run's ``run.json``).
+six), rows for its TIS/CHX channels in the same format plus ``heldout``, ``rna_depth_scale``
+and ``rna_total`` (the RNA input's normalisation; checked against the run's ``run.json``).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tisiago.seq2func.data import TrackReader, iterate, rna_total
+from tisiago.seq2func.data import RNA_REFERENCE_DEPTH, TrackReader, iterate, rna_total
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
 from tisiago.seq2func.overfit import CHX_KINDS, HEAD_CHOICES, RNA_KINDS, TRANSCRIPT_KINDS
@@ -451,22 +451,22 @@ def evaluate_checkpoint(
     table = metrics.table()
     if rnacond:
         total = rna_total(tracks_dir, condition)
-        table["rna_cpm_scale"] = 1e6 / total
+        table["rna_depth_scale"] = RNA_REFERENCE_DEPTH / total
         table["rna_total"] = total
     return table
 
 
 def check_rna_scales(checkpoint: Path, tracks_dir: Path, conditions) -> None:
-    """Raise ``ValueError`` if the run's recorded RNA CPM scales differ from ``tracks_dir``'s."""
+    """Raise ``ValueError`` if the run's recorded RNA depth scales differ from ``tracks_dir``'s."""
     run = Path(checkpoint).parent / "run.json"
-    recorded = json.loads(run.read_text()).get("rna_cpm_scales", {}) if run.exists() else {}
+    recorded = json.loads(run.read_text()).get("rna_depth_scales", {}) if run.exists() else {}
     for condition in conditions:
         if condition not in recorded:
             continue
-        scale = 1e6 / rna_total(tracks_dir, condition)
+        scale = RNA_REFERENCE_DEPTH / rna_total(tracks_dir, condition)
         if not np.isclose(recorded[condition], scale, rtol=1e-9, atol=0):
             raise ValueError(
-                f"{run} records rna_cpm_scales[{condition}]={recorded[condition]}, but "
+                f"{run} records rna_depth_scales[{condition}]={recorded[condition]}, but "
                 f"{tracks_dir} gives {scale}"
             )
 

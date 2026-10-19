@@ -628,7 +628,7 @@ def test_rnacond_eval_windows_default_per_condition():
     assert train.eval_windows_of(7, rnacond=False) == 7
 
 
-def test_rnacond_data_fields_record_cpm_scales(tmp_path):
+def test_rnacond_data_fields_record_depth_scales(tmp_path):
     from collections import Counter
 
     from tisiago.seq2func.tracks import track_prefix, write_bigwigs
@@ -637,9 +637,22 @@ def test_rnacond_data_fields_record_cpm_scales(tmp_path):
         counts = {("chr1", "+"): Counter({1: k + 1}), ("chr1", "-"): Counter({2: 1})}
         write_bigwigs(counts, [("chr1", 10)], track_prefix(tmp_path, condition, "rna", "pooled"))
     fields = train.rnacond_data_fields("rnacond:RPE1", tmp_path)
-    assert fields["rna_normalisation"].startswith("cpm")
-    scales = fields["rna_cpm_scales"]
+    assert fields["rna_normalisation"].startswith("depth")
+    assert fields["rna_reference_depth"] == 5e7
+    scales = fields["rna_depth_scales"]
     assert list(scales) == list(CONDITIONS)  # training and held-out conditions
-    assert scales["HeLa"] == pytest.approx(1e6 / 2) and scales["RPE1_Sen"] == pytest.approx(1e6 / 7)
+    assert scales["HeLa"] == pytest.approx(5e7 / 2) and scales["RPE1_Sen"] == pytest.approx(5e7 / 7)
     assert fields["rna_totals"]["K562"] == pytest.approx(3.0)
     assert json.loads(json.dumps(fields)) == fields
+
+
+def test_selection_window_indices_evenly_spaced_and_deterministic():
+    idx = train.selection_window_indices(1322, 20)
+    assert len(idx) == 20 and idx[0] == 0 and idx[-1] == 1321
+    assert idx == sorted(set(idx)) == train.selection_window_indices(1322, 20)
+    gaps = np.diff(idx)
+    assert gaps.min() >= 69 and gaps.max() <= 70
+    assert all(isinstance(i, int) for i in idx)
+    assert train.selection_window_indices(5, 20) == [0, 1, 2, 3, 4]
+    assert train.selection_window_indices(100, 1) == [0]
+    assert train.selection_window_indices(0, 20) == []

@@ -1,6 +1,7 @@
 """RNA-input features of the ``rnacond`` head, in JAX (jit-safe, static shapes).
 
-The input is the condition's raw pooled RNA 5'-end counts ``(..., S, 2)`` (plus, minus). Per
+The input is the condition's pooled RNA 5'-end counts ``(..., S, 2)`` (plus, minus), scaled to a
+5e7-read library (``data.rna_depth_scale``; read units, so ``log1p`` compresses). Per
 strand: ``log1p(counts)`` and ``log1p(box_mean_w(counts))`` for ``w`` in :data:`RNA_WIDTHS`, a
 centred, same-length box mean with zero padding past the window ends (always divided by ``w``).
 Output ``(..., S, 10)``: the five plus-strand features, then the five minus-strand features, so a
@@ -33,7 +34,7 @@ def box_mean(x, width: int):
 
 
 def rna_features(rna):
-    """``(..., S, 2)`` raw RNA counts (plus, minus) -> ``(..., S, 10)`` features (see module)."""
+    """``(..., S, 2)`` depth-scaled RNA counts (plus, minus) -> ``(..., S, 10)`` features."""
     import jax.numpy as jnp
 
     rna = jnp.maximum(rna.astype(jnp.float32), 0.0)

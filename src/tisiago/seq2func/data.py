@@ -29,6 +29,7 @@ for _i, _base in enumerate("ACGT"):
     _LOOKUP[ord(_base.lower()), _i] = 1.0
 
 _DONE = object()
+RNA_REFERENCE_DEPTH = 5e7
 
 
 class _WorkerError:
@@ -121,21 +122,24 @@ def rna_total(tracks_dir: str | Path, condition: str) -> float:
     return total
 
 
-def rna_cpm_scale(tracks_dir: str | Path, condition: str) -> float:
-    """``1e6 / rna_total``: multiplies ``condition``'s raw RNA counts into counts per million."""
+def rna_depth_scale(tracks_dir: str | Path, condition: str) -> float:
+    """``RNA_REFERENCE_DEPTH / rna_total``: scales ``condition``'s RNA to a 5e7-read library.
+
+    Read units are kept (one read of a 50M-read library stays 1), so ``log1p`` still compresses.
+    """
     total = rna_total(tracks_dir, condition)
     if not total > 0:
         raise ValueError(f"{condition}: no pooled RNA reads in {tracks_dir}")
-    return 1e6 / total
+    return RNA_REFERENCE_DEPTH / total
 
 
-def rna_cpm_scales(tracks_dir: str | Path, conditions: Sequence[str]) -> dict[str, float]:
-    """:func:`rna_cpm_scale` of each condition."""
-    return {c: rna_cpm_scale(tracks_dir, c) for c in conditions}
+def rna_depth_scales(tracks_dir: str | Path, conditions: Sequence[str]) -> dict[str, float]:
+    """:func:`rna_depth_scale` of each condition."""
+    return {c: rna_depth_scale(tracks_dir, c) for c in conditions}
 
 
 class RnaCondReaders:
-    """Per-condition readers of ``rnacond`` examples: TIS/CHX targets, RNA input, CPM scale."""
+    """Per-condition readers of ``rnacond`` examples: TIS/CHX targets, RNA input, depth scale."""
 
     def __init__(self, tracks_dir: str | Path):
         """Readers are created on first use of a condition."""
@@ -143,12 +147,12 @@ class RnaCondReaders:
         self._readers: dict[str, tuple[TrackReader, TrackReader, float]] = {}
 
     def get(self, condition: str) -> tuple[TrackReader, TrackReader, float]:
-        """``(targets reader, RNA reader, RNA CPM scale)`` of ``condition``."""
+        """``(targets reader, RNA reader, RNA depth scale)`` of ``condition``."""
         if condition not in self._readers:
             self._readers[condition] = (
                 TrackReader(self.tracks_dir, [condition], libraries=RNACOND_LIBRARIES),
                 TrackReader(self.tracks_dir, [condition], libraries=("rna",)),
-                rna_cpm_scale(self.tracks_dir, condition),
+                rna_depth_scale(self.tracks_dir, condition),
             )
         return self._readers[condition]
 
@@ -227,8 +231,9 @@ def make_rnacond_example(
     """One (window, condition) pair: ``sequences (S, 6)``, ``targets (S, 4)``, ``mask (S, 4)``.
 
     ``sequences`` is the one-hot, then ``condition``'s pooled RNA 5'-end counts on the plus and
-    minus strand (read like the ``rna`` target channels: no minus-strand shift) in counts per
-    million of its genome-wide pooled RNA total (:func:`rna_cpm_scale`). ``targets``
+    minus strand (read like the ``rna`` target channels: no minus-strand shift), scaled to a
+    library of :data:`RNA_REFERENCE_DEPTH` reads by its genome-wide pooled RNA total
+    (:func:`rna_depth_scale`). ``targets``
     are its pooled TIS+, TIS-, CHX+, CHX- (:func:`tisiago.seq2func.targets.rnacond_layout`,
     canonical P-sites) and ``mask`` their expression mask. Pass ``readers`` to reuse handles.
     """

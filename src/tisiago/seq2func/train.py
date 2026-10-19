@@ -18,9 +18,9 @@ from a finished run's parameters (``init_from`` in ``run.json``).
 
 ``--arm rnacond:<group>`` (with ``--head rnacond``) trains one model on every condition outside
 the held-out cell-line group (``samples.CELL_LINE_GROUPS``): examples are (window, condition)
-pairs, the condition's pooled RNA (in counts per million of its genome-wide pooled RNA reads) is
-an input and its TIS/CHX tracks the 4 targets. Model selection uses the first ``--eval-windows``
-(default 20) val windows of each training condition only.
+pairs, the condition's pooled RNA (scaled to a 5e7-read library by its genome-wide pooled RNA
+reads) is an input and its TIS/CHX tracks the 4 targets. Model selection uses ``--eval-windows``
+(default 20) evenly spaced val windows of each training condition only.
 """
 
 from __future__ import annotations
@@ -178,21 +178,29 @@ def eval_windows_of(value: int | None, rnacond: bool) -> int:
     return RNACOND_EVAL_WINDOWS if rnacond else EVAL_WINDOWS
 
 
+def selection_window_indices(n: int, k: int) -> list[int]:
+    """``k`` evenly spaced row positions of ``n`` val windows (all of them if ``k >= n``)."""
+    if k >= n:
+        return list(range(n))
+    return sorted({int(i) for i in np.linspace(0, n - 1, k).round()})
+
+
 def rnacond_data_fields(arm: str, tracks_dir: str | Path) -> dict:
-    """run.json RNA normalisation of an rnacond arm: genome-wide totals and CPM scales.
+    """run.json RNA normalisation of an rnacond arm: genome-wide totals and depth scales.
 
     Recorded for the training and the held-out conditions (in :data:`CONDITIONS` order).
     """
-    from tisiago.seq2func.data import rna_total
+    from tisiago.seq2func.data import RNA_REFERENCE_DEPTH, rna_total
 
     _, group, conditions = parse_rnacond_arm(arm)
     every = [c for c in CONDITIONS if c in conditions or c in CELL_LINE_GROUPS[group]]
     totals = {c: rna_total(tracks_dir, c) for c in every}
     return {
-        "rna_normalisation": "cpm: pooled RNA x 1e6 / genome-wide pooled RNA reads "
-        "(pooled rna bigWig header sumData, both strands)",
+        "rna_normalisation": "depth: pooled RNA x rna_reference_depth / genome-wide pooled RNA "
+        "reads (pooled rna bigWig header sumData, both strands)",
+        "rna_reference_depth": RNA_REFERENCE_DEPTH,
         "rna_totals": totals,
-        "rna_cpm_scales": {c: 1e6 / t for c, t in totals.items()},
+        "rna_depth_scales": {c: RNA_REFERENCE_DEPTH / t for c, t in totals.items()},
     }
 
 
@@ -574,7 +582,12 @@ def main() -> None:
     )
 
     train_windows = pd.read_parquet(args.windows_dir / TRAIN_WINDOWS)
-    val_windows = pd.read_parquet(args.windows_dir / VAL_WINDOWS).iloc[: args.eval_windows]
+    val_all = pd.read_parquet(args.windows_dir / VAL_WINDOWS)
+    if rnacond:
+        val_index = selection_window_indices(len(val_all), args.eval_windows)
+        val_windows = val_all.iloc[val_index].reset_index(drop=True)
+    else:
+        val_windows = val_all.iloc[: args.eval_windows]
     expression = pd.read_parquet(args.expression)
     genes = expression[expression.condition.isin(conditions)].reset_index(drop=True)
     mod_scale_tis = MOD_SCALE if args.mod_scale_tis is None else args.mod_scale_tis
@@ -591,6 +604,7 @@ def main() -> None:
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
         "val_examples": len(val_windows) * (len(conditions) if rnacond else 1),
+        **({"val_window_indices": val_index} if rnacond else {}),
         "jax_devices": [str(d) for d in jax.devices()],
     }
     if init is not None:
