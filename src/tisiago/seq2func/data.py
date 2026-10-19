@@ -100,28 +100,63 @@ class TrackReader:
         self._handles.clear()
 
 
+def rna_total(tracks_dir: str | Path, condition: str) -> float:
+    """Genome-wide pooled RNA reads of ``condition``: the pooled bigWigs' ``sumData``, both strands.
+
+    The header sum covers every chromosome, so it does not depend on the windows or the split
+    (it equals the summed ``rna_rep{1,2}.json`` totals of :func:`tisiago.seq2func.tracks.pool`).
+    """
+    import pyBigWig
+
+    total = 0.0
+    prefix = track_prefix(tracks_dir, condition, "rna", "pooled")
+    for name in STRAND_FILES.values():
+        bw = pyBigWig.open(f"{prefix}.{name}.bw")
+        if bw is None:
+            raise FileNotFoundError(f"{prefix}.{name}.bw")
+        try:
+            total += float(bw.header()["sumData"])
+        finally:
+            bw.close()
+    return total
+
+
+def rna_cpm_scale(tracks_dir: str | Path, condition: str) -> float:
+    """``1e6 / rna_total``: multiplies ``condition``'s raw RNA counts into counts per million."""
+    total = rna_total(tracks_dir, condition)
+    if not total > 0:
+        raise ValueError(f"{condition}: no pooled RNA reads in {tracks_dir}")
+    return 1e6 / total
+
+
+def rna_cpm_scales(tracks_dir: str | Path, conditions: Sequence[str]) -> dict[str, float]:
+    """:func:`rna_cpm_scale` of each condition."""
+    return {c: rna_cpm_scale(tracks_dir, c) for c in conditions}
+
+
 class RnaCondReaders:
-    """Per-condition readers of ``rnacond`` examples: TIS/CHX targets and the RNA input."""
+    """Per-condition readers of ``rnacond`` examples: TIS/CHX targets, RNA input, CPM scale."""
 
     def __init__(self, tracks_dir: str | Path):
         """Readers are created on first use of a condition."""
         self.tracks_dir = tracks_dir
-        self._readers: dict[str, tuple[TrackReader, TrackReader]] = {}
+        self._readers: dict[str, tuple[TrackReader, TrackReader, float]] = {}
 
-    def get(self, condition: str) -> tuple[TrackReader, TrackReader]:
-        """``(targets reader, RNA reader)`` of ``condition``."""
+    def get(self, condition: str) -> tuple[TrackReader, TrackReader, float]:
+        """``(targets reader, RNA reader, RNA CPM scale)`` of ``condition``."""
         if condition not in self._readers:
             self._readers[condition] = (
                 TrackReader(self.tracks_dir, [condition], libraries=RNACOND_LIBRARIES),
                 TrackReader(self.tracks_dir, [condition], libraries=("rna",)),
+                rna_cpm_scale(self.tracks_dir, condition),
             )
         return self._readers[condition]
 
     def close(self) -> None:
         """Close every reader."""
-        for readers in self._readers.values():
-            for reader in readers:
-                reader.close()
+        for targets, rna, _ in self._readers.values():
+            targets.close()
+            rna.close()
         self._readers.clear()
 
 
@@ -191,8 +226,9 @@ def make_rnacond_example(
 ) -> dict[str, np.ndarray]:
     """One (window, condition) pair: ``sequences (S, 6)``, ``targets (S, 4)``, ``mask (S, 4)``.
 
-    ``sequences`` is the one-hot, then ``condition``'s raw pooled RNA 5'-end counts on the plus
-    and minus strand (read like the ``rna`` target channels: no minus-strand shift). ``targets``
+    ``sequences`` is the one-hot, then ``condition``'s pooled RNA 5'-end counts on the plus and
+    minus strand (read like the ``rna`` target channels: no minus-strand shift) in counts per
+    million of its genome-wide pooled RNA total (:func:`rna_cpm_scale`). ``targets``
     are its pooled TIS+, TIS-, CHX+, CHX- (:func:`tisiago.seq2func.targets.rnacond_layout`,
     canonical P-sites) and ``mask`` their expression mask. Pass ``readers`` to reuse handles.
     """
@@ -200,9 +236,9 @@ def make_rnacond_example(
     own = readers is None
     readers = RnaCondReaders(tracks_dir) if own else readers
     try:
-        target_reader, rna_reader = readers.get(condition)
+        target_reader, rna_reader, scale = readers.get(condition)
         targets = target_reader.read(chrom, start, end)
-        rna = rna_reader.read(chrom, start, end)
+        rna = rna_reader.read(chrom, start, end) * np.float32(scale)
     finally:
         if own:
             readers.close()

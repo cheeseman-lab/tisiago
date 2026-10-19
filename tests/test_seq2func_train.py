@@ -617,3 +617,29 @@ def test_cli_accepts_rnacond_arm():
     args = train.build_parser().parse_args(["--arm", "rnacond:U2OS", "--head", "rnacond"])
     assert (args.arm, args.head) == ("rnacond:U2OS", "rnacond")
     assert train.default_out("rnacond:U2OS", True) == Path("data/p6/runs/rnacond_u2os")
+
+
+def test_rnacond_eval_windows_default_per_condition():
+    assert train.RNACOND_EVAL_WINDOWS == 20
+    assert train.build_parser().parse_args(["--arm", "shared"]).eval_windows is None
+    assert train.eval_windows_of(None, rnacond=False) == 100
+    assert train.eval_windows_of(None, rnacond=True) == 20
+    assert train.eval_windows_of(7, rnacond=True) == 7
+    assert train.eval_windows_of(7, rnacond=False) == 7
+
+
+def test_rnacond_data_fields_record_cpm_scales(tmp_path):
+    from collections import Counter
+
+    from tisiago.seq2func.tracks import track_prefix, write_bigwigs
+
+    for k, condition in enumerate(CONDITIONS):
+        counts = {("chr1", "+"): Counter({1: k + 1}), ("chr1", "-"): Counter({2: 1})}
+        write_bigwigs(counts, [("chr1", 10)], track_prefix(tmp_path, condition, "rna", "pooled"))
+    fields = train.rnacond_data_fields("rnacond:RPE1", tmp_path)
+    assert fields["rna_normalisation"].startswith("cpm")
+    scales = fields["rna_cpm_scales"]
+    assert list(scales) == list(CONDITIONS)  # training and held-out conditions
+    assert scales["HeLa"] == pytest.approx(1e6 / 2) and scales["RPE1_Sen"] == pytest.approx(1e6 / 7)
+    assert fields["rna_totals"]["K562"] == pytest.approx(3.0)
+    assert json.loads(json.dumps(fields)) == fields

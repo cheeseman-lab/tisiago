@@ -261,6 +261,7 @@ def test_rnacond_trial_is_train_then_evaluate_on_every_condition(fake, tmp_path)
     assert len(calls) == 2  # no periodicity / trial_score: they take per-condition arms only
     train, evaluate = calls
     assert "run_p6_train.sh" in train and "--arm rnacond:HeLa --head rnacond" in train
+    assert "--eval-windows" not in train  # train.py's per-condition default applies
     assert "run_p6_evaluate.sh" in evaluate and "--arm rnacond:HeLa" in evaluate
     assert "--condition" not in evaluate  # evaluate defaults to all six conditions
     assert dependency(evaluate) == "afterok:901,singleton"

@@ -50,7 +50,7 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 
-from tisiago.seq2func.data import iterate
+from tisiago.seq2func.data import iterate, rna_cpm_scale
 from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
 from tisiago.seq2func.targets import STRAND_FILES, channel_layout, rnacond_layout
 from tisiago.seq2func.tracks import track_prefix
@@ -409,6 +409,7 @@ def predict_condition(
         "mask_unexpressed": mask_unexpressed,
         "match_depth": match_depth,
         "rna_conditioned": rna_conditioned,
+        "rna_cpm_scale": rna_cpm_scale(tracks_dir, condition) if rna_conditioned else None,
         "depth_factors": factors if match_depth else None,
         "unscaled_expected_totals": unscaled,
         "stitching": "nearest_centre",
@@ -550,6 +551,13 @@ def main() -> None:
     }
     if rnacond:
         meta["heldout"] = condition not in trained
+        if args.checkpoint:
+            from tisiago.seq2func.evaluate import check_rna_scales
+
+            try:
+                check_rna_scales(args.checkpoint, tracks_dir, [condition])
+            except ValueError as exc:
+                ap.error(str(exc))
     kwargs = {}
     if model:
         from tisiago.seq2func.evaluate import head_kind_of, load_predict_fn, load_transcripts

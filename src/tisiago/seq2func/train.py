@@ -18,8 +18,9 @@ from a finished run's parameters (``init_from`` in ``run.json``).
 
 ``--arm rnacond:<group>`` (with ``--head rnacond``) trains one model on every condition outside
 the held-out cell-line group (``samples.CELL_LINE_GROUPS``): examples are (window, condition)
-pairs, the condition's pooled RNA is an input and its TIS/CHX tracks the 4 targets. Model
-selection uses the val windows of the training conditions only.
+pairs, the condition's pooled RNA (in counts per million of its genome-wide pooled RNA reads) is
+an input and its TIS/CHX tracks the 4 targets. Model selection uses the first ``--eval-windows``
+(default 20) val windows of each training condition only.
 """
 
 from __future__ import annotations
@@ -58,6 +59,8 @@ RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
 RNACOND = "rnacond"
+EVAL_WINDOWS = 100
+RNACOND_EVAL_WINDOWS = 20
 
 
 def is_rnacond_arm(arm: str) -> bool:
@@ -165,6 +168,31 @@ def arm_fields(
             "features": list(RNA_FEATURE_NAMES),
             "box_widths": list(RNA_WIDTHS),
         },
+    }
+
+
+def eval_windows_of(value: int | None, rnacond: bool) -> int:
+    """``--eval-windows``: per condition for rnacond arms (default 20), else 100 windows."""
+    if value is not None:
+        return value
+    return RNACOND_EVAL_WINDOWS if rnacond else EVAL_WINDOWS
+
+
+def rnacond_data_fields(arm: str, tracks_dir: str | Path) -> dict:
+    """run.json RNA normalisation of an rnacond arm: genome-wide totals and CPM scales.
+
+    Recorded for the training and the held-out conditions (in :data:`CONDITIONS` order).
+    """
+    from tisiago.seq2func.data import rna_total
+
+    _, group, conditions = parse_rnacond_arm(arm)
+    every = [c for c in CONDITIONS if c in conditions or c in CELL_LINE_GROUPS[group]]
+    totals = {c: rna_total(tracks_dir, c) for c in every}
+    return {
+        "rna_normalisation": "cpm: pooled RNA x 1e6 / genome-wide pooled RNA reads "
+        "(pooled rna bigWig header sumData, both strands)",
+        "rna_totals": totals,
+        "rna_cpm_scales": {c: 1e6 / t for c, t in totals.items()},
     }
 
 
@@ -395,7 +423,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--eval-every", type=int, default=1_000)
-    ap.add_argument("--eval-windows", type=int, default=100)
+    ap.add_argument(
+        "--eval-windows",
+        type=int,
+        default=None,
+        help=f"val windows for selection (default {EVAL_WINDOWS}; rnacond arms: per training "
+        f"condition, default {RNACOND_EVAL_WINDOWS})",
+    )
     ap.add_argument("--out", type=Path, default=None, help="default data/p6/runs/<arm>[_frozen]")
     ap.add_argument("--windows-dir", type=Path, default=Path("data/p6/windows"))
     ap.add_argument(
@@ -489,6 +523,7 @@ def main() -> None:
         ap.error(str(exc))
     if rnacond != (args.head in RNA_KINDS):
         ap.error("--arm rnacond:<group> and --head rnacond go together")
+    args.eval_windows = eval_windows_of(args.eval_windows, rnacond)
     if args.head in TRANSCRIPT_KINDS and not args.gtf:
         ap.error(f"--head {args.head} needs --gtf (or set TISIAGO_GTF)")
     if args.mod_learning_rate is not None and args.head not in MOD_KINDS:
@@ -552,8 +587,10 @@ def main() -> None:
         "git_commit": git_commit(),
         "mod_learning_rate": args.mod_learning_rate,
         **fields,
+        **(rnacond_data_fields(args.arm, args.tracks_dir) if rnacond else {}),
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
+        "val_examples": len(val_windows) * (len(conditions) if rnacond else 1),
         "jax_devices": [str(d) for d in jax.devices()],
     }
     if init is not None:

@@ -18,7 +18,8 @@
 #
 # Output: data/p6/runs/ar_<name>/ (train records, eval/, periodicity/, trial_score.json) and one
 # row appended to autoresearch/p6/results.tsv. Train args default to --arm condition:K562
-# --eval-every 1000 --eval-windows 100 (later args win); --windows-dir, --expression and --out
+# --eval-every 1000 (later args win; --eval-windows: train.py's default, 100, or 20 per
+# condition for rnacond arms); --windows-dir, --expression and --out
 # are always set here. The val ceiling (data/p6/eval/ceiling_val.tsv, uniform_val.tsv) must
 # exist; it is linked into the run's eval/ so evaluate never recomputes it. train.py refuses an
 # --init-from run that has not finished, so chain on the source's train job with --after.
@@ -103,7 +104,7 @@ else
     for record in log.jsonl run.json best last; do
         [[ ! -e "$RUN/$record" ]] || die "$RUN already holds $record; pick another name"
     done
-    TRAIN_ARGS=(--arm condition:K562 --eval-every 1000 --eval-windows 100 "$@"
+    TRAIN_ARGS=(--arm condition:K562 --eval-every 1000 "$@"
         --windows-dir "$WINDOWS_DIR" --expression "$EXPRESSION" --out "$RUN")
     ARM="condition:K562"
     for ((i = 0; i < ${#TRAIN_ARGS[@]} - 1; i++)); do

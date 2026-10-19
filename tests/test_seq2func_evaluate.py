@@ -641,15 +641,16 @@ def rna_world(world):
 
 
 def _rna_oracle(world, condition, seen):
-    from tisiago.seq2func.data import TrackReader
+    from tisiago.seq2func.data import TrackReader, rna_cpm_scale
 
     reader = TrackReader(world["tracks_dir"], [condition], libraries=("rna",))
+    scale = np.float32(rna_cpm_scale(world["tracks_dir"], condition))
 
     def predict(batch):
         seq = batch["sequences"][0]
         assert seq.shape[1] == 6 and batch["targets"].shape[-1] == 4
         start = int(WINDOWS.start.iloc[len(seen)])
-        np.testing.assert_array_equal(seq[:, 4:], reader.read("chr7", start, start + 100))
+        np.testing.assert_array_equal(seq[:, 4:], reader.read("chr7", start, start + 100) * scale)
         seen.append(start)
         return batch["targets"]
 
@@ -691,7 +692,7 @@ def test_evaluate_checkpoint_rnacond_on_held_out_condition(rna_world):
         cds_genes=rna_world["cds_genes"],
         predict_fn=lambda batch: batch["targets"],
     )
-    assert list(table.columns) == list(old.columns)
+    assert list(table.columns) == [*old.columns, "rna_cpm_scale", "rna_total"]
     # an in-distribution condition of the same fold uses its own RNA and targets
     seen = []
     hela = evaluate_checkpoint(
@@ -827,7 +828,9 @@ def test_cli_rnacond_writes_one_table_per_condition(cli_world, monkeypatch, caps
         assert set(table.condition) == {condition} and len(table) == 4
         assert set(table.heldout) == {heldout} and set(table.arm) == {"rnacond:RPE1"}
         assert set(table.library) == {"tis", "chx"} and np.allclose(table.profile_kl, 0.0)
-        assert set(ceiling.columns) >= set(table.columns) - {"arm", "checkpoint", "heldout"}
+        extra = {"arm", "checkpoint", "heldout", "rna_cpm_scale", "rna_total"}
+        assert set(ceiling.columns) >= set(table.columns) - extra
+        assert table.rna_cpm_scale.notna().all()
     # refuses to overwrite, and an unknown condition or a --condition on an old arm
     for extra in (["--condition", "HeLa"], ["--condition", "Nope"]):
         with pytest.raises(SystemExit):
@@ -836,3 +839,29 @@ def test_cli_rnacond_writes_one_table_per_condition(cli_world, monkeypatch, caps
     with pytest.raises(SystemExit):
         cli_world["run"](*old, *fakes, *tracks, "--condition", "HeLa")
     assert "--condition" in capsys.readouterr().err
+
+
+def test_rnacond_table_records_cpm_scale_and_checks_run_json(rna_world, tmp_path):
+    from tisiago.seq2func.data import rna_cpm_scale, rna_total
+
+    table = evaluate_checkpoint(
+        None,
+        "rnacond:K562",
+        WINDOWS,
+        condition="K562",
+        fasta=rna_world["fasta"],
+        tracks_dir=rna_world["tracks_dir"],
+        genes=rna_world["genes"],
+        predict_fn=lambda batch: batch["targets"],
+    )
+    scale = rna_cpm_scale(rna_world["tracks_dir"], "K562")
+    assert np.allclose(table.rna_cpm_scale, scale)
+    assert set(table.rna_total) == {rna_total(rna_world["tracks_dir"], "K562")}
+    best = tmp_path / "run" / "best"
+    best.mkdir(parents=True)
+    evaluate.check_rna_scales(best, rna_world["tracks_dir"], ["K562"])  # no run.json: fine
+    (best.parent / "run.json").write_text(json.dumps({"rna_cpm_scales": {"K562": scale}}))
+    evaluate.check_rna_scales(best, rna_world["tracks_dir"], ["K562", "HeLa"])
+    (best.parent / "run.json").write_text(json.dumps({"rna_cpm_scales": {"K562": 2 * scale}}))
+    with pytest.raises(ValueError, match="rna_cpm_scales"):
+        evaluate.check_rna_scales(best, rna_world["tracks_dir"], ["K562"])

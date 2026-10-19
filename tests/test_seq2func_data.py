@@ -201,6 +201,19 @@ def test_iterate_multi_worker_loop_and_error(world, tmp_path):
 # --- rnacond: (window, condition) pairs with the condition's RNA as extra input channels ---
 
 RNA_VALUES = {"HeLa": 5.0, "K562": 7.0}
+# genome-wide pooled RNA totals: value (+) and value + 1 (-) reads
+CPM = {c: 1e6 / (2 * v + 1) for c, v in RNA_VALUES.items()}
+
+
+def _raw(rna, condition):
+    """RNA input (CPM) back to read counts."""
+    return np.rint(np.asarray(rna, np.float64) / CPM[condition])
+
+
+def _which(value):
+    """Condition and raw count of a plus-strand RNA CPM value."""
+    condition = min(CPM, key=lambda c: abs(RNA_VALUES[c] * CPM[c] - value))
+    return RNA_VALUES[condition], condition
 
 
 @pytest.fixture
@@ -248,8 +261,9 @@ def test_make_rnacond_example_channels(rna_world):
     ex = _rna_example(rna_world, "K562")
     assert ex["sequences"].shape == (32, 6) and ex["sequences"].dtype == np.float32
     np.testing.assert_array_equal(ex["sequences"][:, :4], base["sequences"])
-    assert ex["sequences"][20, 4] == 7.0 and ex["sequences"][:, 4].sum() == 7.0
-    assert ex["sequences"][25, 5] == 8.0 and ex["sequences"][:, 5].sum() == 8.0
+    rna = _raw(ex["sequences"][:, 4:], "K562")
+    assert rna[20, 0] == 7.0 and rna[:, 0].sum() == 7.0
+    assert rna[25, 1] == 8.0 and rna[:, 1].sum() == 8.0
     # targets: TIS+, TIS-, CHX+, CHX- of K562 only, canonical minus P-sites
     assert ex["targets"].shape == (32, 4) and ex["mask"].shape == (32, 4)
     np.testing.assert_array_equal(ex["targets"], base["targets"][:, :4])
@@ -263,7 +277,7 @@ def test_make_rnacond_example_channels(rna_world):
     # the K562 + gene is unexpressed -> its + channels are missing data; HeLa's are not
     assert not ex["mask"][:, [0, 2]].any() and ex["mask"][:, [1, 3]].all()
     assert _rna_example(rna_world, "HeLa")["mask"].all()
-    assert _rna_example(rna_world, "HeLa")["sequences"][20, 4] == 5.0
+    assert _raw(_rna_example(rna_world, "HeLa")["sequences"][20, 4], "HeLa") == 5.0
 
 
 def test_rnacond_augment_moves_rna_with_targets(rna_world):
@@ -277,14 +291,15 @@ def test_rnacond_augment_moves_rna_with_targets(rna_world):
     for key, value in zip(("sequences", "targets", "mask"), shift(*rc, 2), strict=True):
         np.testing.assert_array_equal(out[key], value)
     # RNA plus 5' end and the TIS+ P-site sat together at 20: both now on minus, at 31 - 20 + 2
-    assert out["sequences"][13, 5] == 5.0 and out["targets"][13, 1] == 3
-    assert out["sequences"][:, 4].sum() == 6.0 and out["sequences"][31 - 25 + 2, 4] == 6.0
+    rna = _raw(out["sequences"][:, 4:], "HeLa")
+    assert rna[13, 1] == 5.0 and out["targets"][13, 1] == 3
+    assert rna[:, 0].sum() == 6.0 and rna[31 - 25 + 2, 0] == 6.0
     assert out["targets"][:, [0, 2]].sum() == ex["targets"][:, [1, 3]].sum()
     # the one-hot is still reverse-complemented
     np.testing.assert_array_equal(out["sequences"][2:, :4], ex["sequences"][::-1, 3::-1][:-2])
     # shift only: RNA and targets move together
     out = augment(ex, FixedRng(0.9, 3), pairs)
-    assert out["sequences"][23, 4] == 5.0 and out["targets"][23, 0] == 3
+    assert _raw(out["sequences"][23, 4], "HeLa") == 5.0 and out["targets"][23, 0] == 3
     assert not out["mask"][:3].any() and not out["sequences"][:3].any()
 
 
@@ -306,7 +321,10 @@ def test_iterate_rnacond_pairs_in_order(rna_world):
     assert set(batches[0]) == {"sequences", "targets", "mask"}
     assert all(b["sequences"].shape == (1, 32, 6) for b in batches)
     assert all(b["targets"].shape == (1, 32, 4) for b in batches)
-    seen = [(b["sequences"][0, :, 4].max(), int(b["sequences"][0, :, 4].argmax())) for b in batches]
+    seen = [
+        (_which(b["sequences"][0, :, 4].max())[0], int(b["sequences"][0, :, 4].argmax()))
+        for b in batches
+    ]
     # condition-major, windows in order: RNA plus read at 20 -> 20, 12, 4 in windows 0, 8, 16
     assert seen == [(5.0, 20), (5.0, 12), (5.0, 4), (7.0, 20), (7.0, 12), (7.0, 4)]
     assert batches[3]["mask"][0, :, 0].sum() == 0  # K562 + gene unexpressed
@@ -327,7 +345,7 @@ def test_iterate_rnacond_loop_shuffles_every_pair_once_per_epoch(rna_world):
     pairs = []
     for _ in range(12):
         rna = next(it)["sequences"][0, :, 4]
-        pairs.append((float(rna.max()), int(rna.argmax())))
+        pairs.append((_which(rna.max())[0], int(rna.argmax())))
     it.close()
     every = {(v, p) for v in RNA_VALUES.values() for p in (20, 12, 4)}
     assert set(pairs[:6]) == every and set(pairs[6:]) == every
@@ -371,4 +389,57 @@ def test_iterate_rnacond_held_out_condition_never_read(rna_world, tmp_path):
             rna_conditioned=True,
         )
     )
-    assert len(batches) == 3 and all(b["sequences"][0, :, 4].max() == 5.0 for b in batches)
+    assert len(batches) == 3
+    assert all(_raw(b["sequences"][0, :, 4].max(), "HeLa") == 5.0 for b in batches)
+
+
+def test_rna_cpm_scale_is_genome_wide_pooled_total(rna_world, tmp_path):
+    from tisiago.seq2func.data import rna_cpm_scale, rna_cpm_scales
+
+    # HeLa pooled RNA: 5 (+) and 6 (-) reads on chr1
+    assert rna_cpm_scale(rna_world["tracks_dir"], "HeLa") == pytest.approx(1e6 / 11)
+    assert rna_cpm_scales(rna_world["tracks_dir"], ["HeLa", "K562"]) == pytest.approx(
+        {"HeLa": 1e6 / 11, "K562": 1e6 / 15}
+    )
+    empty = tmp_path / "empty"
+    write_bigwigs({}, SIZES, track_prefix(empty, "HeLa", "rna", "pooled"))
+    with pytest.raises(ValueError, match="RNA"):
+        rna_cpm_scale(empty, "HeLa")
+
+
+def test_rnacond_rna_input_is_cpm_and_depth_invariant(tmp_path):
+    """Two conditions that differ only by RNA depth give identical head inputs."""
+    from tisiago.seq2func.data import make_rnacond_example
+
+    fasta = tmp_path / "g.fa"
+    fasta.write_text(f">chr1\n{SEQ}\n>chr2\n{SEQ}\n")
+    Fasta(str(fasta)).close()
+    sizes = [("chr1", 64), ("chr2", 64)]
+    tracks = tmp_path / "tracks"
+    rna = {
+        ("chr1", "+"): Counter({20: 2, 40: 1}),
+        ("chr1", "-"): Counter({25: 3}),
+        ("chr2", "+"): Counter({5: 4}),  # outside every window: still in the genome-wide total
+    }
+    for condition, depth in (("HeLa", 1), ("K562", 7)):
+        scaled = {k: Counter({p: v * depth for p, v in c.items()}) for k, c in rna.items()}
+        write_bigwigs(scaled, sizes, track_prefix(tracks, condition, "rna", "pooled"))
+        for library in ("tis", "chx"):
+            counts = {("chr1", "+"): Counter({20: depth}), ("chr1", "-"): Counter({30: 1})}
+            write_bigwigs(counts, sizes, track_prefix(tracks, condition, library, "pooled"))
+    genes = pd.DataFrame(
+        {
+            "condition": ["HeLa", "K562"],
+            "chrom": "chr1",
+            "start": 0,
+            "end": 64,
+            "strand": "+",
+            "expressed": True,
+        }
+    )
+    a = make_rnacond_example(str(fasta), tracks, "HeLa", genes, "chr1", 0, 32)
+    b = make_rnacond_example(str(fasta), tracks, "K562", genes, "chr1", 0, 32)
+    np.testing.assert_allclose(b["sequences"], a["sequences"], rtol=1e-6)
+    assert a["sequences"][20, 4] == pytest.approx(2 * 1e6 / 10)  # CPM of a 10-read library
+    assert a["sequences"][25, 5] == pytest.approx(3 * 1e6 / 10)
+    assert b["targets"][20, 0] == 7 * a["targets"][20, 0]  # targets stay raw counts
