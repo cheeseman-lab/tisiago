@@ -1,0 +1,12 @@
+name: r07_conv9_tisonly
+seed: 0
+inputs: [embedding, rna, rna_onesided]
+model:
+  trunk: {kind: conv, hidden: 256, layers: 1, width: 9}
+  chx_contrast: true
+  tis: {kind: factorised, block: 1024, two_grids: true}
+  chx: {kind: softplus}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: local, block: 1024, libraries: [tis], weight: 100}
+  - {kind: multinomial, scope: global, weight: 5.0}
