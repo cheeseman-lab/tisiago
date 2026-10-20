@@ -311,6 +311,7 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
         {"inputs": ["embedding_white", "rna_sense", "rna_onesided", "position"]},
         {"model": {"strand_heads": False, "trunk": {"layers": 2, "hidden": 16}}},
         {"model": {"split_trunk": True, "chx_contrast": True}},
+        {"model": {"chx_trunk": {"kind": "conv", "width": 7, "hidden": 8}}},
     ],
 )
 def test_every_component_gives_finite_gradients_for_every_loss(cache, override):
@@ -367,6 +368,16 @@ def test_split_trunk_separates_tis_and_chx_parameters(cache):
     grads = jax.grad(tis_only)(params)
     chx_trunk = [v for k, v in grads.items() if k.startswith("chx_trunk/")]
     assert all(np.allclose(np.asarray(g), 0) for m in chx_trunk for g in m.values())
+
+
+def test_chx_trunk_config_and_validation(cache):
+    config = _config(model={"chx_trunk": {"kind": "conv", "width": 7, "hidden": 8, "layers": 2}})
+    model = fastloop.make_model(config, fastloop.context_of(cache))
+    batch = fastloop._device_batch(fastloop.Sampler(cache, config).batch())
+    params = model.init(jax.random.PRNGKey(0), batch)
+    assert params["chx_trunk/conv1"]["w"].shape == (7, 8, 8)
+    with pytest.raises(ValueError, match="chx_trunk"):
+        fastloop.resolve_config({"model": {"chx_trunk": {"kind": "nope"}}})
 
 
 def test_bucket_length():
