@@ -4,13 +4,20 @@
 (pending)
 
 ## Leaderboard
-| name | primary | K562 TIS codon | nt | guards | seeds |
-|---|---|---|---|---|---|
-| r01_foc_lall20 | 64.9 | 66.0 | 63.9 | pass (CHX bin30 74.9 codon 52.1) | 1 |
-| r01_plain_lw20 | 53.5 | 55.8 | 51.2 | pass | 1 |
-| ref_rnacond_ps | 42.5 (2 seeds) | 45.7 | 39.3 | ref | 2 |
-| (fail) r01_foc_lw50 | 67.8 | 69.0 | 66.5 | FAIL CHX | 1 |
-| (fail) foc_lw5 | 65.9+-1.0 | 66.8 | 64.4 | FAIL CHX | 3 |
+(guard-passing only; mean of seeds; noise sd ~0.3-1.3)
+| name | primary | K562 TIS codon | nt | CHX bin30 / codon / nt | guards | seeds |
+|---|---|---|---|---|---|---|
+| r09_c9x2_30k | 75.2 | 76.5 | 73.8 | 79.5 / 60.8 / 54.1 | pass | 1 |
+| r08_conv9x2_h512 | 73.3 | 73.4 | 73.1 | 78.7 / 59.2 / 51.8 | pass | 1 |
+| r10_tisb2048 | 72.5 | 73.8 | 71.3 | 78.8 / 58.6 / 52.1 | pass | 1 |
+| r09_c9x2_nocontrast | 72.1 | 73.1 | 71.2 | 78.5 / 58.7 / 51.4 | pass | 1 |
+| conv9x2 (r06_conv9x2, r08 s1/s2) | 71.7+-1.0 | 72.5 | 70.9 | 78.5 / 59.3 / 51.9 | pass | 3 |
+| r10_chxfact | 71.5 | 72.3 | 70.7 | **81.5 / 64.2 / 55.5** | pass | 1 |
+| conv9 (r04_lall100_conv9, r06 s1/s2) | 70.6+-0.3 | 71.7 | 69.4 | 78.2 / 57.7 / 47.6 | pass | 3 |
+| lall100 (r02, r04 s1/s2) | 67.1+-0.7 | 68.5 | 65.6 | 77.6 / 56.4 / 45.1 | pass | 3 |
+| lall20 (r01, r02 s1/s2) | 66.2+-1.3 | 67.3 | 65.1 | 75.6 / 53.1 / 41.4 | pass | 3 |
+| ref_rnacond_ps | 42.5 | 45.7 | 39.3 | 73.4 / 49.9 / 38.3 | ref | 2 |
+| (fail) foc_lw20 = slow-leader equivalent | 66.8+-0.3 | 68.0 | 65.6 | 71.0 / 46.4 / 33.9 | FAIL CHX | 3 |
 
 ## Findings
 - Fam 1 (scale of competition): adding 32-256 nt local multinomials on top of the 1 kb block is neutral; 1 kb normalisation already captures the competition.
@@ -31,5 +38,8 @@
 - 2026-10-20 12:58 | R05 | fam 1 (multi-scale local competition: + blocks 128 / 32 / 256+64 on both, 64 on TIS) + optimisation (30k steps, lr 3e-3, batch 32) on lall100 base | configs/r05/* | 11170638, 11170639 (earlier ids cancelled unrun) | ms128 67.1, ms32 67.7, ms256_64 67.2, ms64tis 68.0 (base lall100 67.1+-0.7): no gain. steps30k 69.2, ms128_30k 70.0 (+2-3); lr3e-3 67.3; batch32 67.2; all pass | Multi-scale local competition adds nothing over the 1 kb block (the nt shape is limited by information, not by the loss scale). The head is under-trained at 10k steps: 30k gives +2-3. |
 - 2026-10-20 13:12 | R06 | fam 5 (receptive field): conv width 3/9/21/51, conv9 x2 layers, conv9 hidden 512, conv9 + CHX frame 50, conv9 seeds 1-2 (lall100 base) | configs/r06/* | 11170636, 11170637 (any of A100/L40S/A6000; earlier ids cancelled unrun) | conv9 3 seeds 70.6+-0.3 (70.5/70.4/70.9); conv3 68.0; conv21 70.4 (CHX frame .64 nt 50.1); conv51 70.1 (CHX frame .67 nt 51.6, TIS peak argmax .33); **conv9x2 72.9**; conv9 h512 69.7; conv9+frame50 69.5; all pass | conv9 beats lall100 by +3.5 (3-seed). Width >9 helps CHX (frame) but not TIS; 2 stacked conv9 +2.3 more. Frame loss still useless. -> R08 conv depth. |
 - 2026-10-20 15:09 | R07 | fam 5 (codon-aligned dilations 1/3/9/27 vs 1/2/4/8, conv15) + ablations on conv9 (no CHX contrast; local on TIS only) + seeds 1-2 of r01_foc_lw20 (fast-loop equivalent of the slow leader, for promotion) | configs/r07/* | 11170691, 11170692 | dilcodon 70.7, dil1248 71.0, conv15 69.5, conv9_nocontrast 70.6, conv9_tisonly 71.3 (FAIL chx_nt, CHX codon 47.6); foc_lw20 s1 66.6 (s0 66.7; FAIL CHX) | Codon-aligned dilations = ordinary ones = conv9 (no frame-specific gain). CHX contrast input is dispensable with a conv trunk. Local loss on CHX is needed for the CHX guards in every trunk. Slow-leader fast equivalent ~66.6. |
-- 2026-10-20 15:19 | R08 | fam 5 (conv depth): conv9x2 seeds 1-2, conv9x3, conv9x4, conv5x3, conv15x2, conv9x2 hidden 128 / 512 | configs/r08/* | 11170968, 11170969 | pending |
-- 2026-10-20 16:27 | R09 | fam 5 + fam 6 (separate wide CHX trunk for elongation/frame) + optimisation on conv9x2 base: 30k steps; chx_trunk conv51; chx_trunk conv21x2; no CHX contrast | configs/r09/* | 11171706 | pending |
+- 2026-10-20 15:19 | R08 | fam 5 (conv depth): conv9x2 seeds 1-2, conv9x3, conv9x4, conv5x3, conv15x2, conv9x2 hidden 128 / 512 | configs/r08/* | 11170968, 11170969 | conv9x2 3 seeds 71.7+-1.0 (72.9/71.4/70.9; CHX nt 51.9, frame .63); conv9x3 69.2; conv9x4 68.4; conv5x3 71.3; conv15x2 69.4; conv9x2 h128 71.6; h512 73.3; all pass | Two stacked conv9 (RF 17) is the depth optimum (+1.1 over conv9, inside noise); deeper plain conv stacks degrade. Hidden width irrelevant. TIS peak meta share stays 0.10 in every config. |
+- 2026-10-20 16:27 | R09 | fam 5 + fam 6 (separate wide CHX trunk for elongation/frame) + optimisation on conv9x2 base: 30k steps; chx_trunk conv51; chx_trunk conv21x2; no CHX contrast | configs/r09/* | 11171706 | c9x2_30k **75.2** (TIS codon 76.5 nt 73.8; CHX nt 54.1); chx_trunk conv51 71.9 (CHX frame .65); chx_trunk conv21x2 71.6; nocontrast 72.1 (base conv9x2 71.7+-1.0); all pass | Training length is the lever (+3.5 at 30k). A separate wide CHX trunk does not lift CHX frame beyond .65. CHX contrast dispensable again -> drop it. |
+- 2026-10-20 16:55 | R10 | fam 1 (factorised CHX output; TIS temperature 0.5; TIS block 2048) + fam 5 (crop 8 kb; uniform transcript sampling; whitened embedding; sense-only RNA; no one-sided RNA) on conv9x2 base | configs/r10/* | 11172205, 11172206 | pending |
+- 2026-10-20 17:00 | R11 | fam 5 seeds (conv9x2 h512 s1-2) + fam 6 on TIS (codon-phase KL on harringtonine, weight 20/100) | configs/r11/* | 11172247 | pending |
+- 2026-10-20 17:35 | R12 | optimisation + fam 1 (factorised CHX): conv9x2 + factorised CHX at 30k (3 seeds) and 60k; conv9x2 softplus-CHX 30k seeds 1-2 | configs/r12/* | 11172453, 11172454 | pending |
