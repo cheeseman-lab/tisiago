@@ -480,7 +480,7 @@ def test_run_config_end_to_end_writes_row_and_json(tmp_path, cache):
     assert saved["history"][-1]["step"] == 3
     assert {"model", "ckpt"} <= {r["source"] for r in saved["scorecard"]}
     assert record["reference_row"]["name"] == "smoke"
-    preload = _config(name="smoke", data={"preload": True})
+    preload = _config(name="smoke", data={"preload": False})
     again = fastloop.run_config(preload, cache, tmp_path / "r2.tsv", runs, log=lambda s: None)
     assert again["history"][-1]["loss"] == pytest.approx(record["history"][-1]["loss"], rel=1e-5)
 

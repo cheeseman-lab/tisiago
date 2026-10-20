@@ -404,11 +404,29 @@ class TxCache:
             self._arrays[(shard, key)] = np.load(path, mmap_mode="r")
         return self._arrays[(shard, key)]
 
-    def preload(self, split: str, keys: Sequence[str]) -> None:
-        """Read ``keys`` of every shard of ``split`` into memory (replacing the memory maps)."""
-        for shard in self.rows(split).shard.unique():
-            for key in keys:
-                self._arrays[(shard, key)] = np.load(shard_dir(self.path, shard) / f"{key}.npy")
+    def preload(self, split: str, keys: Sequence[str], threads: int = 8) -> None:
+        """Read ``keys`` of every shard of ``split`` into memory (replacing the memory maps).
+
+        Files are read concurrently by ``threads`` threads (network filesystems scale with
+        parallel sequential reads); arrays already in memory are kept.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        todo = [
+            (shard, key)
+            for shard in self.rows(split).shard.unique()
+            for key in keys
+            if isinstance(self._arrays.get((shard, key)), np.memmap)
+            or (shard, key) not in self._arrays
+        ]
+
+        def read(item):
+            shard, key = item
+            return item, np.load(shard_dir(self.path, shard) / f"{key}.npy")
+
+        with ThreadPoolExecutor(max(1, threads)) as pool:
+            for item, array in pool.map(read, todo):
+                self._arrays[item] = array
 
     def has(self, shard: str, key: str) -> bool:
         """Whether ``shards/<shard>/<key>.npy`` exists."""

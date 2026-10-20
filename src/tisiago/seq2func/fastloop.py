@@ -81,7 +81,7 @@ DEFAULTS: dict = {
         "batch": 16,
         "batch_condition": "single",
         "sample_weight": "length",
-        "preload": False,
+        "preload": True,
     },
     "inputs": ["embedding", "rna"],
     "model": {
@@ -96,7 +96,7 @@ DEFAULTS: dict = {
         {"kind": "multinomial", "scope": "global", "weight": 5.0},
     ],
     "train": {
-        "steps": 3000,
+        "steps": 10000,
         "lr": 1e-3,
         "weight_decay": 1e-4,
         "warmup": 100,
@@ -218,6 +218,7 @@ class Sampler:
             raise ValueError(f"crop_mode must be random or start, not {self.mode!r}")
         self.rng = np.random.default_rng(int(config["seed"]))
         self.rows = cache.rows("train").reset_index(drop=True)
+        self.records = list(self.rows.itertuples(index=False))
         self.conditions = train_conditions_of(config, cache.conditions)
         self.pools = {}
         for c in self.conditions:
@@ -245,7 +246,7 @@ class Sampler:
         rows, starts = [], []
         for c in conditions:
             idx, p = self.pools[c]
-            row = self.rows.iloc[int(idx[self.rng.choice(len(idx), p=p)])]
+            row = self.records[int(idx[self.rng.choice(len(idx), p=p)])]
             extra = int(row.length) - self.crop
             start = (
                 int(self.rng.integers(0, extra + 1)) if extra > 0 and self.mode == "random" else 0
