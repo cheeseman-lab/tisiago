@@ -400,6 +400,18 @@ class RnaCondFactAttentionTrackHead(RnaCondFactOneSidedTrackHead):
     TRUNK = "attention"
 
 
+class RnaCondFactChxDilatedTrackHead(RnaCondFactChxTrackHead):
+    """:class:`RnaCondFactChxTrackHead` with the dilated-conv trunk."""
+
+    TRUNK = "dilated"
+
+
+class RnaCondFactChxAttentionTrackHead(RnaCondFactChxTrackHead):
+    """:class:`RnaCondFactChxTrackHead` with the block-attention trunk."""
+
+    TRUNK = "attention"
+
+
 HEAD_KINDS = {
     "mlp": TrackHead,
     "conv": ConvTrackHead,
@@ -413,6 +425,8 @@ HEAD_KINDS = {
     "rnacond_foc": RnaCondFactChxTrackHead,
     "rnacond_fod": RnaCondFactDilatedTrackHead,
     "rnacond_foa": RnaCondFactAttentionTrackHead,
+    "rnacond_focd": RnaCondFactChxDilatedTrackHead,
+    "rnacond_foca": RnaCondFactChxAttentionTrackHead,
 }
 RNACOND_KINDS = frozenset(k for k in HEAD_KINDS if k == "rnacond" or k.startswith("rnacond_"))
 SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx"} | RNACOND_KINDS)

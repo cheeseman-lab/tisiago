@@ -25,7 +25,15 @@ HEAD = "p6_overfit"
 WINDOW = 131_072
 TIMING_SKIP = 2
 PROFILE_KL_MAX = 1.0
-RNACOND_FACT_KINDS = ("rnacond_f", "rnacond_fo", "rnacond_foc", "rnacond_fod", "rnacond_foa")
+RNACOND_FACT_KINDS = (
+    "rnacond_f",
+    "rnacond_fo",
+    "rnacond_foc",
+    "rnacond_fod",
+    "rnacond_foa",
+    "rnacond_focd",
+    "rnacond_foca",
+)
 HEAD_CHOICES = (
     "mlp",
     "conv",

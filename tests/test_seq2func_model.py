@@ -401,6 +401,8 @@ def test_seqconv_registered_and_choices_match():
         "rnacond_foc",
         "rnacond_fod",
         "rnacond_foa",
+        "rnacond_focd",
+        "rnacond_foca",
     }
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
@@ -1585,7 +1587,15 @@ def test_rnacond_checkpoint_round_trip(tmp_path):
 
 # --- factorised rnacond heads (TIS = per-block amount x within-block softmax) ---
 
-FACT_KINDS = ("rnacond_f", "rnacond_fo", "rnacond_foc", "rnacond_fod", "rnacond_foa")
+FACT_KINDS = (
+    "rnacond_f",
+    "rnacond_fo",
+    "rnacond_foc",
+    "rnacond_fod",
+    "rnacond_foa",
+    "rnacond_focd",
+    "rnacond_foca",
+)
 
 
 def test_local_softmax_preserves_totals_and_concentrates():
@@ -1632,7 +1642,7 @@ def test_fact_heads_registered_shapes_and_rna_use(kind):
     n_feat = NUM_RNA_FEATURES + (0 if kind == "rnacond_f" else NUM_ONESIDED_FEATURES)
     assert params["r/~predict/hidden"]["w"].shape == (8 + n_feat, 256)
     assert params["r/~predict/output"]["w"].shape == (256, 2)
-    assert ("r/~predict/tis_hidden" in params) == (kind == "rnacond_foc")
+    assert ("r/~predict/tis_hidden" in params) == kind.startswith("rnacond_foc")
     pred = np.asarray(fn.apply(params, emb, seq))
     assert pred.shape == (1, 40, 4) and np.isfinite(pred).all() and (pred >= 0).all()
     other = np.asarray(fn.apply(params, emb, seq.at[..., 4:].set(0.0)))
@@ -1661,15 +1671,23 @@ def test_fact_chx_contrast_stops_tis_gradient_into_chx_output():
     assert not np.allclose(np.asarray(a[..., :2]), np.asarray(b[..., :2]))
 
 
-@pytest.mark.parametrize("kind", ("rnacond_fod", "rnacond_foa"))
-def test_fact_deep_trunks_start_as_the_mlp_trunk(kind):
-    """Zero-initialised residual branches: at init the trunk equals the plain one-sided head."""
+@pytest.mark.parametrize(
+    ("kind", "shallow_kind"),
+    [
+        ("rnacond_fod", "rnacond_fo"),
+        ("rnacond_foa", "rnacond_fo"),
+        ("rnacond_focd", "rnacond_foc"),
+        ("rnacond_foca", "rnacond_foc"),
+    ],
+)
+def test_fact_deep_trunks_start_as_the_mlp_trunk(kind, shallow_kind):
+    """Zero-initialised residual branches: at init the trunk equals the shallow head's."""
     rng = np.random.default_rng(3)
     emb = jnp.asarray(rng.normal(size=(1, 48, 8)), jnp.float32)
     seq = _rna_sequences(rng, 1, 48)
     deep = _fact_forward(kind)
     params = deep.init(jax.random.PRNGKey(0), emb, seq)
-    plain = _fact_forward("rnacond_fo")
+    plain = _fact_forward(shallow_kind)
     shallow = {k: v for k, v in params.items() if k in plain.init(jax.random.PRNGKey(0), emb, seq)}
     np.testing.assert_allclose(
         np.asarray(deep.apply(params, emb, seq)),
