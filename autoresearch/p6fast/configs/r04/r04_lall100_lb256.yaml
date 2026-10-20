@@ -1,0 +1,12 @@
+name: r04_lall100_lb256
+seed: 0
+inputs: [embedding, rna, rna_onesided]
+model:
+  trunk: {kind: mlp, hidden: 256, layers: 1}
+  chx_contrast: true
+  tis: {kind: factorised, block: 1024, two_grids: true}
+  chx: {kind: softplus}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: global, weight: 5.0}
+  - {kind: multinomial, scope: local, block: 256, libraries: [tis, chx], weight: 100}
