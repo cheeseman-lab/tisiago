@@ -15,7 +15,7 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   ``"crop"``; ``temperature``); ``hazard`` scanning: ``P(start at i) = h_i prod_{j<i}(1 - h_j)``
   times the crop's summed amount. ``model.strand_heads`` gives each genomic strand its own
   output layer (the genomic head predicts both strands from one embedding); ``model.
-  chx_contrast`` feeds log ratios of the gradient-stopped CHX prediction to the TIS output.
+  split_trunk`` gives CHX its own trunk (TIS keeps the first); ``model.chx_contrast`` feeds log ratios of the gradient-stopped CHX prediction to the TIS output.
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``),
@@ -548,8 +548,12 @@ def make_model(config: Mapping, ctx: Mapping):
         x = jnp.concatenate([INPUTS[n](batch, ctx) for n in config["inputs"]], axis=-1)
         x = jnp.where(valid[..., None], x.astype(jnp.float32), 0.0)
         h = trunk(x, valid, model["trunk"])
+        h_chx = h
+        if model.get("split_trunk"):
+            with hk.name_scope("chx_trunk"):
+                h_chx = trunk(x, valid, model["trunk"])
         n_chx, chx_fn = OUTPUTS[model["chx"]["kind"]]
-        chx = chx_fn(head(h, batch["strand"], n_chx, "chx_out"), valid, model["chx"])
+        chx = chx_fn(head(h_chx, batch["strand"], n_chx, "chx_out"), valid, model["chx"])
         tis_in = h
         if model.get("chx_contrast"):
             ratios = chx_log_ratios(jax.lax.stop_gradient(chx))

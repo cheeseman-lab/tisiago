@@ -1,0 +1,12 @@
+name: r01_foc_lw5_s2
+seed: 2
+inputs: [embedding, rna, rna_onesided]
+model:
+  trunk: {kind: mlp, hidden: 256, layers: 1}
+  chx_contrast: true
+  tis: {kind: factorised, block: 1024, two_grids: true}
+  chx: {kind: softplus}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: global, weight: 5.0}
+  - {kind: multinomial, scope: local, block: 1024, libraries: [tis], weight: 5}

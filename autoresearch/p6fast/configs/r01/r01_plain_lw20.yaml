@@ -1,0 +1,11 @@
+name: r01_plain_lw20
+seed: 0
+inputs: [embedding, rna]
+model:
+  trunk: {kind: mlp, hidden: 256, layers: 1}
+  tis: {kind: softplus}
+  chx: {kind: softplus}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: global, weight: 5.0}
+  - {kind: multinomial, scope: local, block: 1024, libraries: [tis], weight: 20}

@@ -310,6 +310,7 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
         {"model": {"trunk": {"kind": "attention", "block": 32, "layers": 2, "dim": 8}}},
         {"inputs": ["embedding_white", "rna_sense", "rna_onesided", "position"]},
         {"model": {"strand_heads": False, "trunk": {"layers": 2, "hidden": 16}}},
+        {"model": {"split_trunk": True, "chx_contrast": True}},
     ],
 )
 def test_every_component_gives_finite_gradients_for_every_loss(cache, override):
@@ -350,6 +351,22 @@ def test_strand_heads_select_the_output_layer_by_strand(cache):
     flipped = {**batch, "strand": 1 - batch["strand"]}
     a, b = model.apply(params, batch)[0], model.apply(params, flipped)[0]
     assert not np.allclose(np.asarray(a), np.asarray(b))
+
+
+def test_split_trunk_separates_tis_and_chx_parameters(cache):
+    config = _config(model={"split_trunk": True})
+    model = fastloop.make_model(config, fastloop.context_of(cache))
+    batch = fastloop._device_batch(fastloop.Sampler(cache, config).batch())
+    params = model.init(jax.random.PRNGKey(0), batch)
+    assert any(k.startswith("chx_trunk/") for k in params)
+
+    def tis_only(params):
+        pred, _ = model.apply(params, batch)
+        return pred[..., 0].sum()
+
+    grads = jax.grad(tis_only)(params)
+    chx_trunk = [v for k, v in grads.items() if k.startswith("chx_trunk/")]
+    assert all(np.allclose(np.asarray(g), 0) for m in chx_trunk for g in m.values())
 
 
 def test_bucket_length():
