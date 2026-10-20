@@ -1,0 +1,11 @@
+# ref_rnacond with the Poisson term on per-transcript (crop) totals instead of the batch total:
+# the fast-loop reference that matches the full model's gene-level scores.
+name: ref_rnacond_ps
+inputs: [embedding, rna]
+model:
+  trunk: {kind: mlp, hidden: 256, layers: 1}
+  tis: {kind: softplus}
+  chx: {kind: softplus}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: global, weight: 5.0}
