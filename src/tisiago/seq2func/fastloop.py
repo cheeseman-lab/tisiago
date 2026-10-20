@@ -16,7 +16,8 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   times the crop's summed amount. ``model.strand_heads`` gives each genomic strand its own
   output layer (the genomic head predicts both strands from one embedding); ``model.
   split_trunk`` gives CHX its own trunk (TIS keeps the first; ``model.chx_trunk`` sets
-  its config); ``model.chx_contrast`` feeds log ratios of the gradient-stopped CHX prediction to the TIS output.
+  its config); ``model.chx_contrast`` feeds log ratios of the gradient-stopped CHX
+  prediction to the TIS output.
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``),
