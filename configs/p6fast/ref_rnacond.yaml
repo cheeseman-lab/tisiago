@@ -1,0 +1,11 @@
+# Plain rnacond head on the cache: MLP(256) on embedding + RNA features, softplus TIS/CHX,
+# Poisson on totals + 5 x multinomial, both over the whole (single-condition) batch.
+name: ref_rnacond
+inputs: [embedding, rna]
+model:
+  trunk: {kind: mlp, hidden: 256, layers: 1}
+  tis: {kind: softplus}
+  chx: {kind: softplus}
+losses:
+  - {kind: poisson, scope: global, weight: 1.0}
+  - {kind: multinomial, scope: global, weight: 5.0}
