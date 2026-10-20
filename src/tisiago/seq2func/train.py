@@ -123,15 +123,15 @@ def channel_config(head_kind: str, layout, mod_libraries, mod_scale_tis: float) 
     return out
 
 
-def local_channels_of(arm: str) -> tuple[int, ...]:
-    """TIS channel indices of ``arm``'s output layout (the local-multinomial channels)."""
-    from tisiago.seq2func.targets import channel_layout, library_channels, rnacond_layout
+def local_channels_of(arm: str, libraries=("tis",)) -> tuple[int, ...]:
+    """Channel indices of ``libraries`` in ``arm``'s output layout (local-multinomial channels)."""
+    from tisiago.seq2func.targets import channel_layout, modulated_channels, rnacond_layout
 
     if is_rnacond_arm(arm):
         layout = rnacond_layout(parse_rnacond_arm(arm)[2][0])
     else:
         layout = channel_layout(parse_arm(arm)[1])
-    return library_channels(layout, "tis")
+    return modulated_channels(layout, libraries)
 
 
 def arm_fields(
@@ -508,6 +508,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--local-block", type=int, default=1024, help="positions per local-multinomial block"
     )
     ap.add_argument(
+        "--local-libraries",
+        default="tis",
+        help="comma list of libraries the local multinomial applies to (default: tis)",
+    )
+    ap.add_argument(
         "--heads-only",
         dest="train_backbone",
         action="store_false",
@@ -573,6 +578,11 @@ def main() -> None:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     if args.local_weight < 0 or args.local_block < 1:
         ap.error("--local-weight must be >= 0 and --local-block >= 1")
+    try:
+        local_libraries = tuple(name.strip() for name in args.local_libraries.split(","))
+        local_channels_of(args.arm, local_libraries)
+    except ValueError as exc:
+        ap.error(f"--local-libraries: {exc}")
     if not 0 <= args.freeze_backbone_steps < args.steps:
         ap.error("--freeze-backbone-steps must be in [0, --steps)")
     if args.freeze_backbone_steps and not args.train_backbone:
@@ -617,7 +627,7 @@ def main() -> None:
     num_tracks = fields["num_tracks"]
     channels = {k: fields[k] for k in ("mod_channels", "mod_scales") if k in fields}
     frame_channels = tuple(fields["frame_channels"])
-    local_channels = local_channels_of(args.arm) if args.local_weight else ()
+    local_channels = local_channels_of(args.arm, local_libraries) if args.local_weight else ()
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),

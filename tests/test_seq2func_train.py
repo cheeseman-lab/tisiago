@@ -669,3 +669,8 @@ def test_local_loss_flags_and_channels():
     assert args.local_weight == 5.0
     assert local_channels_of("rnacond:K562") == (0, 1)
     assert local_channels_of("condition:K562") == (0, 1)
+    assert local_channels_of("rnacond:K562", ("tis", "chx")) == (0, 1, 2, 3)
+    assert local_channels_of("rnacond:K562", ("chx",)) == (2, 3)
+    assert args.local_libraries == "tis"
+    with pytest.raises(ValueError):
+        local_channels_of("rnacond:K562", ("rna",))
