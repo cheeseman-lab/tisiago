@@ -54,7 +54,7 @@ from tisiago.seq2func.samples import CELL_LINE_GROUPS, CONDITIONS, LIBRARIES
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
 SELECTION_KEY = "val_profile_kl"
-LOSS_COMPONENTS = ("poisson", "multinomial", "frame")
+LOSS_COMPONENTS = ("poisson", "multinomial", "frame", "local")
 RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
@@ -121,6 +121,17 @@ def channel_config(head_kind: str, layout, mod_libraries, mod_scale_tis: float) 
             "mod_scales": list(scales),
         }
     return out
+
+
+def local_channels_of(arm: str) -> tuple[int, ...]:
+    """TIS channel indices of ``arm``'s output layout (the local-multinomial channels)."""
+    from tisiago.seq2func.targets import channel_layout, library_channels, rnacond_layout
+
+    if is_rnacond_arm(arm):
+        layout = rnacond_layout(parse_rnacond_arm(arm)[2][0])
+    else:
+        layout = channel_layout(parse_arm(arm)[1])
+    return library_channels(layout, "tis")
 
 
 def arm_fields(
@@ -488,6 +499,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--frame-block", type=int, default=10, help="codons per phase-composition block"
     )
     ap.add_argument(
+        "--local-weight",
+        type=float,
+        default=0.0,
+        help="weight of the per-block multinomial loss on TIS channels (0 = off)",
+    )
+    ap.add_argument(
+        "--local-block", type=int, default=1024, help="positions per local-multinomial block"
+    )
+    ap.add_argument(
         "--heads-only",
         dest="train_backbone",
         action="store_false",
@@ -551,6 +571,8 @@ def main() -> None:
         ap.error("--mod-scale-tis must be positive and finite")
     if args.frame_weight < 0 or args.frame_block < 1:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
+    if args.local_weight < 0 or args.local_block < 1:
+        ap.error("--local-weight must be >= 0 and --local-block >= 1")
     if not 0 <= args.freeze_backbone_steps < args.steps:
         ap.error("--freeze-backbone-steps must be in [0, --steps)")
     if args.freeze_backbone_steps and not args.train_backbone:
@@ -595,6 +617,7 @@ def main() -> None:
     num_tracks = fields["num_tracks"]
     channels = {k: fields[k] for k in ("mod_channels", "mod_scales") if k in fields}
     frame_channels = tuple(fields["frame_channels"])
+    local_channels = local_channels_of(args.arm) if args.local_weight else ()
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),
@@ -605,6 +628,7 @@ def main() -> None:
         "val_windows": len(val_windows),
         "val_examples": len(val_windows) * (len(conditions) if rnacond else 1),
         **({"val_window_indices": val_index} if rnacond else {}),
+        **({"local_channels": list(local_channels)} if args.local_weight else {}),
         "jax_devices": [str(d) for d in jax.devices()],
     }
     if init is not None:
@@ -643,6 +667,9 @@ def main() -> None:
         frame_block=args.frame_block,
         freeze_backbone_steps=args.freeze_backbone_steps,
         mod_learning_rate=args.mod_learning_rate,
+        local_weight=args.local_weight,
+        local_channels=local_channels,
+        local_block=args.local_block,
     )
     params, state = model._params, model._state
     predict = make_predict(model, head)

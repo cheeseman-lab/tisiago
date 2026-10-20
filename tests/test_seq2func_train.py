@@ -656,3 +656,16 @@ def test_selection_window_indices_evenly_spaced_and_deterministic():
     assert train.selection_window_indices(5, 20) == [0, 1, 2, 3, 4]
     assert train.selection_window_indices(100, 1) == [0]
     assert train.selection_window_indices(0, 20) == []
+
+
+def test_local_loss_flags_and_channels():
+    from tisiago.seq2func.train import build_parser, local_channels_of
+
+    args = build_parser().parse_args(["--arm", "rnacond:K562", "--head", "rnacond_f"])
+    assert args.local_weight == 0.0 and args.local_block == 1024
+    args = build_parser().parse_args(
+        ["--arm", "rnacond:K562", "--head", "rnacond_foc", "--local-weight", "5"]
+    )
+    assert args.local_weight == 5.0
+    assert local_channels_of("rnacond:K562") == (0, 1)
+    assert local_channels_of("condition:K562") == (0, 1)

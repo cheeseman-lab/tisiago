@@ -138,3 +138,63 @@ def test_frame_weight_adds_weighted_frame_term():
     frame = codon_phase_multinomial(pred, y, mask, (0,), 3)
     assert float(out["frame"]) == pytest.approx(float(frame))
     assert float(out["loss"]) == pytest.approx(float(base["loss"]) + 2.5 * float(frame), rel=1e-6)
+
+
+# --- local (per-block) multinomial on selected channels ---
+
+
+def _local_reference(pred, target, mask, channels, block):
+    pred = np.where(mask, np.asarray(pred, np.float64), 0.0)[..., list(channels)]
+    target = np.where(mask, np.maximum(np.asarray(target, np.float64), 0), 0.0)[..., list(channels)]
+    n = (pred.shape[1] // block) * block
+    num = den = 0.0
+    for b in range(pred.shape[0]):
+        for lo in range(0, n, block):
+            for c in range(len(channels)):
+                t, p = target[b, lo : lo + block, c], pred[b, lo : lo + block, c]
+                if t.sum() <= 0:
+                    continue
+                qt, qp = t / t.sum(), p / max(p.sum(), 1e-7)
+                kl = sum(a * (np.log(a) - np.log(max(q, 1e-7))) for a, q in zip(qt, qp) if a > 0)
+                num, den = num + t.sum() * kl, den + t.sum()
+    return num / den if den else 0.0
+
+
+def test_local_multinomial_matches_reference_and_ignores_scale():
+    from tisiago.seq2func.loss import local_multinomial
+
+    rng = np.random.default_rng(3)
+    target = rng.poisson(1.0, (2, 70, 4)).astype(np.float32)
+    pred = rng.gamma(1.0, 1.0, (2, 70, 4)).astype(np.float32)
+    mask = np.ones(target.shape, bool)
+    mask[0, 5:20, 1] = False
+    got = float(local_multinomial(jnp.asarray(pred), jnp.asarray(target), mask, (0, 1), 16))
+    assert got == pytest.approx(_local_reference(pred, target, mask, (0, 1), 16), rel=1e-4)
+    # per-block shape only: scaling each block of the prediction leaves it unchanged
+    scaled = pred.copy()
+    scaled[:, :16] *= 7.0
+    again = float(local_multinomial(jnp.asarray(scaled), jnp.asarray(target), mask, (0, 1), 16))
+    assert again == pytest.approx(got, rel=1e-4)
+    assert float(local_multinomial(jnp.asarray(target), jnp.asarray(target), mask, (0, 1), 16)) == (
+        pytest.approx(0.0, abs=1e-6)
+    )
+    # no channels, or a window shorter than one block: 0
+    assert float(local_multinomial(jnp.asarray(pred), jnp.asarray(target), mask, (), 16)) == 0.0
+    assert float(local_multinomial(jnp.asarray(pred), jnp.asarray(target), mask, (0,), 128)) == 0.0
+
+
+def test_poisson_multinomial_local_term_enters_only_with_weight():
+    y, mask = _arrays()
+    pred = jnp.ones_like(y)
+    base = poisson_multinomial(pred, y, mask)
+    off = poisson_multinomial(pred, y, mask, local_weight=0.0, local_channels=(0, 1))
+    on = poisson_multinomial(pred, y, mask, local_weight=3.0, local_channels=(0, 1), local_block=8)
+    assert float(off["loss"]) == pytest.approx(float(base["loss"]))
+    assert float(on["local"]) > 0
+    expected = float(base["loss"]) + 3.0 * float(on["local"])
+    assert float(on["loss"]) == pytest.approx(expected, rel=1e-5)
+    assert "local" in base and float(base["local"]) == 0.0
+    grad = jax.grad(
+        lambda p: poisson_multinomial(p, y, mask, local_weight=3.0, local_channels=(0,))["loss"]
+    )(pred)
+    assert bool(jnp.isfinite(grad).all())

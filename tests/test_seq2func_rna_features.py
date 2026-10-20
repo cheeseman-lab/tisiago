@@ -104,3 +104,93 @@ def test_rna_features_jit_and_grad_finite():
     np.testing.assert_allclose(np.asarray(fn(rna)), np.asarray(rna_features(rna)), atol=1e-6)
     grad = jax.grad(lambda x: rna_features(x).sum())(rna)
     assert bool(jnp.isfinite(grad).all())
+
+
+# --- one-sided (strand-aware upstream / downstream) RNA features ---
+
+
+def _onesided_reference(x: np.ndarray, widths, rise_width, threshold, cap):
+    """Plus-strand reference: per position contrasts and distance from the last 5' rise."""
+    n = len(x)
+    off = max(widths + (rise_width,))
+    pad = np.concatenate([np.zeros(off), x, np.zeros(off)])
+
+    def up(i, w):
+        return pad[off + i - w : off + i].sum() / w
+
+    def down(i, w):
+        return pad[off + i : off + i + w].sum() / w
+
+    out = np.zeros((n, len(widths) + 1))
+    last = None
+    for i in range(n):
+        for k, w in enumerate(widths):
+            out[i, k] = np.log1p(down(i, w)) - np.log1p(up(i, w))
+        rise = np.log1p(down(i, rise_width)) - np.log1p(up(i, rise_width))
+        if rise > threshold:
+            last = i
+        d = cap if last is None else min(i - last, cap)
+        out[i, -1] = np.log1p(d)
+    return out
+
+
+def test_onesided_features_by_reference_on_both_strands():
+    from tisiago.seq2func.rna_features import (
+        NUM_ONESIDED_FEATURES,
+        ONESIDED_CAP,
+        ONESIDED_RISE_THRESHOLD,
+        ONESIDED_RISE_WIDTH,
+        ONESIDED_WIDTHS,
+        onesided_features,
+    )
+
+    rng = np.random.default_rng(4)
+    length = 300
+    rna = np.zeros((length, 2), np.float32)
+    rna[120:, 0] = rng.poisson(5.0, length - 120)  # a plus-strand transcript starting at 120
+    rna[:200, 1] = rng.poisson(3.0, 200)  # a minus-strand transcript whose 5' end is at 199
+    feats = np.asarray(onesided_features(jnp.asarray(rna[None])))[0]
+    half = NUM_ONESIDED_FEATURES // 2
+    assert feats.shape == (length, NUM_ONESIDED_FEATURES)
+    args = (ONESIDED_WIDTHS, ONESIDED_RISE_WIDTH, ONESIDED_RISE_THRESHOLD, ONESIDED_CAP)
+    plus = _onesided_reference(rna[:, 0].astype(np.float64), *args)
+    minus = _onesided_reference(rna[::-1, 1].astype(np.float64), *args)[::-1]
+    np.testing.assert_allclose(feats[:, :half], plus, atol=1e-4)
+    np.testing.assert_allclose(feats[:, half:], minus, atol=1e-4)
+    # the distance feature is small just downstream of each 5' rise
+    assert feats[125, half - 1] < np.log1p(10) and feats[195, -1] < np.log1p(10)
+
+
+def test_onesided_features_follow_reverse_complement():
+    from tisiago.seq2func.rna_features import NUM_ONESIDED_FEATURES, onesided_features
+
+    rng = np.random.default_rng(5)
+    length = 400
+    onehot = np.eye(4, dtype=np.float32)[rng.integers(0, 4, length)]
+    rna = rng.poisson(0.5, (length, 2)).astype(np.float32)
+    rna[100:300] += rng.poisson(4.0, (200, 2))
+    sequence = np.concatenate([onehot, rna], axis=1)
+    targets = np.zeros((length, 4), np.float32)
+    seq_rc, _, _ = reverse_complement(sequence, targets, targets > 0, [(0, 1), (2, 3)])
+    feats = np.asarray(onesided_features(jnp.asarray(sequence[None, :, 4:])))[0]
+    feats_rc = np.asarray(onesided_features(jnp.asarray(seq_rc[None, :, 4:])))[0]
+    half = NUM_ONESIDED_FEATURES // 2
+    swapped = np.concatenate([feats[::-1, half:], feats[::-1, :half]], axis=1)
+    np.testing.assert_allclose(feats_rc, swapped, atol=1e-4)
+    grad = jax.grad(lambda x: onesided_features(x).sum())(jnp.asarray(rna[None]))
+    assert bool(jnp.isfinite(grad).all())
+
+
+def test_strand_log_ratios_by_hand_and_reverse_complement():
+    from tisiago.seq2func.rna_features import strand_log_ratios
+
+    x = np.zeros((1, 12, 2), np.float32)
+    x[0, 6:, 0] = 2.0  # plus: rise at 6
+    x[0, :4, 1] = 1.0  # minus: 5' end at 3
+    out = np.asarray(strand_log_ratios(jnp.asarray(x), (2,), 0.5))[0]
+    assert out.shape == (12, 2)
+    assert out[6, 0] == pytest.approx(np.log(2.5 / 0.5))  # down mean 2, up mean 0
+    assert out[3, 1] == pytest.approx(np.log(1.5 / 0.5))  # minus: down = 3,2 ; up = 4,5
+    assert out[2, 0] == pytest.approx(0.0)
+    rc = np.asarray(strand_log_ratios(jnp.asarray(x[:, ::-1, ::-1].copy()), (2,), 0.5))[0]
+    np.testing.assert_allclose(rc, out[::-1, ::-1], atol=1e-6)

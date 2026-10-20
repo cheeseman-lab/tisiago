@@ -41,6 +41,33 @@ def codon_phase_multinomial(pred, target, mask, channels: Sequence[int], block: 
     return jnp.where(total > 0, weighted / jnp.maximum(total, EPS), 0.0)
 
 
+def local_multinomial(pred, target, mask, channels: Sequence[int], block: int = 1024):
+    """Counts-weighted multinomial KL of the profile within blocks of ``block`` positions.
+
+    On ``channels`` only, positions trimmed to a multiple of ``block`` on the window's own grid;
+    masked positions are zeroed in both (as :func:`poisson_multinomial`). Per block and channel
+    with observed counts ``n > 0`` the term is ``n * KL(observed || predicted)``; the sum is
+    divided by the counts of those blocks. 0 when nothing counts.
+    """
+    channels = tuple(int(c) for c in channels)
+    length = (pred.shape[1] // block) * block
+    if not channels or length == 0:
+        return jnp.zeros((), jnp.float32)
+    idx = jnp.asarray(channels)
+    shape = (pred.shape[0], length // block, block, len(channels))
+    keep = jnp.asarray(mask)[:, :length][..., idx]
+    pred = jnp.where(keep, pred[:, :length][..., idx].astype(jnp.float32), 0.0).reshape(shape)
+    target = target[:, :length][..., idx].astype(jnp.float32)
+    target = jnp.where(keep, jnp.maximum(target, 0.0), 0.0).reshape(shape)
+    n_target = target.sum(axis=2)
+    p_target = target / jnp.maximum(n_target[:, :, None, :], EPS)
+    p_pred = pred / jnp.maximum(pred.sum(axis=2)[:, :, None, :], EPS)
+    kl = (_xlogy(p_target, p_target) - _xlogy(p_target, p_pred)).sum(axis=2)
+    total = n_target.sum()
+    weighted = jnp.where(n_target > 0, n_target * kl, 0.0).sum()
+    return jnp.where(total > 0, weighted / jnp.maximum(total, EPS), 0.0)
+
+
 def poisson_multinomial(
     pred,
     target,
@@ -49,13 +76,21 @@ def poisson_multinomial(
     frame_weight: float = 0.0,
     frame_channels: Sequence[int] = (),
     frame_block: int = 10,
+    local_weight: float = 0.0,
+    local_channels: Sequence[int] = (),
+    local_block: int = 1024,
 ) -> dict:
     """Poisson deviance on window totals plus weighted multinomial KL on the profile.
 
     ``"frame"`` is :func:`codon_phase_multinomial` on ``frame_channels``; it enters ``"loss"`` as
-    ``frame_weight * frame`` only when ``frame_weight`` is non-zero.
+    ``frame_weight * frame`` only when ``frame_weight`` is non-zero. ``"local"`` is
+    :func:`local_multinomial` on ``local_channels`` (0 unless ``local_weight``), entering as
+    ``local_weight * local``.
     """
     frame = codon_phase_multinomial(pred, target, mask, frame_channels, frame_block)
+    local = jnp.zeros((), jnp.float32)
+    if local_weight:
+        local = local_multinomial(pred, target, mask, local_channels, local_block)
     pred = jnp.where(mask, pred.astype(jnp.float32), 0.0)
     target = jnp.where(mask, jnp.maximum(target.astype(jnp.float32), 0.0), 0.0)
     total_pred = pred.sum(axis=1)
@@ -73,4 +108,6 @@ def poisson_multinomial(
     loss = poisson + positional_weight * kl
     if frame_weight:
         loss = loss + frame_weight * frame
-    return {"loss": loss, "poisson": poisson, "multinomial": kl, "frame": frame}
+    if local_weight:
+        loss = loss + local_weight * local
+    return {"loss": loss, "poisson": poisson, "multinomial": kl, "frame": frame, "local": local}

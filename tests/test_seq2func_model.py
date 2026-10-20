@@ -390,7 +390,18 @@ def test_seqconv_registered_and_choices_match():
     from tisiago.seq2func.model import HEAD_KINDS, SEQUENCE_KINDS, SeqConvTrackHead
 
     assert HEAD_KINDS["seqconv"] is SeqConvTrackHead
-    assert SEQUENCE_KINDS == {"seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond"}
+    assert SEQUENCE_KINDS == {
+        "seqconv",
+        "seqconv_tx",
+        "resid_tx",
+        "resid_chx",
+        "rnacond",
+        "rnacond_f",
+        "rnacond_fo",
+        "rnacond_foc",
+        "rnacond_fod",
+        "rnacond_foa",
+    }
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
         assert set(action.choices) == set(HEAD_KINDS)
@@ -1569,4 +1580,160 @@ def test_rnacond_checkpoint_round_trip(tmp_path):
     np.testing.assert_array_equal(
         np.asarray(make_predict(same, head)(same._params, same._state, seq)),
         np.asarray(make_predict(source, head)(source._params, source._state, seq)),
+    )
+
+
+# --- factorised rnacond heads (TIS = per-block amount x within-block softmax) ---
+
+FACT_KINDS = ("rnacond_f", "rnacond_fo", "rnacond_foc", "rnacond_fod", "rnacond_foa")
+
+
+def test_local_softmax_preserves_totals_and_concentrates():
+    from tisiago.seq2func.model import local_softmax
+
+    rng = np.random.default_rng(0)
+    rate = jnp.asarray(rng.gamma(1.0, 1.0, (2, 50, 2)), jnp.float32)
+    logits = jnp.asarray(rng.normal(size=(2, 50, 2)), jnp.float32)
+    out = np.asarray(local_softmax(rate, logits, 16))
+    assert out.shape == (2, 50, 2) and bool((out >= 0).all())
+    np.testing.assert_allclose(out.sum(axis=1), np.asarray(rate).sum(axis=1), rtol=1e-5)
+    # constant logits and a constant rate: the rate itself (partial edge blocks included)
+    flat = np.asarray(local_softmax(jnp.full((1, 50, 1), 2.0), jnp.zeros((1, 50, 1)), 16))
+    np.testing.assert_allclose(flat, 2.0, rtol=1e-6)
+    # a dominant logit takes its blocks' mass
+    peak = jnp.zeros((1, 64, 1)).at[0, 20, 0].set(50.0)
+    out = np.asarray(local_softmax(jnp.ones((1, 64, 1)), peak, 16))
+    assert out[0, 20, 0] > 0.9 * 16
+
+
+def _fact_forward(kind):
+    from tisiago.seq2func.model import HEAD_KINDS
+
+    def forward(emb, seq):
+        head = HEAD_KINDS[kind](name="r", output_type=None, num_tracks=4)
+        return head(_FakeEmbeddings(emb), jnp.zeros((1,), jnp.int32), sequence=seq)
+
+    return hk.without_apply_rng(hk.transform(forward))
+
+
+@pytest.mark.parametrize("kind", FACT_KINDS)
+def test_fact_heads_registered_shapes_and_rna_use(kind):
+    from tisiago.seq2func import overfit
+    from tisiago.seq2func.model import SEQUENCE_WIDTHS
+    from tisiago.seq2func.rna_features import NUM_ONESIDED_FEATURES, NUM_RNA_FEATURES
+
+    assert SEQUENCE_WIDTHS[kind] == 6 and kind in overfit.RNA_KINDS
+    register_track_head(f"p6_test_{kind}_reg", 4, kind=kind)
+    fn = _fact_forward(kind)
+    rng = np.random.default_rng(1)
+    emb = jnp.asarray(rng.normal(size=(1, 40, 8)), jnp.float32)
+    seq = _rna_sequences(rng, 1, 40)
+    params = fn.init(jax.random.PRNGKey(0), emb, seq)
+    n_feat = NUM_RNA_FEATURES + (0 if kind == "rnacond_f" else NUM_ONESIDED_FEATURES)
+    assert params["r/~predict/hidden"]["w"].shape == (8 + n_feat, 256)
+    assert params["r/~predict/output"]["w"].shape == (256, 2)
+    assert ("r/~predict/tis_hidden" in params) == (kind == "rnacond_foc")
+    pred = np.asarray(fn.apply(params, emb, seq))
+    assert pred.shape == (1, 40, 4) and np.isfinite(pred).all() and (pred >= 0).all()
+    other = np.asarray(fn.apply(params, emb, seq.at[..., 4:].set(0.0)))
+    assert not np.allclose(pred, other)
+    # CHX is softplus(output) of the trunk; TIS sums to its softplus rate over the window
+    hidden = params["r/~predict/hidden"]
+    assert hidden["w"].shape[0] == 8 + n_feat
+
+
+def test_fact_chx_contrast_stops_tis_gradient_into_chx_output():
+    fn = _fact_forward("rnacond_foc")
+    rng = np.random.default_rng(2)
+    emb = jnp.asarray(rng.normal(size=(1, 64, 8)), jnp.float32)
+    seq = _rna_sequences(rng, 1, 64)
+    params = fn.init(jax.random.PRNGKey(0), emb, seq)
+    grads = jax.grad(lambda p: fn.apply(p, emb, seq)[..., :2].sum())(params)
+    np.testing.assert_array_equal(np.asarray(grads["r/~predict/output"]["w"]), 0.0)
+    assert float(jnp.abs(grads["r/~predict/tis_hidden"]["w"]).sum()) > 0
+    # but TIS does read the CHX prediction: changing the CHX output weights changes TIS
+    moved = jax.tree_util.tree_map(lambda x: x, params)
+    moved["r/~predict/output"] = {
+        "w": params["r/~predict/output"]["w"] * 3.0,
+        "b": params["r/~predict/output"]["b"] + 1.0,
+    }
+    a, b = fn.apply(params, emb, seq), fn.apply(moved, emb, seq)
+    assert not np.allclose(np.asarray(a[..., :2]), np.asarray(b[..., :2]))
+
+
+@pytest.mark.parametrize("kind", ("rnacond_fod", "rnacond_foa"))
+def test_fact_deep_trunks_start_as_the_mlp_trunk(kind):
+    """Zero-initialised residual branches: at init the trunk equals the plain one-sided head."""
+    rng = np.random.default_rng(3)
+    emb = jnp.asarray(rng.normal(size=(1, 48, 8)), jnp.float32)
+    seq = _rna_sequences(rng, 1, 48)
+    deep = _fact_forward(kind)
+    params = deep.init(jax.random.PRNGKey(0), emb, seq)
+    plain = _fact_forward("rnacond_fo")
+    shallow = {k: v for k, v in params.items() if k in plain.init(jax.random.PRNGKey(0), emb, seq)}
+    np.testing.assert_allclose(
+        np.asarray(deep.apply(params, emb, seq)),
+        np.asarray(plain.apply(shallow, emb, seq)),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.parametrize("kind", FACT_KINDS)
+def test_fact_jitted_train_step_with_local_loss(kind):
+    from tisiago.seq2func.model import install_sequence_forward, make_predict, make_train_step
+
+    head = f"p6_test_{kind}_train"
+    register_track_head(head, 4, kind=kind)
+    model = _FakeModel([head], 4, kind=kind, width=6)
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    rng = np.random.default_rng(0)
+    batch = {
+        "sequences": _rna_sequences(rng, 2, 48),
+        "targets": jnp.asarray(rng.poisson(2, (2, 48, 4)).astype(np.float32)),
+        "mask": jnp.ones((2, 48, 4), bool),
+    }
+    step, opt_state = make_train_step(
+        model,
+        head,
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=False,
+        local_weight=5.0,
+        local_channels=(0, 1),
+        local_block=16,
+    )
+    params, state = model._params, model._state
+    new_params, _, aux = step(params, state, opt_state, batch)
+    assert np.isfinite(float(aux["loss"])) and float(aux["local"]) > 0
+    leaves = jax.tree_util.tree_leaves(new_params)
+    assert all(bool(jnp.isfinite(x).all()) for x in leaves)
+    before = np.asarray(params[f"head/{head}/~predict/tis_output"]["w"])
+    assert not np.allclose(before, np.asarray(new_params[f"head/{head}/~predict/tis_output"]["w"]))
+    pred = make_predict(model, head)(new_params, state, batch["sequences"])
+    assert pred.shape == (2, 48, 4) and bool(jnp.isfinite(pred).all())
+
+
+def test_train_step_without_local_weight_matches_previous_loss():
+    """local_weight 0 leaves the rnacond loss exactly as before (no local term)."""
+    from tisiago.seq2func.model import install_sequence_forward, make_train_step
+
+    head = "p6_test_rnacond_nolocal"
+    register_track_head(head, 4, kind="rnacond")
+    model = _FakeModel([head], 4, kind="rnacond", width=6)
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    rng = np.random.default_rng(0)
+    batch = {
+        "sequences": _rna_sequences(rng, 1, 48),
+        "targets": jnp.asarray(rng.poisson(2, (1, 48, 4)).astype(np.float32)),
+        "mask": jnp.ones((1, 48, 4), bool),
+    }
+    kw = dict(learning_rate=1e-2, weight_decay=0.0, heads_only=False)
+    step_a, opt_a = make_train_step(model, head, **kw)
+    step_b, opt_b = make_train_step(model, head, local_weight=0.0, local_channels=(0, 1), **kw)
+    _, _, aux_a = step_a(model._params, model._state, opt_a, batch)
+    _, _, aux_b = step_b(model._params, model._state, opt_b, batch)
+    assert float(aux_a["loss"]) == float(aux_b["loss"])
+    assert float(aux_a["loss"]) == pytest.approx(
+        float(aux_a["poisson"]) + 5.0 * float(aux_a["multinomial"]), rel=1e-6
     )

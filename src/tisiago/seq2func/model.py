@@ -27,7 +27,7 @@ from alphagenome_research.model import dna_model
 
 from tisiago.seq2func.loss import poisson_multinomial
 from tisiago.seq2func.orf_features import orf_features
-from tisiago.seq2func.rna_features import rna_features
+from tisiago.seq2func.rna_features import onesided_features, rna_features, strand_log_ratios
 from tisiago.seq2func.targets import modulated_channels
 from tisiago.seq2func.tx_features import NUM_TX_CHANNELS
 
@@ -38,6 +38,14 @@ MOD_HIDDEN_CHX = 256
 MOD_SCALE = 1.5
 INIT_SEQ_LEN = 2**14
 RNACOND_WIDTH = 4 + 2
+LOCAL_BLOCK = 1024
+CHX_CONTRAST_WIDTHS = (15, 45, 150)
+CHX_CONTRAST_EPS = 0.01
+DILATIONS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
+ATTN_BLOCK = 1024
+ATTN_HEADS = 4
+ATTN_DIM = 64
+ATTN_LAYERS = 2
 _SEQUENCE_FREE_INIT = False
 
 
@@ -67,7 +75,8 @@ class TrackHead(CustomHead):
         """Masked Poisson-multinomial on ``batch["targets"]`` / ``batch["mask"]``.
 
         Optional static ``frame_weight`` / ``frame_channels`` / ``frame_block`` batch entries
-        add the codon-phase term (absent: weight 0, no channels).
+        add the codon-phase term (absent: weight 0, no channels); ``local_weight`` /
+        ``local_channels`` / ``local_block`` the per-block multinomial term (absent: off).
         """
         return poisson_multinomial(
             predictions,
@@ -76,6 +85,9 @@ class TrackHead(CustomHead):
             frame_weight=batch.get("frame_weight", 0.0),
             frame_channels=batch.get("frame_channels", ()),
             frame_block=batch.get("frame_block", 10),
+            local_weight=batch.get("local_weight", 0.0),
+            local_channels=batch.get("local_channels", ()),
+            local_block=batch.get("local_block", LOCAL_BLOCK),
         )
 
 
@@ -237,6 +249,157 @@ class RnaCondTrackHead(TrackHead):
         return jax.nn.softplus(x.astype(jnp.float32))
 
 
+def _block_softmax(rate, logits, block: int, offset: int):
+    """``rate`` summed per block (grid starting at ``-offset``), spread by softmax(``logits``)."""
+    batch, length, channels = rate.shape
+    padded = -(-(length + offset) // block) * block
+    pad = [(0, 0), (offset, padded - length - offset), (0, 0)]
+    valid = jnp.pad(jnp.ones((1, length, 1), bool), pad)
+    shape = (batch, padded // block, block, channels)
+    rate = jnp.pad(rate, pad).reshape(shape)
+    logits = jnp.where(valid, jnp.pad(logits, pad), -1e30).reshape(shape)
+    out = rate.sum(axis=2, keepdims=True) * jax.nn.softmax(logits, axis=2)
+    return out.reshape(batch, padded, channels)[:, offset : offset + length]
+
+
+def local_softmax(rate, logits, block: int = LOCAL_BLOCK):
+    """Factorised track: per-block amount ``sum(rate)`` times a within-block softmax of ``logits``.
+
+    ``(B, S, C)`` each. Two grids (offsets 0 and ``block // 2``) are averaged to soften block
+    edges; the output sums to ``rate``'s sum over the window, per channel.
+    """
+    rate, logits = rate.astype(jnp.float32), logits.astype(jnp.float32)
+    first = _block_softmax(rate, logits, block, 0)
+    return 0.5 * (first + _block_softmax(rate, logits, block, block // 2))
+
+
+def _dilated_trunk(h):
+    """Residual dilated-conv stack (kernel 3, :data:`DILATIONS`), zero-initialised branches."""
+    zeros = hk.initializers.Constant(0.0)
+    for i, rate in enumerate(DILATIONS):
+        y = hk.Conv1D(128, kernel_shape=3, rate=rate, padding="SAME", name=f"dil{i}")(h)
+        y = jax.nn.relu(y)
+        h = h + hk.Conv1D(h.shape[-1], 1, w_init=zeros, b_init=zeros, name=f"dil{i}_out")(y)
+    return h
+
+
+def _block_attention(h, offset: int, name: str):
+    """Multi-head self-attention within blocks of :data:`ATTN_BLOCK` (grid at ``-offset``).
+
+    Learned per-head relative-position bias; padding keys are masked; zero-initialised output
+    projection.
+    """
+    batch, length, width = h.shape
+    block, heads = ATTN_BLOCK, ATTN_HEADS
+    dim = ATTN_DIM // heads
+    padded = -(-(length + offset) // block) * block
+    pad = [(0, 0), (offset, padded - length - offset), (0, 0)]
+    x = jnp.pad(h, pad)
+    valid = jnp.pad(jnp.ones((length,), bool), [(offset, padded - length - offset)])
+    valid = valid.reshape(padded // block, 1, 1, block)
+
+    def project(tag):
+        y = hk.Linear(ATTN_DIM, name=f"{name}_{tag}")(x)
+        return y.reshape(batch, padded // block, block, heads, dim)
+
+    q, k, v = project("q"), project("k"), project("v")
+    scores = jnp.einsum("bnqhd,bnkhd->bnhqk", q, k) / math.sqrt(dim)
+    table = hk.get_parameter(
+        f"{name}_rel_bias", (heads, 2 * block - 1), init=hk.initializers.Constant(0.0)
+    )
+    rel = jnp.arange(block)[:, None] - jnp.arange(block)[None, :] + block - 1
+    scores = scores + table[:, rel][None, None]
+    scores = jnp.where(valid[None], scores, -1e30)
+    att = jax.nn.softmax(scores, axis=-1)
+    out = jnp.einsum("bnhqk,bnkhd->bnqhd", att, v).reshape(batch, padded, ATTN_DIM)
+    zeros = hk.initializers.Constant(0.0)
+    out = hk.Linear(width, w_init=zeros, b_init=zeros, name=f"{name}_out")(out)
+    return out[:, offset : offset + length]
+
+
+def _attention_trunk(h):
+    """:data:`ATTN_LAYERS` pre-norm residual block-attention layers, alternate layers shifted."""
+    for layer in range(ATTN_LAYERS):
+        offset = (ATTN_BLOCK // 2) * (layer % 2)
+        name = f"attn{layer}"
+
+        def sublayer(x, offset=offset, name=name):
+            y = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True, name=f"{name}_norm")(x)
+            return _block_attention(y, offset, name)
+
+        h = h + hk.remat(sublayer)(h)
+    return h
+
+
+class RnaCondFactTrackHead(TrackHead):
+    """``rnacond`` with a factorised TIS output (and optional extras, set by subclasses).
+
+    Trunk: concat(1-bp embeddings, RNA features[, one-sided RNA features]) -> Linear(256) ->
+    relu [-> dilated-conv or block-attention stack]. CHX+/- = softplus(Linear(2) ``output``).
+    TIS+/- = :func:`local_softmax` of a softplus rate and logits from ``tis_output`` (Linear(4));
+    with ``CHX_CONTRAST`` its input is concat(trunk, downstream/upstream log ratios of the
+    head's own, gradient-stopped CHX prediction) through ``tis_hidden`` (Linear(128), relu).
+    Outputs TIS+, TIS-, CHX+, CHX- (``targets.rnacond_layout``).
+    """
+
+    ONESIDED = False
+    CHX_CONTRAST = False
+    TRUNK = "mlp"
+
+    def predict(self, embeddings, organism_index, **kwargs):
+        """Non-negative per-base track predictions ``(B, S, 4)``."""
+        if self._num_tracks != 4:
+            raise ValueError(f"factorised rnacond heads have 4 tracks, not {self._num_tracks}")
+        extra = "one-hot + RNA plus/minus: iterate(..., rna_conditioned=True)"
+        sequence = _head_sequence(embeddings, kwargs, "rnacond", RNACOND_WIDTH, extra)
+        rna = sequence[..., 4:]
+        feats = [rna_features(rna)]
+        if self.ONESIDED:
+            feats.append(onesided_features(rna))
+        x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
+        x = jnp.concatenate([x, *feats], axis=-1)
+        h = jax.nn.relu(hk.Linear(256, name="hidden")(x))
+        if self.TRUNK == "dilated":
+            h = _dilated_trunk(h)
+        elif self.TRUNK == "attention":
+            h = _attention_trunk(h)
+        chx = jax.nn.softplus(hk.Linear(2, name="output")(h).astype(jnp.float32))
+        tis_in = h
+        if self.CHX_CONTRAST:
+            ratios = strand_log_ratios(
+                jax.lax.stop_gradient(chx), CHX_CONTRAST_WIDTHS, CHX_CONTRAST_EPS
+            )
+            tis_in = jnp.concatenate([h, ratios], axis=-1)
+            tis_in = jax.nn.relu(hk.Linear(128, name="tis_hidden")(tis_in))
+        t = hk.Linear(4, name="tis_output")(tis_in).astype(jnp.float32)
+        tis = local_softmax(jax.nn.softplus(t[..., :2]), t[..., 2:])
+        return jnp.concatenate([tis, chx], axis=-1)
+
+
+class RnaCondFactOneSidedTrackHead(RnaCondFactTrackHead):
+    """:class:`RnaCondFactTrackHead` + one-sided RNA features."""
+
+    ONESIDED = True
+
+
+class RnaCondFactChxTrackHead(RnaCondFactOneSidedTrackHead):
+    """+ one-sided RNA features + the CHX-contrast input to the TIS output."""
+
+    CHX_CONTRAST = True
+
+
+class RnaCondFactDilatedTrackHead(RnaCondFactOneSidedTrackHead):
+    """+ one-sided RNA features + a dilated-conv trunk (receptive field ~2 kb)."""
+
+    TRUNK = "dilated"
+
+
+class RnaCondFactAttentionTrackHead(RnaCondFactOneSidedTrackHead):
+    """+ one-sided RNA features + a block-attention trunk (1 kb blocks, shifted second layer)."""
+
+    TRUNK = "attention"
+
+
 HEAD_KINDS = {
     "mlp": TrackHead,
     "conv": ConvTrackHead,
@@ -245,13 +408,19 @@ HEAD_KINDS = {
     "resid_tx": ResidTxTrackHead,
     "resid_chx": ResidChxTrackHead,
     "rnacond": RnaCondTrackHead,
+    "rnacond_f": RnaCondFactTrackHead,
+    "rnacond_fo": RnaCondFactOneSidedTrackHead,
+    "rnacond_foc": RnaCondFactChxTrackHead,
+    "rnacond_fod": RnaCondFactDilatedTrackHead,
+    "rnacond_foa": RnaCondFactAttentionTrackHead,
 }
-SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx", "rnacond"})
+RNACOND_KINDS = frozenset(k for k in HEAD_KINDS if k == "rnacond" or k.startswith("rnacond_"))
+SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx"} | RNACOND_KINDS)
 SEQUENCE_WIDTHS = {
     "seqconv_tx": 4 + NUM_TX_CHANNELS,
     "resid_tx": 4 + NUM_TX_CHANNELS,
     "resid_chx": 4 + NUM_TX_CHANNELS,
-    "rnacond": RNACOND_WIDTH,
+    **{kind: RNACOND_WIDTH for kind in RNACOND_KINDS},
 }
 _REGISTERED_KINDS: dict[str, str] = {}
 
@@ -691,11 +860,15 @@ def make_train_step(
     frame_block: int = 10,
     freeze_backbone_steps: int = 0,
     mod_learning_rate: float | None = None,
+    local_weight: float = 0.0,
+    local_channels: tuple[int, ...] = (),
+    local_block: int = LOCAL_BLOCK,
 ):
     """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
 
     ``heads_only=False`` also trains the backbone; load the model with ``detach_backbone=False``.
-    ``frame_weight`` adds the codon-phase term on ``frame_channels`` (see ``loss.py``).
+    ``frame_weight`` adds the codon-phase term on ``frame_channels``, ``local_weight`` the
+    per-block multinomial on ``local_channels`` (see ``loss.py``).
     ``freeze_backbone_steps``, ``mod_learning_rate``: see :func:`make_optimizer`.
     """
     opt = make_optimizer(
@@ -718,6 +891,12 @@ def make_train_step(
         "frame_channels": tuple(frame_channels),
         "frame_block": int(frame_block),
     }
+    if local_weight:
+        frame |= {
+            "local_weight": float(local_weight),
+            "local_channels": tuple(local_channels),
+            "local_block": int(local_block),
+        }
     strand_reindexing = model._metadata[ORGANISM].strand_reindexing
     org_index = dna_model.convert_to_organism_index(ORGANISM)
 
