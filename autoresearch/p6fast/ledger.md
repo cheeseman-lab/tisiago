@@ -1,25 +1,92 @@
 # P6 fast search ledger
 
 ## Final summary
-(pending)
+Stopped 2026-10-20 21:40 on the stop rule (b): rounds R18 (fams 1,2), R19 (fam 4) and R20 (fams 3,5,6)
+gave no primary gain > 1.5 over the leader (3-seed means). 20 rounds, 118 configs, 14.2 GPU-hours.
+
+**Leader (TIS):** `r14_lall300` / `r17_lall300_s1/_s2`, primary **75.2 +- 0.2**.
+**Recommended recipe (same TIS, better CHX):** `r20_l300_chx25x2` (+ `_s1/_s2`), primary **75.6 +- 0.2**.
+```yaml
+train: {steps: 30000}
+inputs: [embedding, rna, rna_onesided]      # rna_onesided dispensable (R10)
+model:
+  trunk: {kind: conv, hidden: 256, layers: 2, width: 9}
+  chx_trunk: {kind: conv, hidden: 256, layers: 2, width: 25}
+  chx_contrast: false
+  tis: {kind: factorised, block: 1024, two_grids: true}
+  chx: {kind: factorised, block: 1024, two_grids: true}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: local, block: 1024, libraries: [tis, chx], weight: 300}
+  - {kind: multinomial, scope: global, weight: 5.0}
+```
+
+K562 held out, val chr7, percent of replicate (3-seed means):
+| | primary | TIS gene | TIS bin30 | TIS codon | TIS nt | CHX gene | CHX bin30 | CHX codon | CHX nt | CHX frame | TIS peak meta / argmax0 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| recipe (lall300 + CHX trunk conv25x2) | **75.6+-0.2** | 97.7 | 86.5 | 76.4 | 74.7 | 98.8 | 82.2 | 66.9 | 61.1 | 0.68 | 0.11 / 0.36 |
+| leader lall300 | 75.2+-0.2 | 98.2 | 86.8 | 75.3 | 75.1 | 98.7 | 82.3 | 66.2 | 58.8 | 0.64 | 0.11 / 0.35 |
+| slow-leader fast equivalent (foc_lw20) | 66.8+-0.3 | 97.7 | 83.9 | 68.0 | 65.6 | 97.6 | 71.0 | 46.4 | 33.9 | 0.48 | 0.10 / 0.36 |
+| seeded t3_foc_lw5_ps | 65.9+-1.0 | 97.5 | 83.0 | 66.8 | 64.4 | 97.6 | 70.3 | 46.1 | 33.6 | 0.48 | 0.10 / 0.36 |
+| ref_rnacond_ps | 42.5+-0.5 | 97.5 | 69.7 | 45.7 | 39.3 | 97.7 | 73.4 | 49.9 | 38.3 | 0.51 | 0.05 / 0.30 |
+(real K562 peak: meta 0.233, argmax0 0.446.) All guards pass with margin (CHX codon +17, nt +23 over ref).
+Seen lines (leader): HeLa TIS codon/nt 62/53, U2OS 77/77, RPE1 90-103 / 92-115: K562 held out sits
+between seen lines, so the limit is fit/information, not cross-line generalisation.
+
+**Components that mattered (ablation path, 3-seed means):**
+1. Local (1 kb) multinomial on **both** tracks (42.5 -> 66.2 at w20, 67.1 at w100; 75.2 at w300 with the rest).
+   TIS-only local losses (the seeded leader and the slow leader) fail the CHX guards in every trunk.
+   Bio: ribosome occupancy is a conserved pool redistributed within a transcript region: starts compete
+   for scanning ribosomes, and elongating ribosomes share the local ORF, so both tracks are
+   compositional within ~1 kb, not only in total.
+2. Width-9 convolution over the embedding (+3.5: 67.1 -> 70.6), two stacked (71.7; RF 17 nt).
+   Bio: the start codon, its Kozak-scale context (+-4-8 nt) and the P-site frame are read from
+   neighbouring nucleotides, which a per-nt head cannot see.
+3. Training to convergence: 30k steps (+2.3: 71.7 -> 73.9); 60k = 30k. (Optimisation, not biology.)
+4. Factorised CHX output (amount x within-1 kb softmax): CHX bin30/codon/nt +3/+4/+3.5 at no TIS cost.
+   Bio: elongating ribosomes, like initiating ones, are a total times a positional distribution.
+5. Local weight 300 at convergence (+1.9 over 100). TIS saturates at 300; CHX keeps rising to 3000.
+6. Separate wider CHX trunk (conv25x2): CHX nt +2.4, frame +.04, TIS unchanged. Bio: the elongation
+   frame is a 3-nt periodicity integrated over tens of codons; initiation is local.
+
+**What failed (no gain or worse, tested at 10k and again at 30k on the improved base):**
+scanning hazard output (= block softmax); cap-anchored transcript-level TIS softmax (74.7, = block);
+coupling to the predicted CHX rise (neutral at 0.5-1, -3 at 5); per-nt NB / Poisson likelihoods;
+codon-phase (frame) KL on CHX or TIS (frame never moves without wider receptive field); multi-scale
+local losses (32-256 nt); split trunk at equal config; deeper plain conv stacks (x3, x4) and wider
+hidden (512); CHX-contrast input; one-sided / antisense RNA, position and whitened embedding inputs;
+crop 8 kb, uniform sampling, lr 3e-3, batch 32. TIS peak meta share stays at 0.10-0.11 in every
+config (real 0.233): sharpness at the exact start nt is not reachable from the frozen v2 PCA
+embeddings with any head/loss tried — this is the job of the slow tier (backbone learns under the loss).
+
+**Recommended recipe to scale:** promote `promote/r20_l300_chx25x2.md` to the slow tier (rnacond
+fine-tune, K562 fold first): new head kind = factorised TIS + factorised CHX on Conv1D(256, 9) x2,
+CHX on its own Conv1D(256, 25) x2 stack, no CHX contrast; `--local-weight 300` (also 100 as an arm,
+since the slow tier's Poisson is on window totals) `--local-libraries tis,chx --local-block 1024`.
+If the slow tier confirms, scale to all four folds and score once on test.
 
 ## Leaderboard
-(guard-passing only; mean of seeds; noise sd ~0.3-1.3)
-| name | primary | K562 TIS codon | nt | CHX bin30 / codon / nt | guards | seeds |
+(guard-passing only; mean of seeds; K562 held out)
+| name | primary | K562 TIS codon | nt | CHX bin30 / codon / nt / frame | guards | seeds |
 |---|---|---|---|---|---|---|
-| r09_c9x2_30k | 75.2 | 76.5 | 73.8 | 79.5 / 60.8 / 54.1 | pass | 1 |
-| r08_conv9x2_h512 | 73.3 | 73.4 | 73.1 | 78.7 / 59.2 / 51.8 | pass | 1 |
-| r10_tisb2048 | 72.5 | 73.8 | 71.3 | 78.8 / 58.6 / 52.1 | pass | 1 |
-| r09_c9x2_nocontrast | 72.1 | 73.1 | 71.2 | 78.5 / 58.7 / 51.4 | pass | 1 |
-| conv9x2 (r06_conv9x2, r08 s1/s2) | 71.7+-1.0 | 72.5 | 70.9 | 78.5 / 59.3 / 51.9 | pass | 3 |
-| r10_chxfact | 71.5 | 72.3 | 70.7 | **81.5 / 64.2 / 55.5** | pass | 1 |
-| conv9 (r04_lall100_conv9, r06 s1/s2) | 70.6+-0.3 | 71.7 | 69.4 | 78.2 / 57.7 / 47.6 | pass | 3 |
-| lall100 (r02, r04 s1/s2) | 67.1+-0.7 | 68.5 | 65.6 | 77.6 / 56.4 / 45.1 | pass | 3 |
-| lall20 (r01, r02 s1/s2) | 66.2+-1.3 | 67.3 | 65.1 | 75.6 / 53.1 / 41.4 | pass | 3 |
-| ref_rnacond_ps | 42.5 | 45.7 | 39.3 | 73.4 / 49.9 / 38.3 | ref | 2 |
-| (fail) foc_lw20 = slow-leader equivalent | 66.8+-0.3 | 68.0 | 65.6 | 71.0 / 46.4 / 33.9 | FAIL CHX | 3 |
+| r20_l300_chx25x2 (recipe) | 75.6+-0.2 | 76.4 | 74.7 | 82.2 / 66.9 / 61.1 / .68 | pass | 3 |
+| lall300 30k (r14_lall300, r17 s1/s2) (leader) | 75.2+-0.2 | 75.3 | 75.1 | 82.3 / 66.2 / 58.8 / .64 | pass | 3 |
+| r17_lall3000 | 75.3 | 76.1 | 74.6 | 83.1 / 67.9 / 60.1 / .65 | pass | 1 |
+| r17_lall1000 | 75.0 | 75.8 | 74.2 | 82.1 / 67.3 / 60.2 / .64 | pass | 1 |
+| r19 nb1 (+lall300) | 74.7 | 75.4 | 74.0 | 82.7 / 65.9 / 59.1 / .64 | pass | 2 |
+| txtis (R15/R18, cap-anchored TIS) | 74.7+-1.0 | 75.3 | 74.1 | 81.9 / 65.3 / 57.7 / .63 | pass | 3 |
+| c9x2 30k softplus CHX | 73.9+-1.2 | 74.9 | 73.0 | 79.2 / 61.2 / 54.2 / .63 | pass | 3 |
+| base 30k (factorised CHX, lall100) | 73.3+-1.0 | 73.8 | 72.7 | 82.0 / 65.2 / 57.7 / .63 | pass | 3 |
+| conv9x2 10k | 71.7+-1.0 | 72.5 | 70.9 | 78.5 / 59.3 / 51.9 / .63 | pass | 3 |
+| conv9 10k | 70.6+-0.3 | 71.7 | 69.4 | 78.2 / 57.7 / 47.6 / .60 | pass | 3 |
+| lall100 10k | 67.1+-0.7 | 68.8 | 65.5 | 77.4 / 56.4 / 45.1 / .56 | pass | 3 |
+| ref_rnacond_ps | 42.5+-0.5 | 45.7 | 39.3 | 73.4 / 49.9 / 38.3 / .51 | ref | 2 |
+| (fail) foc_lw20 = slow-leader equivalent | 66.8+-0.3 | 68.0 | 65.6 | 71.0 / 46.4 / 33.9 / .48 | FAIL CHX | 3 |
 
 ## Findings
+- Fam 1 (weight at convergence): local weight 300 > 100 > 30 at 30k steps (TIS saturates at 300; CHX rises to 3000). Transcript-level (cap-anchored) TIS competition ties the 1 kb block.
+- Fam 6 (CHX periodicity): a separate wide CHX trunk (conv25x2) is the only thing that moves CHX frame (.64 -> .68) and nt (+2.4); frame losses never do. Bio: the elongation frame is integrated over tens of codons.
+- Fams 2/3/4 at convergence: hazard, coupling, NB / per-nt Poisson remain neutral on the 75-point base.
 - Fam 1 (output): a factorised (amount x within-1kb softmax) CHX output beats softplus CHX by +3-5 points at bin30/codon/nt. Bio: elongating ribosomes, like initiating ones, are a conserved pool redistributed along the transcript, so CHX is also best modelled as a total times a positional distribution.
 - Fam 5 (inputs): one-sided RNA, antisense RNA and embedding whitening are each dispensable (within noise); the sense RNA + embedding carry it.
 - Fam 1 (scale of competition): adding 32-256 nt local multinomials on top of the 1 kb block is neutral; 1 kb normalisation already captures the competition.
@@ -50,5 +117,6 @@
 - 2026-10-20 18:50 | R15 | fam 1/2 (competition scale: TIS softmax over the whole 5' crop with start crops, with and without the 1 kb local TIS loss -> crop-level TIS multinomial; TIS block 2048; crop-level instead of batch-level global multinomial) on the 30k base | configs/r15/* | 11172630, 11172631 | tiscrop_start (crop softmax + 1 kb local TIS loss) 73.9; **tisnolocal_crop (crop softmax + crop-level TIS multinomial, start crops) 75.8**; tisb2048 73.4; samplemn 74.6; all pass (base ~73.7) | Transcript-level (cap-anchored) TIS competition +2 over the 1 kb block, single seed -> R18 seeds. 1 kb block loss on TIS conflicts with a crop-wide softmax. |
 - 2026-10-20 19:05 | R16 | seeds 1-2 of r13_base (the candidate recipe) + fam 6 (CHX frame 50 with factorised CHX) + fam 5 (position input) at 30k | configs/r16/* | 11172637, 11172638 | base 3 seeds 73.3+-1.0 (74.3/72.3/73.1; CHX bin30 82.0 codon 65.2 nt 57.7); chxframe50 73.9 (CHX frame .63); pos 73.3; all pass | NO GAIN from frame (fam 6) or position (fam 5) at convergence. Base recipe confirmed at 73.3. |
 - 2026-10-20 19:15 | R17 | fam 1 (local weight at convergence): lall300 seeds 1-2, lall1000, lall3000 at 30k | configs/r17/* | 11172648, 11172649 | lall300 3 seeds **75.2+-0.2** (75.1/75.5/75.1; CHX bin30 82.3 codon 66.2 nt 58.7); lall1000 75.0 (CHX codon 67.3 nt 60.2); lall3000 75.3 (CHX bin30 83.1 codon 67.9 nt 60.1); all pass | GAIN +1.9 over the 73.3 base (3-seed) -> new leader lall300; streak reset. TIS saturates at 300; CHX keeps rising to 1000-3000. |
-- 2026-10-20 19:40 | R18 | fam 1/2 (transcript-level TIS competition from the cap = r15_tisnolocal_crop): seeds 1-2, and weight 300 on TIS crop multinomial + CHX local | configs/r18/* | 11172655 | pending |
-- 2026-10-20 21:00 | R19 | fam 4 (noise model) on the lall300 leader: + NB per-nt (1, seeds 0-1; 10), + Poisson per-nt (10) | configs/r19/* | 11173142, 11173143 | pending |
+- 2026-10-20 19:40 | R18 | fam 1/2 (transcript-level TIS competition from the cap = r15_tisnolocal_crop): seeds 1-2, and weight 300 on TIS crop multinomial + CHX local | configs/r18/* | 11172655 | txtis 3 seeds 74.7+-1.0 (75.8/73.8/74.6); txtis300 74.7; all pass | NO GAIN over the lall300 leader (75.2+-0.2); +1.4 over the same-weight base (inside noise). Cap-anchored TIS competition = 1 kb block competition. Streak 1 (fams 1,2). |
+- 2026-10-20 21:00 | R19 | fam 4 (noise model) on the lall300 leader: + NB per-nt (1, seeds 0-1; 10), + Poisson per-nt (10) | configs/r19/* | 11173142, 11173143 | nb1 2 seeds 74.7 (74.1/75.3); nb10 74.9; poisson_nt10 74.9; all pass | NO GAIN (streak 2: fam 4). Per-nt NB / Poisson likelihoods add nothing to the multinomial-profile + Poisson-total decomposition. |
+- 2026-10-20 21:40 | R20 | fam 3 (coupling 0.5), fam 6 (CHX frame 50; separate CHX trunk conv25x2 for longer-range periodicity), fam 5 (minimal inputs: embedding + sense RNA only) on the lall300 leader | configs/r20/* | 11173155, 11173156 | coup05 74.8; chxframe50 74.8; sense-only 74.0; chx_trunk conv25x2 75.8 (CHX frame .69, codon 67.6, nt 62.1); all pass | NO PRIMARY GAIN (streak 3 across fams 1,2,4,3,5,6) -> STOP RULE MET. Separate wide CHX trunk confirmed (11173159, 11173160): 3 seeds primary 75.6+-0.2 (75.8/75.4/75.4) = leader on TIS; CHX nt 61.1 (+2.4), frame .68 (+.04), codon 66.9. Recommended recipe. |

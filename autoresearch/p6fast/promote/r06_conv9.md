@@ -1,6 +1,6 @@
 # Promotion: conv9 trunk + local multinomial on both tracks (weight 100)
 
-Status: meets the promotion rule (2026-10-20 16:30). Superseded candidates may follow (conv9x2, see ledger).
+Status: met the promotion rule (2026-10-20 16:30); superseded by `r20_l300_chx25x2.md`.
 
 ## Config (fast loop; `autoresearch/p6fast/configs/r06/r06_conv9_s1.yaml`, seeds 0/1/2 = r04_lall100_conv9, r06_conv9_s1, r06_conv9_s2)
 ```yaml
