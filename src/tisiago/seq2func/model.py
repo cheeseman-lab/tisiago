@@ -43,6 +43,7 @@ CHX_CONTRAST_WIDTHS = (15, 45, 150)
 CHX_CONTRAST_EPS = 0.01
 DILATIONS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
 ATTN_BLOCK = 1024
+CONV9_KERNEL = 9
 ATTN_HEADS = 4
 ATTN_DIM = 64
 ATTN_LAYERS = 2
@@ -339,11 +340,14 @@ class RnaCondFactTrackHead(TrackHead):
     TIS+/- = :func:`local_softmax` of a softplus rate and logits from ``tis_output`` (Linear(4));
     with ``CHX_CONTRAST`` its input is concat(trunk, downstream/upstream log ratios of the
     head's own, gradient-stopped CHX prediction) through ``tis_hidden`` (Linear(128), relu).
+    The ``conv9`` trunk swaps ``hidden`` for two stacked Conv1D(256, 9) layers, and ``FACT_CHX``
+    makes CHX factorised too (``output`` Linear(4), same blocks and grids as TIS).
     Outputs TIS+, TIS-, CHX+, CHX- (``targets.rnacond_layout``).
     """
 
     ONESIDED = False
     CHX_CONTRAST = False
+    FACT_CHX = False
     TRUNK = "mlp"
 
     def predict(self, embeddings, organism_index, **kwargs):
@@ -358,12 +362,20 @@ class RnaCondFactTrackHead(TrackHead):
             feats.append(onesided_features(rna))
         x = embeddings.get_sequence_embeddings(resolution=1).astype(jnp.float32)
         x = jnp.concatenate([x, *feats], axis=-1)
-        h = jax.nn.relu(hk.Linear(256, name="hidden")(x))
+        if self.TRUNK == "conv9":
+            h = jax.nn.relu(hk.Conv1D(256, CONV9_KERNEL, padding="SAME", name="hidden")(x))
+            h = jax.nn.relu(hk.Conv1D(256, CONV9_KERNEL, padding="SAME", name="hidden2")(h))
+        else:
+            h = jax.nn.relu(hk.Linear(256, name="hidden")(x))
         if self.TRUNK == "dilated":
             h = _dilated_trunk(h)
         elif self.TRUNK == "attention":
             h = _attention_trunk(h)
-        chx = jax.nn.softplus(hk.Linear(2, name="output")(h).astype(jnp.float32))
+        if self.FACT_CHX:
+            c = hk.Linear(4, name="output")(h).astype(jnp.float32)
+            chx = local_softmax(jax.nn.softplus(c[..., :2]), c[..., 2:])
+        else:
+            chx = jax.nn.softplus(hk.Linear(2, name="output")(h).astype(jnp.float32))
         tis_in = h
         if self.CHX_CONTRAST:
             ratios = strand_log_ratios(
@@ -412,6 +424,13 @@ class RnaCondFactChxAttentionTrackHead(RnaCondFactChxTrackHead):
     TRUNK = "attention"
 
 
+class RnaCondFactConvFactChxTrackHead(RnaCondFactOneSidedTrackHead):
+    """Fast-loop recipe: two stacked width-9 convs (256), factorised TIS and CHX, no contrast."""
+
+    TRUNK = "conv9"
+    FACT_CHX = True
+
+
 HEAD_KINDS = {
     "mlp": TrackHead,
     "conv": ConvTrackHead,
@@ -427,6 +446,7 @@ HEAD_KINDS = {
     "rnacond_foa": RnaCondFactAttentionTrackHead,
     "rnacond_focd": RnaCondFactChxDilatedTrackHead,
     "rnacond_foca": RnaCondFactChxAttentionTrackHead,
+    "rnacond_fc2": RnaCondFactConvFactChxTrackHead,
 }
 RNACOND_KINDS = frozenset(k for k in HEAD_KINDS if k == "rnacond" or k.startswith("rnacond_"))
 SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx"} | RNACOND_KINDS)

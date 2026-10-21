@@ -403,6 +403,7 @@ def test_seqconv_registered_and_choices_match():
         "rnacond_foa",
         "rnacond_focd",
         "rnacond_foca",
+        "rnacond_fc2",
     }
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
@@ -1652,6 +1653,71 @@ def test_fact_heads_registered_shapes_and_rna_use(kind):
     assert hidden["w"].shape[0] == 8 + n_feat
 
 
+def _fc2_setup():
+    fn = _fact_forward("rnacond_fc2")
+    rng = np.random.default_rng(5)
+    emb = jnp.asarray(rng.normal(size=(1, 64, 8)), jnp.float32)
+    seq = _rna_sequences(rng, 1, 64)
+    return fn, emb, seq, fn.init(jax.random.PRNGKey(0), emb, seq)
+
+
+def test_fc2_registered_and_conv9_trunk_shapes():
+    from tisiago.seq2func import evaluate, overfit, periodicity
+    from tisiago.seq2func.model import SEQUENCE_WIDTHS
+    from tisiago.seq2func.rna_features import NUM_ONESIDED_FEATURES, NUM_RNA_FEATURES
+
+    assert SEQUENCE_WIDTHS["rnacond_fc2"] == 6 and "rnacond_fc2" in overfit.RNA_KINDS
+    assert "rnacond_fc2" in evaluate.HEAD_CHOICES and "rnacond_fc2" in periodicity.HEAD_CHOICES
+    register_track_head("p6_test_fc2_reg", 4, kind="rnacond_fc2")
+    fn, emb, seq, params = _fc2_setup()
+    n_in = 8 + NUM_RNA_FEATURES + NUM_ONESIDED_FEATURES
+    assert params["r/~predict/hidden"]["w"].shape == (9, n_in, 256)
+    assert params["r/~predict/hidden2"]["w"].shape == (9, 256, 256)
+    assert params["r/~predict/output"]["w"].shape == (256, 4)
+    assert not any("tis_hidden" in k for k in params)
+    pred = np.asarray(fn.apply(params, emb, seq))
+    assert pred.shape == (1, 64, 4) and np.isfinite(pred).all() and (pred >= 0).all()
+    other = np.asarray(fn.apply(params, emb, seq.at[..., 4:].set(0.0)))
+    assert not np.allclose(pred, other)
+
+
+def test_fc2_chx_is_factorised_per_block_and_grads_finite():
+    fn, emb, seq, params = _fc2_setup()
+    pred = np.asarray(fn.apply(params, emb, seq))
+    grads = jax.grad(lambda p: fn.apply(p, emb, seq).sum())(params)
+    for leaf in jax.tree_util.tree_leaves(grads):
+        assert np.isfinite(np.asarray(leaf)).all()
+    assert float(jnp.abs(grads["r/~predict/hidden2"]["w"]).sum()) > 0
+    assert (pred[..., 2:].sum(axis=1) > 0).all()
+
+
+def test_fc2_chx_block_sums_equal_amount():
+    """Re-derive the CHX amount from the head's own trunk and compare with block sums."""
+    from tisiago.seq2func.model import CONV9_KERNEL, LOCAL_BLOCK
+
+    fn, emb, seq, params = _fc2_setup()
+    pred = np.asarray(fn.apply(params, emb, seq))
+    from tisiago.seq2func.rna_features import onesided_features, rna_features
+
+    rna = seq[..., 4:]
+    x = jnp.concatenate([emb, rna_features(rna), onesided_features(rna)], axis=-1)
+
+    def conv(h, name):
+        w, b = params[f"r/~predict/{name}"]["w"], params[f"r/~predict/{name}"]["b"]
+        out = jax.lax.conv_general_dilated(
+            h, w, (1,), "SAME", dimension_numbers=("NWC", "WIO", "NWC")
+        )
+        return jax.nn.relu(out + b)
+
+    assert CONV9_KERNEL == 9
+    h = conv(conv(x, "hidden"), "hidden2")
+    out = h @ params["r/~predict/output"]["w"] + params["r/~predict/output"]["b"]
+    amount = np.asarray(jax.nn.softplus(out[..., :2]).sum(axis=1))
+    # 64-nt window < one block: both grids put the whole window in one block
+    assert 64 <= LOCAL_BLOCK
+    np.testing.assert_allclose(pred[..., 2:].sum(axis=1), amount, rtol=1e-4)
+
+
 def test_fact_chx_contrast_stops_tis_gradient_into_chx_output():
     fn = _fact_forward("rnacond_foc")
     rng = np.random.default_rng(2)
@@ -1697,7 +1763,7 @@ def test_fact_deep_trunks_start_as_the_mlp_trunk(kind, shallow_kind):
     )
 
 
-@pytest.mark.parametrize("kind", FACT_KINDS)
+@pytest.mark.parametrize("kind", (*FACT_KINDS, "rnacond_fc2"))
 def test_fact_jitted_train_step_with_local_loss(kind):
     from tisiago.seq2func.model import install_sequence_forward, make_predict, make_train_step
 
