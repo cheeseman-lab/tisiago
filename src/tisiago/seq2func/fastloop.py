@@ -23,7 +23,8 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
-  optional ``count_power`` block weights n^p and ``target_power`` tempered observed profile),
+  optional ``count_power`` block weights n^p, ``target_power`` tempered observed profile and
+  ``offset`` grid shift),
   ``frame`` (codon-phase KL on CHX), ``poisson_nt`` / ``nb`` (per-nucleotide likelihoods;
   NB with a learned per-library dispersion), ``coupling`` (predicted TIS profile vs the rise of
   the gradient-stopped predicted CHX). ``libraries`` selects ``tis`` / ``chx``.
@@ -664,6 +665,8 @@ def loss_multinomial(pred, target, valid, aux, loss):
 
         count_power = float(loss.get("count_power", 1.0))
         target_power = float(loss.get("target_power", 1.0))
+        offset = int(loss.get("offset", 0))  # block grid starts at crop position ``offset``
+        pred, target, valid = pred[:, offset:], target[:, offset:], valid[:, offset:]
         if count_power != 1.0 or target_power != 1.0:
             return weighted_local_multinomial(
                 pred,

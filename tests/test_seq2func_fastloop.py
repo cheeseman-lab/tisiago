@@ -607,3 +607,17 @@ def test_rna_relative_input_is_relative_to_the_transcript_head(cache):
     assert rel.shape == (1, 128, 4) and np.isfinite(rel).all()
     onset = np.asarray(fastloop.INPUTS["rna_onset"](batch, {}))
     assert onset.shape == (1, 128, 6)
+
+
+def test_local_multinomial_offset_shifts_the_block_grid():
+    rng = np.random.default_rng(6)
+    pred = jnp.asarray(rng.gamma(1.0, size=(2, 70, 2)), jnp.float32)
+    target = jnp.asarray(rng.poisson(0.5, size=(2, 70, 2)), jnp.float32)
+    valid = jnp.ones((2, 70), bool)
+    loss = {"kind": "multinomial", "scope": "local", "block": 16, "libraries": ["tis"]}
+    got = fastloop.loss_multinomial(pred, target, valid, AUX, {**loss, "offset": 8})
+    want = local_multinomial(pred[:, 8:], target[:, 8:], jnp.ones((2, 62, 2), bool), (0,), 16)
+    assert float(got) == pytest.approx(float(want))
+    assert float(fastloop.loss_multinomial(pred, target, valid, AUX, loss)) != pytest.approx(
+        float(got)
+    )
