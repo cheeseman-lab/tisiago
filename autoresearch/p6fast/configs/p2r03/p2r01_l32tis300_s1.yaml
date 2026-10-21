@@ -1,0 +1,23 @@
+name: p2r01_l32tis300_s1
+seed: 1
+train: {steps: 30000}
+inputs: [embedding, rna, rna_onesided]
+model:
+  trunk: {kind: conv, hidden: 256, layers: 2, width: 9}
+  chx_contrast: false
+  chx_trunk: {kind: conv, hidden: 256, layers: 2, width: 25}
+  tis: {kind: factorised, block: 1024, two_grids: true}
+  chx: {kind: factorised, block: 1024, two_grids: true}
+losses:
+- {kind: poisson, scope: sample, weight: 1.0}
+- kind: multinomial
+  scope: local
+  block: 1024
+  libraries: [tis, chx]
+  weight: 300
+- {kind: multinomial, scope: global, weight: 5.0}
+- kind: multinomial
+  scope: local
+  block: 32
+  libraries: [tis]
+  weight: 300

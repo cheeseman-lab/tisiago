@@ -1,6 +1,23 @@
 # P6 fast search ledger
 
-## Final summary
+## Phase 2 (near-cognate start recall; primary2)
+primary2 = mean(K562 TIS nt %, min(100, 100 x K562 near-cognate argmax-at-start / real)). Guards: phase-1
+guards + K562 TIS codon >= 74.4 and nt >= 72.7 (phase-1 leader r20_l300_chx25x2 3-seed 76.4 / 74.7 minus 2).
+Start class = codon at the real Ribo-TISH call (ATG vs any other = nc). GPU: nvidia-A100-20 only.
+Stop: 3 consecutive rounds across >= 3 families without a primary2 gain > 2 (3-seed means), or 2026-10-24 18:00.
+
+### Phase 2 leaderboard
+(pending baseline)
+
+### Phase 2 findings
+
+### Phase 2 rounds
+- 2026-10-21 09:40 | scorer | added per-start-class peak columns (`<cond>_tis_peak_{meta,argmax0}_{atg,nc}[_real]`) and `primary2`, appended after the phase-1 columns (old rows nan); unit-tested; commit 532256b. Phase-2 components (local count_power / target_power, model.tis_context, rna_onset / rna_relative inputs) commit ec94e45. |
+- 2026-10-21 10:45 | P2R00 | baseline | phase-1 leader r20_l300_chx25x2 rescored, 3 seeds | configs/p2r00/* | 11174941 (time limit: seed 0 lost; submit.sh now 15 min/config), seed 0 rerun in 11175048 | s1 primary2 60.4, s2 60.9 (TIS codon 76.2 nt 74.6; K562 nc argmax0 0.145 vs real 0.311 = 47%; ATG argmax0 0.70 vs real 0.66; nc meta 0.058 vs 0.170, ATG meta 0.19 vs 0.33) | The gap is entirely near-cognate: ATG argmax is already at real level. |
+- 2026-10-21 10:45 | P2R01 | fam 7 (sharpening, existing components) | per-nt Poisson on TIS (w10, w100); extra 32-nt local TIS multinomial w300; TIS temperature 0.5 | configs/p2r01/* | 11174942 (temp05 lost to time limit) | pnt10 60.5, pnt100 60.8 (no change); **l32tis300 62.9** (nc argmax0 0.161; FAIL tis_codon 74.2 < 74.4) | Per-nt Poisson does nothing for nc. A fine-scale (32 nt) TIS competition term gives +2.3 primary2 (single seed) at a small TIS codon cost -> R03 block/weight sweep + seeds. |
+- 2026-10-21 11:55 | P2R02 | fam 7 (block weighting/tempering, TIS-only), fam 8 (TIS-only dilated context, RF ~1 kb), fam 9 (rna_onset, rna_relative) | configs/p2r02/* | 11175048 (+ leader s0), 11175056 | leader 3 seeds **60.6+-0.3** (60.5/60.4/60.9; TIS codon 76.4 nt 74.7); split control 61.7; tcp05 62.5; tcp0 60.7 FAIL tis; ttp05 57.2 FAIL tis (TIS nt 65); **tisdil 64.5** (nc argmax0 0.162, TIS codon 79.4 nt 77.0, phase-1 primary 78.2, CHX unchanged); onset 60.9; relative 57.9 (nc 0.132) | Long receptive field on the TIS branch is the first phase-2 lead (+3.9, also +2.8 phase-1 primary) -> R04 seeds + extensions. Block weighting is inside noise of its split control; tempering the target costs shape. RNA 5'-end sharpness / relative coverage add nothing (fam 9 negative). |
+
+## Final summary (phase 1)
 Stopped 2026-10-20 21:40 on the stop rule (b): rounds R18 (fams 1,2), R19 (fam 4) and R20 (fams 3,5,6)
 gave no primary gain > 1.5 over the leader (3-seed means). 20 rounds, 118 configs, 14.2 GPU-hours.
 
