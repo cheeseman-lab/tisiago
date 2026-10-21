@@ -94,3 +94,29 @@ ledger: leader config, 3-seed scores vs references, the components that mattered
 rationale, what failed, and the recommended recipe to scale.
 
 NEVER STOP before the stop rule. NEVER ask for confirmation.
+
+## Phase 2 (started 2026-10-21 ~09:00; supersedes the stop rule above for this phase)
+
+Phase 1 is finished (ledger "Final summary"; recipe r20_l300_chx25x2, primary 75.6). Full fine-tunes confirmed
+it end to end (K562 held out: TIS codon/nt 73-76 / 71-76; CHX 30-nt/codon/nt 78/62/55, frame 70% of replicate;
+start-site Ribo-TISH Jaccard 0.15 -> 0.23, precision 0.27 -> 0.53). The remaining gap is START RECALL, mostly
+NEAR-COGNATE starts: predicted peak share at near-cognate starts 0.06 vs real 0.19; per-site argmax at start
+0.17 vs 0.35 (ATG and annotated starts are already at real-data level).
+
+- New primary (phase 2): `primary2` = mean of K562 TIS nt percent and 100 x K562 near-cognate per-site
+  argmax-at-start divided by the real value (cap 100). First task: add per-start-class peak metrics to the
+  fast-loop scorer as NEW columns only (K562 and each condition: `tis_peak_meta_atg`, `_nc`, `tis_peak_argmax0_atg`,
+  `_nc`, plus real-data references), classifying starts by the codon at the real call (ATG vs other). This is
+  the one allowed scoring change: do not alter any existing column; unit-test it; commit. Rescore the phase-1
+  leader (rerun its 3 seeds) to set the phase-2 baseline.
+- Guards: phase-1 guards plus K562 TIS codon/nt not more than 2 points below the phase-1 leader.
+- GPU: ONLY nvidia-A100-20 (2 GPUs) in this phase; the A6000/L40S lanes run full fine-tunes.
+- Families to explore (new): 7. near-cognate sharpening without codon rules: TIS output temperature,
+  count-weighted vs uniform local multinomial, focal/low-count weighting, per-nt Poisson on TIS at high weight;
+  8. context for alternative starts: longer receptive field on the TIS trunk only (uORFs / 5'UTR context),
+  transcript-level competition from the cap (r15 lead) with seeds; 9. RNA structure inputs: 5'-end precision
+  (coverage onset features), isoform-aware RNA (coverage relative to the transcript's own 5' end);
+  plus re-tests of families 1-6 only where phase 2's metric could change the conclusion.
+- Stop rule (phase 2): deadline 2026-10-24 18:00, or 3 consecutive rounds across >= 3 families without a
+  primary2 gain > 2 (3-seed means). Write a "Phase 2 summary" above the phase-1 summary when stopping, and a
+  promotion file for any config that beats the phase-1 leader on primary2 by >= 5 with guards intact.
