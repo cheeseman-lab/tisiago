@@ -42,6 +42,7 @@ LOCAL_BLOCK = 1024
 CHX_CONTRAST_WIDTHS = (15, 45, 150)
 CHX_CONTRAST_EPS = 0.01
 DILATIONS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512)
+TIS_CONTEXT_DILATIONS = DILATIONS[:-1]
 ATTN_BLOCK = 1024
 CONV9_KERNEL = 9
 ATTN_HEADS = 4
@@ -89,6 +90,9 @@ class TrackHead(CustomHead):
             local_weight=batch.get("local_weight", 0.0),
             local_channels=batch.get("local_channels", ()),
             local_block=batch.get("local_block", LOCAL_BLOCK),
+            local2_weight=batch.get("local2_weight", 0.0),
+            local2_channels=batch.get("local2_channels", ()),
+            local2_block=batch.get("local2_block", 32),
         )
 
 
@@ -274,11 +278,11 @@ def local_softmax(rate, logits, block: int = LOCAL_BLOCK):
     return 0.5 * (first + _block_softmax(rate, logits, block, block // 2))
 
 
-def _dilated_trunk(h):
-    """Residual dilated-conv stack (kernel 3, :data:`DILATIONS`), zero-initialised branches."""
+def _dilated_trunk(h, dilations=DILATIONS, channels: int = 128):
+    """Residual dilated-conv stack (kernel 3, ``dilations``), zero-initialised branches."""
     zeros = hk.initializers.Constant(0.0)
-    for i, rate in enumerate(DILATIONS):
-        y = hk.Conv1D(128, kernel_shape=3, rate=rate, padding="SAME", name=f"dil{i}")(h)
+    for i, rate in enumerate(dilations):
+        y = hk.Conv1D(channels, kernel_shape=3, rate=rate, padding="SAME", name=f"dil{i}")(h)
         y = jax.nn.relu(y)
         h = h + hk.Conv1D(h.shape[-1], 1, w_init=zeros, b_init=zeros, name=f"dil{i}_out")(y)
     return h
@@ -348,6 +352,7 @@ class RnaCondFactTrackHead(TrackHead):
     ONESIDED = False
     CHX_CONTRAST = False
     FACT_CHX = False
+    TIS_CONTEXT = False
     TRUNK = "mlp"
 
     def predict(self, embeddings, organism_index, **kwargs):
@@ -377,6 +382,9 @@ class RnaCondFactTrackHead(TrackHead):
         else:
             chx = jax.nn.softplus(hk.Linear(2, name="output")(h).astype(jnp.float32))
         tis_in = h
+        if self.TIS_CONTEXT:
+            ctx = jax.nn.relu(hk.Linear(256, name="tis_ctx")(h))
+            tis_in = _dilated_trunk(ctx, TIS_CONTEXT_DILATIONS)
         if self.CHX_CONTRAST:
             ratios = strand_log_ratios(
                 jax.lax.stop_gradient(chx), CHX_CONTRAST_WIDTHS, CHX_CONTRAST_EPS
@@ -431,6 +439,12 @@ class RnaCondFactConvFactChxTrackHead(RnaCondFactOneSidedTrackHead):
     FACT_CHX = True
 
 
+class RnaCondFactConvFactChxDilTisTrackHead(RnaCondFactConvFactChxTrackHead):
+    """``rnacond_fc2`` + a TIS-only residual dilated context (1..256, 128 channels) on h."""
+
+    TIS_CONTEXT = True
+
+
 HEAD_KINDS = {
     "mlp": TrackHead,
     "conv": ConvTrackHead,
@@ -447,6 +461,7 @@ HEAD_KINDS = {
     "rnacond_focd": RnaCondFactChxDilatedTrackHead,
     "rnacond_foca": RnaCondFactChxAttentionTrackHead,
     "rnacond_fc2": RnaCondFactConvFactChxTrackHead,
+    "rnacond_fc2d": RnaCondFactConvFactChxDilTisTrackHead,
 }
 RNACOND_KINDS = frozenset(k for k in HEAD_KINDS if k == "rnacond" or k.startswith("rnacond_"))
 SEQUENCE_KINDS = frozenset({"seqconv", "seqconv_tx", "resid_tx", "resid_chx"} | RNACOND_KINDS)
@@ -897,12 +912,16 @@ def make_train_step(
     local_weight: float = 0.0,
     local_channels: tuple[int, ...] = (),
     local_block: int = LOCAL_BLOCK,
+    local2_weight: float = 0.0,
+    local2_channels: tuple[int, ...] = (),
+    local2_block: int = 32,
 ):
     """Jitted AdamW step ``step(params, state, opt_state, batch) -> (params, opt_state, aux)``.
 
     ``heads_only=False`` also trains the backbone; load the model with ``detach_backbone=False``.
     ``frame_weight`` adds the codon-phase term on ``frame_channels``, ``local_weight`` the
-    per-block multinomial on ``local_channels`` (see ``loss.py``).
+    per-block multinomial on ``local_channels``, ``local2_weight`` a second one
+    (see ``loss.py``).
     ``freeze_backbone_steps``, ``mod_learning_rate``: see :func:`make_optimizer`.
     """
     opt = make_optimizer(
@@ -930,6 +949,12 @@ def make_train_step(
             "local_weight": float(local_weight),
             "local_channels": tuple(local_channels),
             "local_block": int(local_block),
+        }
+    if local2_weight:
+        frame |= {
+            "local2_weight": float(local2_weight),
+            "local2_channels": tuple(local2_channels),
+            "local2_block": int(local2_block),
         }
     strand_reindexing = model._metadata[ORGANISM].strand_reindexing
     org_index = dna_model.convert_to_organism_index(ORGANISM)

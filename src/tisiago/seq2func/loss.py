@@ -79,18 +79,25 @@ def poisson_multinomial(
     local_weight: float = 0.0,
     local_channels: Sequence[int] = (),
     local_block: int = 1024,
+    local2_weight: float = 0.0,
+    local2_channels: Sequence[int] = (),
+    local2_block: int = 32,
 ) -> dict:
     """Poisson deviance on window totals plus weighted multinomial KL on the profile.
 
     ``"frame"`` is :func:`codon_phase_multinomial` on ``frame_channels``; it enters ``"loss"`` as
     ``frame_weight * frame`` only when ``frame_weight`` is non-zero. ``"local"`` is
     :func:`local_multinomial` on ``local_channels`` (0 unless ``local_weight``), entering as
-    ``local_weight * local``.
+    ``local_weight * local``; ``"local2"`` is a second, independent local term (own channels and
+    block) entering as ``local2_weight * local2``.
     """
     frame = codon_phase_multinomial(pred, target, mask, frame_channels, frame_block)
     local = jnp.zeros((), jnp.float32)
     if local_weight:
         local = local_multinomial(pred, target, mask, local_channels, local_block)
+    local2 = jnp.zeros((), jnp.float32)
+    if local2_weight:
+        local2 = local_multinomial(pred, target, mask, local2_channels, local2_block)
     pred = jnp.where(mask, pred.astype(jnp.float32), 0.0)
     target = jnp.where(mask, jnp.maximum(target.astype(jnp.float32), 0.0), 0.0)
     total_pred = pred.sum(axis=1)
@@ -110,4 +117,13 @@ def poisson_multinomial(
         loss = loss + frame_weight * frame
     if local_weight:
         loss = loss + local_weight * local
-    return {"loss": loss, "poisson": poisson, "multinomial": kl, "frame": frame, "local": local}
+    if local2_weight:
+        loss = loss + local2_weight * local2
+    return {
+        "loss": loss,
+        "poisson": poisson,
+        "multinomial": kl,
+        "frame": frame,
+        "local": local,
+        "local2": local2,
+    }

@@ -404,6 +404,7 @@ def test_seqconv_registered_and_choices_match():
         "rnacond_focd",
         "rnacond_foca",
         "rnacond_fc2",
+        "rnacond_fc2d",
     }
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
@@ -1821,3 +1822,76 @@ def test_train_step_without_local_weight_matches_previous_loss():
     assert float(aux_a["loss"]) == pytest.approx(
         float(aux_a["poisson"]) + 5.0 * float(aux_a["multinomial"]), rel=1e-6
     )
+
+
+def test_fc2d_context_branch_only_feeds_tis():
+    from tisiago.seq2func import overfit
+
+    assert "rnacond_fc2d" in overfit.RNACOND_FACT_KINDS
+    fn, emb, seq, params = _fc2_setup()
+    fn_d = _fact_forward("rnacond_fc2d")
+    pd = fn_d.init(jax.random.PRNGKey(0), emb, seq)
+    assert set(pd) - set(params) >= {"r/~predict/tis_ctx", "r/~predict/dil8", "r/~predict/dil8_out"}
+    assert "r/~predict/dil9" not in pd and pd["r/~predict/tis_ctx"]["w"].shape == (256, 256)
+    assert pd["r/~predict/dil0"]["w"].shape == (3, 256, 128)
+    assert pd["r/~predict/output"]["w"].shape == (256, 4)
+    assert pd["r/~predict/tis_output"]["w"].shape == (256, 4)
+    pred = np.asarray(fn_d.apply(pd, emb, seq))
+    assert pred.shape == (1, 64, 4) and np.isfinite(pred).all() and (pred >= 0).all()
+    # zero-initialised branches: CHX equals fc2's with identical shared weights
+    shared = {k: v for k, v in pd.items() if k in params}
+    ref = np.asarray(fn.apply({**params, **{k: shared[k] for k in params}}, emb, seq))
+    np.testing.assert_allclose(pred[..., 2:], ref[..., 2:], rtol=1e-5, atol=1e-6)
+
+    def loss(p):
+        return fn_d.apply(p, emb, seq).sum()
+
+    grads = jax.grad(loss)(pd)
+    assert all(bool(jnp.isfinite(g).all()) for g in jax.tree_util.tree_leaves(grads))
+    assert float(jnp.abs(grads["r/~predict/dil8_out"]["w"]).sum()) > 0
+    # the CHX output ignores the context branch: perturbing it leaves CHX unchanged
+    bumped = {
+        **pd,
+        "r/~predict/dil8_out": {
+            **pd["r/~predict/dil8_out"],
+            "w": pd["r/~predict/dil8_out"]["w"] + 0.5,
+        },
+    }
+    out = np.asarray(fn_d.apply(bumped, emb, seq))
+    np.testing.assert_allclose(out[..., 2:], pred[..., 2:], rtol=1e-6)
+    assert not np.allclose(out[..., :2], pred[..., :2])
+
+
+def test_train_step_local2_off_matches_and_on_adds():
+    from tisiago.seq2func.model import install_sequence_forward, make_train_step
+
+    head = "p6_test_fc2d_local2"
+    register_track_head(head, 4, kind="rnacond_fc2d")
+    model = _FakeModel([head], 4, kind="rnacond_fc2d", width=6)
+    install_sequence_forward(model, [head], detach_backbone=False, backbone=_fake_backbone())
+    rng = np.random.default_rng(0)
+    batch = {
+        "sequences": _rna_sequences(rng, 1, 64),
+        "targets": jnp.asarray(rng.poisson(2, (1, 64, 4)).astype(np.float32)),
+        "mask": jnp.ones((1, 64, 4), bool),
+    }
+    kw = dict(
+        learning_rate=1e-2,
+        weight_decay=0.0,
+        heads_only=False,
+        local_weight=3.0,
+        local_channels=(0, 1),
+        local_block=32,
+    )
+    aux = {}
+    for name, extra in (
+        ("base", {}),
+        ("off", dict(local2_weight=0.0, local2_channels=(0,), local2_block=8)),
+        ("on", dict(local2_weight=4.0, local2_channels=(0, 1), local2_block=16)),
+    ):
+        step, opt = make_train_step(model, head, **kw, **extra)
+        aux[name] = step(model._params, model._state, opt, batch)[2]
+    assert float(aux["base"]["loss"]) == float(aux["off"]["loss"])
+    assert float(aux["base"]["local2"]) == 0.0 and float(aux["on"]["local2"]) > 0
+    expected = float(aux["base"]["loss"]) + 4.0 * float(aux["on"]["local2"])
+    assert float(aux["on"]["loss"]) == pytest.approx(expected, rel=1e-5)

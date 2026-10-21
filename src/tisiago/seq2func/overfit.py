@@ -34,6 +34,7 @@ RNACOND_FACT_KINDS = (
     "rnacond_focd",
     "rnacond_foca",
     "rnacond_fc2",
+    "rnacond_fc2d",
 )
 HEAD_CHOICES = (
     "mlp",

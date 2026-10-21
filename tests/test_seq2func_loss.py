@@ -198,3 +198,35 @@ def test_poisson_multinomial_local_term_enters_only_with_weight():
         lambda p: poisson_multinomial(p, y, mask, local_weight=3.0, local_channels=(0,))["loss"]
     )(pred)
     assert bool(jnp.isfinite(grad).all())
+
+
+def test_local2_off_is_bit_identical_and_block32_hand_example():
+    y, mask = _arrays()
+    pred = jnp.ones_like(y) * 1.5
+    base = poisson_multinomial(pred, y, mask, local_weight=2.0, local_channels=(0,))
+    off = poisson_multinomial(
+        pred, y, mask, local_weight=2.0, local_channels=(0,), local2_channels=(1,)
+    )
+    assert float(base["loss"]) == float(off["loss"]) and float(off["local2"]) == 0.0
+    on = poisson_multinomial(
+        pred,
+        y,
+        mask,
+        local_weight=2.0,
+        local_channels=(0,),
+        local2_weight=7.0,
+        local2_channels=(1,),
+        local2_block=8,
+    )
+    from tisiago.seq2func.loss import local_multinomial
+
+    ref = float(local_multinomial(pred, y, mask, (1,), 8))
+    assert float(on["local2"]) == pytest.approx(ref)
+    assert float(on["loss"]) == pytest.approx(float(base["loss"]) + 7.0 * ref, rel=1e-5)
+    # one 32-position block, uniform prediction, all counts at one position: KL = log 32
+    t = jnp.zeros((1, 32, 1)).at[0, 5, 0].set(4.0)
+    m = jnp.ones((1, 32, 1), bool)
+    got = poisson_multinomial(
+        jnp.ones((1, 32, 1)), t, m, local2_weight=1.0, local2_channels=(0,), local2_block=32
+    )["local2"]
+    assert float(got) == pytest.approx(np.log(32.0), rel=1e-5)

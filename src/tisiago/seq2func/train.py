@@ -54,7 +54,7 @@ from tisiago.seq2func.samples import CELL_LINE_GROUPS, CONDITIONS, LIBRARIES
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
 SELECTION_KEY = "val_profile_kl"
-LOSS_COMPONENTS = ("poisson", "multinomial", "frame", "local")
+LOSS_COMPONENTS = ("poisson", "multinomial", "frame", "local", "local2")
 RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
@@ -513,6 +513,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma list of libraries the local multinomial applies to (default: tis)",
     )
     ap.add_argument(
+        "--local2-weight",
+        type=float,
+        default=0.0,
+        help="weight of a second per-block multinomial loss (0 = off)",
+    )
+    ap.add_argument("--local2-block", type=int, default=32, help="positions per second-local block")
+    ap.add_argument(
+        "--local2-libraries",
+        default="tis",
+        help="comma list of libraries the second local multinomial applies to (default: tis)",
+    )
+    ap.add_argument(
         "--heads-only",
         dest="train_backbone",
         action="store_false",
@@ -578,11 +590,18 @@ def main() -> None:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     if args.local_weight < 0 or args.local_block < 1:
         ap.error("--local-weight must be >= 0 and --local-block >= 1")
+    if args.local2_weight < 0 or args.local2_block < 1:
+        ap.error("--local2-weight must be >= 0 and --local2-block >= 1")
     try:
         local_libraries = tuple(name.strip() for name in args.local_libraries.split(","))
         local_channels_of(args.arm, local_libraries)
     except ValueError as exc:
         ap.error(f"--local-libraries: {exc}")
+    try:
+        local2_libraries = tuple(name.strip() for name in args.local2_libraries.split(","))
+        local_channels_of(args.arm, local2_libraries)
+    except ValueError as exc:
+        ap.error(f"--local2-libraries: {exc}")
     if not 0 <= args.freeze_backbone_steps < args.steps:
         ap.error("--freeze-backbone-steps must be in [0, --steps)")
     if args.freeze_backbone_steps and not args.train_backbone:
@@ -628,6 +647,7 @@ def main() -> None:
     channels = {k: fields[k] for k in ("mod_channels", "mod_scales") if k in fields}
     frame_channels = tuple(fields["frame_channels"])
     local_channels = local_channels_of(args.arm, local_libraries) if args.local_weight else ()
+    local2_channels = local_channels_of(args.arm, local2_libraries) if args.local2_weight else ()
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),
@@ -639,6 +659,7 @@ def main() -> None:
         "val_examples": len(val_windows) * (len(conditions) if rnacond else 1),
         **({"val_window_indices": val_index} if rnacond else {}),
         **({"local_channels": list(local_channels)} if args.local_weight else {}),
+        **({"local2_channels": list(local2_channels)} if args.local2_weight else {}),
         "jax_devices": [str(d) for d in jax.devices()],
     }
     if init is not None:
@@ -680,6 +701,9 @@ def main() -> None:
         local_weight=args.local_weight,
         local_channels=local_channels,
         local_block=args.local_block,
+        local2_weight=args.local2_weight,
+        local2_channels=local2_channels,
+        local2_block=args.local2_block,
     )
     params, state = model._params, model._state
     predict = make_predict(model, head)

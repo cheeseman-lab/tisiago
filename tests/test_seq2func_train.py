@@ -674,3 +674,9 @@ def test_local_loss_flags_and_channels():
     assert args.local_libraries == "tis"
     with pytest.raises(ValueError):
         local_channels_of("rnacond:K562", ("rna",))
+    assert args.local2_weight == 0.0 and args.local2_block == 32
+    assert args.local2_libraries == "tis"
+    args = build_parser().parse_args(
+        ["--arm", "rnacond:K562", "--head", "rnacond_fc2d", "--local2-weight", "300"]
+    )
+    assert args.local2_weight == 300.0 and args.head == "rnacond_fc2d"
