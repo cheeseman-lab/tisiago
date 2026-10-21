@@ -1,7 +1,6 @@
 # Promotion (phase 2): TIS-only dilated context + 32-nt local TIS competition on the phase-1 recipe
 
-Status: phase-2 leader as of 2026-10-21 14:30 (phase 2 still running; this file is updated if the leader
-changes). Beats the phase-1 leader on primary2 by +9.8 (3-seed means, threshold 5), guards intact.
+Status: final phase-2 recommendation (stop rule met 2026-10-21 18:25; see ledger "Phase 2 summary"). Beats the phase-1 leader on primary2 by +9.8 (3-seed means, threshold 5), guards intact.
 
 ## Config (`autoresearch/p6fast/configs/p2r04/p2r04_tisdil_l32.yaml`, `configs/p2r06/p2r04_tisdil_l32_s{1,2}.yaml`)
 ```yaml

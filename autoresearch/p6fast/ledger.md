@@ -11,6 +11,12 @@ Stop: 3 consecutive rounds across >= 3 families without a primary2 gain > 2 (3-s
 | name | primary2 | primary | TIS codon / nt | CHX bin30 / codon / nt | nc argmax0 | seeds |
 |---|---|---|---|---|---|---|
 | p2r04_tisdil_l32 (leader) | 70.4+-1.3 | 81.2 | 81.8 / 80.5 | 82.1 / 67.2 / 61.8 | 0.188 | 3 |
+| p2r11_60k | 70.8 | 81.7 | 81.8 / 81.5 | 82.6 / 68.3 / 63.7 | 0.187 | 1 |
+| p2r08_dil512_l32 | 70.2 | 81.2 | 81.8 / 80.6 | 82.2 / 67.6 / 62.5 | 0.186 | 1 |
+| p2r09_l32cp05 | 70.2 | 82.2 | 82.5 / 81.9 | 82.1 / 67.0 / 61.8 | 0.182 | 1 |
+| p2r10_lall1000 | 69.5 | 82.0 | 82.7 / 81.3 | 82.7 / 67.4 / 62.8 | 0.180 | 1 |
+| p2r06_tisdil_l32w1000 | 69.1 | 80.6 | 81.0 / 80.2 | 82.3 / 67.9 / 61.6 | 0.181 | 1 |
+| p2r10_cropstart | 69.1 | 82.9 | 83.7 / 82.2 | 82.9 / 67.9 / 63.3 | 0.174 | 1 |
 | p2r07_dil1024_l32 | 68.9 | 80.8 | 81.1 / 80.4 | 82.6 / 67.9 / 62.2 | 0.179 | 1 |
 | p2r07_dil32_l32 | 67.7 | 81.4 | 81.8 / 81.0 | 82.0 / 67.9 / 61.7 | 0.169 | 1 |
 | p2r06_tisdil_l16 | 67.6 | 80.6 | 81.4 / 79.8 | 81.5 / 66.7 / 60.5 | 0.172 | 1 |
@@ -25,6 +31,9 @@ Stop: 3 consecutive rounds across >= 3 families without a primary2 gain > 2 (3-s
 ### Phase 2 findings
 - Fam 8 (context for alternative starts): a residual dilated stack on the TIS branch only (RF ~1 kb) lifts near-cognate start recall (nc argmax0 0.145 -> 0.171) and TIS nt (+2.4); plain wide conv or block attention help less. Bio: whether a weak codon initiates depends on its 5'UTR / uORF neighbourhood over hundreds of nt.
 - Fam 7 (sharpening): a 32-nt local TIS multinomial on top of the context trunk adds +4.3 (nc 0.188); 16 nt is worse; per-nt Poisson, block-weight powers, temperature and target tempering do not help. Bio: alternative starts compete within a few codons, so competition at codon scale puts the peak on the exact initiating codon.
+- Fam 2 (scanning): a hazard (5'->3' survival) TIS output on the leader is worse (66.9); 5'-end crops tie on primary2 but give the best TIS shape. Block normalisation already captures scanning competition.
+- Fam 3 (coupling): feeding the predicted CHX contrast to the TIS output hurts near-cognate recall (0.149): predicted elongation rises are too smooth to mark weak starts.
+- Fam 1 (competition scale): 1 kb weight 1000, extra 128-nt block, a shifted second 32-nt grid: no gain; the 1 kb + 32 nt pair is sufficient.
 - Fam 9 (RNA structure inputs): RNA 5'-end sharpness and coverage relative to the transcript's own 5' end add nothing (relative coverage hurts nc).
 
 ### Phase 2 rounds
@@ -39,6 +48,53 @@ Stop: 3 consecutive rounds across >= 3 families without a primary2 gain > 2 (3-s
 - 2026-10-21 15:50 | P2R08 | fam 8 + fam 7 on the leader (tisdil_l32, 70.4+-1.3) | dilations to 512; + 128-nt TIS block; context channels 256; 32-nt weight 1000 (R06 rerun); cap-anchored TIS + l32 | configs/p2r08/*, p2r06 w1000 | 11176983 (time limit: txtis_l32 lost; submit.sh now 28 min/config), 11177009 | dil512 70.2; l32+l128 68.8; ch256 68.3; l32 w1000 69.1; all pass | NO GAIN > 2 (streak 1: fams 7, 8). Range, width and weight of the codon-scale term are saturated. |
 - 2026-10-21 16:05 | P2R09 | fam 2 (scanning hazard output on the leader) + fam 7 (32-nt term with n^0.5 block weights) | configs/p2r09/* | 11177009 | hazard_l32 66.9 (nc 0.172); l32cp05 70.2 (TIS nt 81.9); all pass | NO GAIN > 2 (streak 2: fams 2, 7, 8). Explicit 5'->3' scanning still does not beat block normalisation, even for alternative starts. |
 - 2026-10-21 16:55 | P2R10 | fam 3 (CHX-contrast input to the TIS output on the leader), fam 2/8 (5'-end crops), fam 1 (1 kb local weight 1000 on both) | configs/p2r10/* | 11177946 | contrast 61.2 (nc 0.149: hurts); cropstart 69.1 (TIS codon 83.7 nt 82.2, best phase-1 primary 82.9, nc 0.174); lall1000 69.5; all pass | NO GAIN > 2 (streak 3: fams 1, 2, 3, 7, 8) -> stop rule (b) met. R11 (submitted in parallel, fams 7, 9 + 60k steps) counted before the summary. |
+- 2026-10-21 18:25 | P2R11 | fam 7 (second 32-nt grid offset 16), fam 9 (rna_onset on the leader), optimisation (60k steps) | configs/p2r11/* | 11177987 | 60k 70.8 (= leader); l32x2grid 67.7; onset 69.1; all pass | NO GAIN > 2 -> STOP (phase-2 summary written). |
+
+## Phase 2 summary
+Stopped 2026-10-21 18:25 on the phase-2 stop rule: rounds P2R08 (fams 7, 8), P2R09 (fams 2, 7) and P2R10
+(fams 1, 2, 3) gave no primary2 gain > 2 over the leader; P2R11 (fam 7, fam 9, 60k steps), run in parallel,
+confirmed it. 12 rounds, 38 scored configs, ~12 GPU-hours (nvidia-A100-20 only; 5 configs lost to time limits).
+
+**Leader:** `p2r04_tisdil_l32` (+ `_s1/_s2`), primary2 **70.4 +- 1.3** vs the phase-1 leader **60.6 +- 0.3**
+(+9.8) -> `promote/p2_tisdil_l32.md`.
+```yaml
+# phase-1 recipe r20_l300_chx25x2 plus:
+model:
+  tis_context: {kind: dilated, hidden: 256, channels: 128, dilations: [1, 2, 4, 8, 16, 32, 64, 128, 256]}
+losses:   # appended
+  - {kind: multinomial, scope: local, block: 32, libraries: [tis], weight: 300}
+```
+
+K562 held out, val chr7, 3-seed means (peak values as fractions; real in brackets):
+| | primary2 | primary | TIS codon | TIS nt | TIS bin30 | CHX bin30 / codon / nt / frame | nc argmax0 [.311] | nc meta [.170] | ATG argmax0 [.655] | ATG meta [.331] |
+|---|---|---|---|---|---|---|---|---|---|---|
+| leader tisdil_l32 | **70.4+-1.3** | 81.2 | 81.8 | 80.5 | 90.0 | 82.1 / 67.2 / 61.8 / .68 | 0.188 | 0.075 | 0.64 | 0.20 |
+| tisdil (context only) | 66.1+-1.5 | 78.4 | 79.8 | 77.1 | | 82.0 / 67.4 / 62.1 / .69 | 0.171 | 0.068 | 0.68 | 0.19 |
+| phase-1 leader | 60.6+-0.3 | 75.4 | 76.4 | 74.7 | 86.5 | 82.2 / 66.5 / 60.6 / .68 | 0.145 | 0.058 | 0.70 | 0.19 |
+All guards pass (CHX unchanged; TIS codon/nt +5.4/+5.8 over the phase-1 leader). Near-cognate argmax at the
+start 47% -> 60% of real; near-cognate meta share 0.058 -> 0.075 (real 0.170) is still the largest gap.
+ATG argmax dips 0.70 -> 0.64 (real 0.66).
+
+**Components that mattered:**
+1. TIS-only residual dilated context, RF ~1 kb (+5.5, 3 seeds). Bio: whether a weak near-cognate codon
+   initiates depends on its 5'UTR / uORF neighbourhood over hundreds of nt (distance from the cap, the next
+   ATG, leaky scanning), which a 17-nt conv cannot see; elongation keeps its own trunk.
+2. 32-nt local TIS multinomial on top (+4.3, 3 seeds). Bio: alternative starts lie within a few codons of each
+   other or of the main start, so competition at codon scale puts the peak on the exact initiating codon.
+3. Dissection (single seeds): range matters once the codon term is on (RF ~30 nt 65.6, ~130 nt 67.7, ~1 kb 70.4,
+   ~2-4 kb 69-70); an undilated residual stack 64.4; wide plain conv 62.1; block attention 63.8; 16-nt block 67.6.
+
+**What failed:** per-nt Poisson on TIS; TIS temperature; uniform / n^0.5 block weights (within noise);
+tempered (sqrt) targets (cost TIS shape); RNA 5'-end sharpness and transcript-relative RNA inputs (relative
+hurts); scanning hazard output (66.9); CHX contrast into TIS (61.2, hurts nc); 5'-end crops (69.1, but best TIS
+codon/nt 83.7/82.2); 1 kb weight 1000; extra 128-nt block; second shifted 32-nt grid; wider context channels;
+dilation to 512/1024; 60k steps (70.8 = 30k). Cap-anchored TIS competition + context was never scored (lost
+twice to time limits).
+
+**Recommended recipe to scale:** promote `promote/p2_tisdil_l32.md` to the slow tier: new head kind =
+`rnacond_fc2` + TIS-only `_dilated_trunk` (dilations to 256) + the fast loop's CHX conv25x2 trunk, and a second
+local multinomial term (`block 32, libraries tis, weight 300`; also 100). Near-cognate peak *sharpness* (meta
+share 44% of real) remains the open problem; as in phase 1, it may need the backbone to learn under the loss.
 
 ## Final summary (phase 1)
 Stopped 2026-10-20 21:40 on the stop rule (b): rounds R18 (fams 1,2), R19 (fam 4) and R20 (fams 3,5,6)
