@@ -7,15 +7,35 @@ Start class = codon at the real Ribo-TISH call (ATG vs any other = nc). GPU: nvi
 Stop: 3 consecutive rounds across >= 3 families without a primary2 gain > 2 (3-seed means), or 2026-10-24 18:00.
 
 ### Phase 2 leaderboard
-(pending baseline)
+(guard-passing; K562 held out; seeds = n; real nc argmax0 0.311)
+| name | primary2 | primary | TIS codon / nt | CHX bin30 / codon / nt | nc argmax0 | seeds |
+|---|---|---|---|---|---|---|
+| p2r04_tisdil_l32 (leader) | 70.4+-1.3 | 81.2 | 81.8 / 80.5 | 82.1 / 67.2 / 61.8 | 0.188 | 3 |
+| p2r07_dil1024_l32 | 68.9 | 80.8 | 81.1 / 80.4 | 82.6 / 67.9 / 62.2 | 0.179 | 1 |
+| p2r07_dil32_l32 | 67.7 | 81.4 | 81.8 / 81.0 | 82.0 / 67.9 / 61.7 | 0.169 | 1 |
+| p2r06_tisdil_l16 | 67.6 | 80.6 | 81.4 / 79.8 | 81.5 / 66.7 / 60.5 | 0.172 | 1 |
+| p2r02_tisdil | 66.1+-1.5 | 78.4 | 79.8 / 77.1 | 82.0 / 67.4 / 62.1 | 0.171 | 3 |
+| p2r07_dil8_l32 | 65.6 | 78.0 | 78.6 / 77.4 | 82.0 / 66.8 / 61.8 | 0.167 | 1 |
+| p2r05_tisdil32 | 65.5 | 79.2 | 80.5 / 77.9 | 81.8 / 66.8 / 61.2 | 0.165 | 1 |
+| p2r07_dil1x9_l32 | 64.4 | 77.1 | 78.1 / 76.2 | 82.1 / 67.1 / 61.9 | 0.164 | 1 |
+| p2r05_tisattn | 63.8 | 74.8 | 75.8 / 73.8 | 81.2 / 67.2 / 60.9 | 0.167 | 1 |
+| p2r02_tcp05 | 62.5 | 75.3 | 75.5 / 75.0 | 81.8 / 67.3 / 62.1 | 0.155 | 1 |
+| phase-1 leader r20_l300_chx25x2 (baseline) | 60.6+-0.3 | 75.4 | 76.4 / 74.7 | 82.2 / 66.5 / 60.6 | 0.145 | 3 |
 
 ### Phase 2 findings
+- Fam 8 (context for alternative starts): a residual dilated stack on the TIS branch only (RF ~1 kb) lifts near-cognate start recall (nc argmax0 0.145 -> 0.171) and TIS nt (+2.4); plain wide conv or block attention help less. Bio: whether a weak codon initiates depends on its 5'UTR / uORF neighbourhood over hundreds of nt.
+- Fam 7 (sharpening): a 32-nt local TIS multinomial on top of the context trunk adds +4.3 (nc 0.188); 16 nt is worse; per-nt Poisson, block-weight powers, temperature and target tempering do not help. Bio: alternative starts compete within a few codons, so competition at codon scale puts the peak on the exact initiating codon.
+- Fam 9 (RNA structure inputs): RNA 5'-end sharpness and coverage relative to the transcript's own 5' end add nothing (relative coverage hurts nc).
 
 ### Phase 2 rounds
 - 2026-10-21 09:40 | scorer | added per-start-class peak columns (`<cond>_tis_peak_{meta,argmax0}_{atg,nc}[_real]`) and `primary2`, appended after the phase-1 columns (old rows nan); unit-tested; commit 532256b. Phase-2 components (local count_power / target_power, model.tis_context, rna_onset / rna_relative inputs) commit ec94e45. |
 - 2026-10-21 10:45 | P2R00 | baseline | phase-1 leader r20_l300_chx25x2 rescored, 3 seeds | configs/p2r00/* | 11174941 (time limit: seed 0 lost; submit.sh now 15 min/config), seed 0 rerun in 11175048 | s1 primary2 60.4, s2 60.9 (TIS codon 76.2 nt 74.6; K562 nc argmax0 0.145 vs real 0.311 = 47%; ATG argmax0 0.70 vs real 0.66; nc meta 0.058 vs 0.170, ATG meta 0.19 vs 0.33) | The gap is entirely near-cognate: ATG argmax is already at real level. |
 - 2026-10-21 10:45 | P2R01 | fam 7 (sharpening, existing components) | per-nt Poisson on TIS (w10, w100); extra 32-nt local TIS multinomial w300; TIS temperature 0.5 | configs/p2r01/* | 11174942 (temp05 lost to time limit) | pnt10 60.5, pnt100 60.8 (no change); **l32tis300 62.9** (nc argmax0 0.161; FAIL tis_codon 74.2 < 74.4) | Per-nt Poisson does nothing for nc. A fine-scale (32 nt) TIS competition term gives +2.3 primary2 (single seed) at a small TIS codon cost -> R03 block/weight sweep + seeds. |
 - 2026-10-21 11:55 | P2R02 | fam 7 (block weighting/tempering, TIS-only), fam 8 (TIS-only dilated context, RF ~1 kb), fam 9 (rna_onset, rna_relative) | configs/p2r02/* | 11175048 (+ leader s0), 11175056 | leader 3 seeds **60.6+-0.3** (60.5/60.4/60.9; TIS codon 76.4 nt 74.7); split control 61.7; tcp05 62.5; tcp0 60.7 FAIL tis; ttp05 57.2 FAIL tis (TIS nt 65); **tisdil 64.5** (nc argmax0 0.162, TIS codon 79.4 nt 77.0, phase-1 primary 78.2, CHX unchanged); onset 60.9; relative 57.9 (nc 0.132) | Long receptive field on the TIS branch is the first phase-2 lead (+3.9, also +2.8 phase-1 primary) -> R04 seeds + extensions. Block weighting is inside noise of its split control; tempering the target costs shape. RNA 5'-end sharpness / relative coverage add nothing (fam 9 negative). |
+- 2026-10-21 12:50 | P2R04 | fam 8 seeds + fam 7 on top | tisdil seeds 1-2; tisdil + 32-nt local TIS w300; tisdil to dilation 1024 | configs/p2r04/* | 11175077 (time limit: dil1024 lost) | **tisdil 3 seeds 66.1+-1.5** (64.5/66.2/67.6; TIS codon 79.8 nt 77.1; nc argmax0 0.171; CHX bin30 82.0 codon 67.4 nt 62.1); **tisdil_l32 70.0** (nc 0.187, TIS codon 82.0 nt 80.0) | GAIN +5.5 over the 60.6 baseline (3-seed) -> phase-2 leader tisdil; streak reset. The fine 32-nt TIS term adds on top (R01 lead, now without the codon cost) -> R06 seeds. (R03 l32 sweep on the old base superseded by R06 on the tisdil base.) |
+- 2026-10-21 12:50 | P2R05 | fam 8 (which context: attention 1 kb blocks, conv25x2, dilated to 32 = RF ~130) + fam 8 txtis | configs/p2r05/* | 11175199 (time limit: txtis lost) | tisattn 63.8; tisconv25x2 62.1; **tisdil32 65.5** (= tisdil within noise) | A residual dilated stack on the TIS branch is what helps; ~130 nt of context (start + uORF/Kozak neighbourhood) already gives it, 1 kb adds nothing more. Plain wide conv and attention help less. -> R07 dissects range vs residual depth. |
+- 2026-10-21 14:30 | P2R06 | fam 7 on the tisdil base (fine-scale TIS competition) | tisdil_l32 seeds 1-2; 16-nt block; 32-nt w1000 | configs/p2r06/* | 11175650 (w1000 still running) | **tisdil_l32 3 seeds 70.4+-1.3** (70.0/69.4/71.9; TIS codon 81.8 nt 80.5; nc argmax0 0.188 = 60% of real; ATG 0.64; CHX unchanged); l16 67.6 | GAIN +4.3 over tisdil (66.1) -> new phase-2 leader, +9.8 over the phase-1 leader -> promote/p2_tisdil_l32.md. Codon-scale (32 nt) competition beats 16 nt. |
+- 2026-10-21 14:30 | P2R07 | fam 8 (range vs residual depth, all + l32) | dilations to 8 (RF ~30) / 32 (~130) / 1024 (~4 kb); 9 undilated residual layers (RF ~19) | configs/p2r07/* | 11176039 | dil8 65.6; dil32 67.7; dil1024 68.9; dil1x9 64.4 (leader dil256 70.4) | Range matters once the codon-scale term is on: ~0.5-1 kb best, 4 kb no better. Residual depth without range gives little. |
 
 ## Final summary (phase 1)
 Stopped 2026-10-20 21:40 on the stop rule (b): rounds R18 (fams 1,2), R19 (fam 4) and R20 (fams 3,5,6)
