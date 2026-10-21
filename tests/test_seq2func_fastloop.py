@@ -312,6 +312,8 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
         {"model": {"strand_heads": False, "trunk": {"layers": 2, "hidden": 16}}},
         {"model": {"split_trunk": True, "chx_contrast": True}},
         {"model": {"chx_trunk": {"kind": "conv", "width": 7, "hidden": 8}}},
+        {"model": {"tis_context": {"kind": "dilated", "dilations": [1, 4], "channels": 8}}},
+        {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
     ],
 )
 def test_every_component_gives_finite_gradients_for_every_loss(cache, override):
@@ -322,6 +324,8 @@ def test_every_component_gives_finite_gradients_for_every_loss(cache, override):
         {"kind": "multinomial", "scope": "global"},
         {"kind": "multinomial", "scope": "sample"},
         {"kind": "multinomial", "scope": "local", "block": 32},
+        {"kind": "multinomial", "scope": "local", "block": 32, "count_power": 0.0},
+        {"kind": "multinomial", "scope": "local", "block": 32, "target_power": 0.5},
         {"kind": "frame", "block": 2},
         {"kind": "poisson_nt"},
         {"kind": "nb"},
@@ -565,3 +569,41 @@ def test_class_peaks_rows_keep_phase1_columns_and_primary2(cache):
     assert fastloop.primary2(fake, "K562") == pytest.approx((60.0 + 25.0) / 2)
     fake["K562_tis_peak_argmax0_nc"] = 0.8
     assert fastloop.primary2(fake, "K562") == pytest.approx((60.0 + 100.0) / 2)
+
+
+def test_weighted_local_multinomial_reduces_to_counts_weighted_and_weights_blocks():
+    rng = np.random.default_rng(5)
+    pred = jnp.asarray(rng.gamma(1.0, size=(2, 64, 2)), jnp.float32)
+    target = jnp.asarray(rng.poisson(0.5, size=(2, 64, 2)), jnp.float32)
+    mask = jnp.ones((2, 64, 2), bool)
+    same = fastloop.weighted_local_multinomial(pred, target, mask, (0, 1), 16)
+    assert float(same) == pytest.approx(float(local_multinomial(pred, target, mask, (0, 1), 16)))
+    # blocks with counts 1 (point mass) and 9 (over 3 of 4), predicted uniform
+    t = np.zeros((1, 8, 1), np.float32)
+    t[0, 0, 0], t[0, 4:7, 0] = 1.0, 3.0
+    pr = jnp.ones((1, 8, 1), jnp.float32)
+    m = jnp.ones((1, 8, 1), bool)
+    kl = np.array([math.log(4.0), math.log(4.0 / 3.0)])
+    uni = fastloop.weighted_local_multinomial(pr, jnp.asarray(t), m, (0,), 4, count_power=0.0)
+    assert float(uni) == pytest.approx(kl.mean())
+    half = fastloop.weighted_local_multinomial(pr, jnp.asarray(t), m, (0,), 4, count_power=0.5)
+    assert float(half) == pytest.approx((kl * [1.0, 3.0]).sum() / 4.0)
+    # tempering a point mass changes nothing; tempering 1:3 to sqrt flattens it
+    t2 = np.zeros((1, 4, 1), np.float32)
+    t2[0, :2, 0] = [1.0, 3.0]
+    flat = fastloop.weighted_local_multinomial(
+        jnp.asarray(np.sqrt(t2)), jnp.asarray(t2), m[:, :4], (0,), 4, target_power=0.5
+    )
+    assert float(flat) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_rna_relative_input_is_relative_to_the_transcript_head(cache):
+    rows = cache.index.set_index("transcript_id", drop=False)
+    ex = fastloop.crop_example(cache, rows.loc["A"], "U2OS", 250, 128)
+    tx = cache.array("train_chr1", "rna")[2, 0:300, 0]
+    np.testing.assert_allclose(ex["rna_tx"], [tx[:129].mean(), tx.mean()], rtol=1e-6)
+    batch = fastloop._device_batch(fastloop.stack_examples([ex], [rows.loc["A"]]))
+    rel = np.asarray(fastloop.INPUTS["rna_relative"](batch, {}))
+    assert rel.shape == (1, 128, 4) and np.isfinite(rel).all()
+    onset = np.asarray(fastloop.INPUTS["rna_onset"](batch, {}))
+    assert onset.shape == (1, 128, 6)

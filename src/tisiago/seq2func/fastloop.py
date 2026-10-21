@@ -8,7 +8,8 @@ Usage::
 A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered components:
 
 - ``inputs``: names from :data:`INPUTS` (``embedding``, ``embedding_white``, ``rna``,
-  ``rna_sense``, ``rna_onesided``, ``position``), concatenated per position.
+  ``rna_sense``, ``rna_onesided``, ``rna_onset``, ``rna_relative``, ``position``),
+  concatenated per position.
 - ``model.trunk``: :data:`TRUNKS` (``mlp``, ``conv``, ``dilated``, ``attention``).
 - ``model.tis`` / ``model.chx``: output parameterisations from :data:`OUTPUTS`: ``softplus``
   rate; ``factorised`` amount x softmax within blocks (``block`` int, two grids averaged, or
@@ -16,11 +17,13 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   times the crop's summed amount. ``model.strand_heads`` gives each genomic strand its own
   output layer (the genomic head predicts both strands from one embedding); ``model.
   split_trunk`` gives CHX its own trunk (TIS keeps the first; ``model.chx_trunk`` sets
-  its config); ``model.chx_contrast`` feeds log ratios of the gradient-stopped CHX
-  prediction to the TIS output.
+  its config); ``model.tis_context`` stacks a trunk on the shared one for TIS only (e.g. a
+  dilated stack for 5'UTR-scale context); ``model.chx_contrast`` feeds log ratios of the
+  gradient-stopped CHX prediction to the TIS output.
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
-  condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``),
+  condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
+  optional ``count_power`` block weights n^p and ``target_power`` tempered observed profile),
   ``frame`` (codon-phase KL on CHX), ``poisson_nt`` / ``nb`` (per-nucleotide likelihoods;
   NB with a learned per-library dispersion), ``coupling`` (predicted TIS profile vs the rise of
   the gradient-stopped predicted CHX). ``libraries`` selects ``tis`` / ``chx``.
@@ -75,6 +78,7 @@ FLANK = 30
 EPS = 1e-7
 PRIMARY_SCALES = ("codon", "nt")
 START_CLASSES = ("atg", "nc")
+RNA_HEAD = 129
 DEFAULTS: dict = {
     "name": None,
     "seed": 0,
@@ -148,7 +152,7 @@ def resolve_config(raw: Mapping) -> dict:
     for name in config["inputs"]:
         if name not in INPUTS:
             raise ValueError(f"unknown input {name!r}; choose from {sorted(INPUTS)}")
-    for key in ("trunk", "chx_trunk"):
+    for key in ("trunk", "chx_trunk", "tis_context"):
         kind = (config["model"].get(key) or {"kind": "mlp"})["kind"]
         if kind not in TRUNKS:
             raise ValueError(f"unknown {key} {kind!r}")
@@ -196,6 +200,10 @@ def crop_example(
         "valid": np.zeros(crop, bool),
         "pos": np.zeros(crop, np.int32),
     }
+    tx = cache.array(row.shard, "rna")[k, int(row.offset) : int(row.offset) + int(row.length), 0]
+    out["rna_tx"] = np.array(
+        [tx[:RNA_HEAD].mean() if len(tx) else 0.0, tx.mean() if len(tx) else 0.0], np.float32
+    )
     out["emb"][:n] = cache.array(row.shard, "emb")[lo : lo + n]
     out["rna"][:n] = cache.array(row.shard, "rna")[k, lo : lo + n]
     out["target"][:n, 0] = cache.array(row.shard, "tis")[k, lo : lo + n, 2]
@@ -358,6 +366,32 @@ def _input_rna_onesided(batch, ctx):
     from tisiago.seq2func.rna_features import onesided_features
 
     return onesided_features(batch["rna"])
+
+
+@register(INPUTS, "rna_onset")
+def _input_rna_onset(batch, ctx):
+    """Sharpness of RNA 5' ends per strand: ``log1p(x) - log1p(box_w(x))`` (w 3, 9, 33)."""
+    import jax.numpy as jnp
+
+    from tisiago.seq2func.rna_features import box_mean
+
+    rna = jnp.maximum(batch["rna"].astype(jnp.float32), 0.0)
+    feats = [jnp.log1p(rna) - jnp.log1p(box_mean(rna, w)) for w in (3, 9, 33)]
+    return jnp.concatenate(feats, axis=-1)
+
+
+@register(INPUTS, "rna_relative")
+def _input_rna_relative(batch, ctx):
+    """Sense RNA relative to the transcript's own 5' end (first ``RNA_HEAD`` nt) and mean."""
+    import jax.numpy as jnp
+
+    from tisiago.seq2func.rna_features import box_mean
+
+    sense = jnp.maximum(batch["rna"][..., :1].astype(jnp.float32), 0.0)
+    head = jnp.log1p(batch["rna_tx"][:, None, :1])
+    mean = jnp.log1p(batch["rna_tx"][:, None, 1:])
+    b33, b129 = jnp.log1p(box_mean(sense, 33)), jnp.log1p(box_mean(sense, 129))
+    return jnp.concatenate([b33 - head, b129 - head, b33 - mean, b129 - mean], axis=-1)
 
 
 @register(INPUTS, "position")
@@ -564,6 +598,10 @@ def make_model(config: Mapping, ctx: Mapping):
         n_chx, chx_fn = OUTPUTS[model["chx"]["kind"]]
         chx = chx_fn(head(h_chx, batch["strand"], n_chx, "chx_out"), valid, model["chx"])
         tis_in = h
+        if model.get("tis_context"):
+            with hk.name_scope("tis_context"):
+                ctx_cfg = model["tis_context"]
+                tis_in = TRUNKS[ctx_cfg["kind"]](h, valid, ctx_cfg)
         if model.get("chx_contrast"):
             ratios = chx_log_ratios(jax.lax.stop_gradient(chx))
             tis_in = jax.nn.relu(
@@ -624,6 +662,18 @@ def loss_multinomial(pred, target, valid, aux, loss):
     if scope == "local":
         from tisiago.seq2func.loss import local_multinomial
 
+        count_power = float(loss.get("count_power", 1.0))
+        target_power = float(loss.get("target_power", 1.0))
+        if count_power != 1.0 or target_power != 1.0:
+            return weighted_local_multinomial(
+                pred,
+                target,
+                _full_mask(pred, valid),
+                channels,
+                int(loss.get("block", 1024)),
+                count_power,
+                target_power,
+            )
         return local_multinomial(
             pred, target, _full_mask(pred, valid), channels, int(loss.get("block", 1024))
         )
@@ -633,6 +683,43 @@ def loss_multinomial(pred, target, valid, aux, loss):
     p_t = target / _floor(tt)[:, None, :]
     p_p = pred / _floor(tp)[:, None, :]
     return (_xlogy(p_t, p_t) - _xlogy(p_t, p_p)).sum(axis=1).mean()
+
+
+def weighted_local_multinomial(
+    pred,
+    target,
+    mask,
+    channels: Sequence[int],
+    block: int = 1024,
+    count_power: float = 1.0,
+    target_power: float = 1.0,
+):
+    """Local multinomial with block weights ``n ** count_power``, tempered observed profile.
+
+    The observed profile is ``target ** target_power`` normalised; both powers 1 give exactly
+    :func:`loss.local_multinomial` (counts-weighted).
+    """
+    import jax.numpy as jnp
+
+    channels = tuple(int(c) for c in channels)
+    length = (pred.shape[1] // block) * block
+    if not channels or length == 0:
+        return jnp.zeros((), jnp.float32)
+    idx = jnp.asarray(channels)
+    shape = (pred.shape[0], length // block, block, len(channels))
+    keep = jnp.asarray(mask)[:, :length][..., idx]
+    pred = jnp.where(keep, pred[:, :length][..., idx].astype(jnp.float32), 0.0).reshape(shape)
+    target = target[:, :length][..., idx].astype(jnp.float32)
+    target = jnp.where(keep, jnp.maximum(target, 0.0), 0.0).reshape(shape)
+    n_target = target.sum(axis=2)
+    tempered = jnp.where(target > 0, jnp.power(jnp.maximum(target, EPS), target_power), 0.0)
+    p_target = tempered / jnp.maximum(tempered.sum(axis=2)[:, :, None, :], EPS)
+    p_pred = pred / jnp.maximum(pred.sum(axis=2)[:, :, None, :], EPS)
+    kl = (_xlogy(p_target, p_target) - _xlogy(p_target, p_pred)).sum(axis=2)
+    has = n_target > 0
+    w = jnp.where(has, jnp.power(jnp.maximum(n_target, EPS), count_power), 0.0)
+    total = w.sum()
+    return jnp.where(total > 0, (w * jnp.where(has, kl, 0.0)).sum() / jnp.maximum(total, EPS), 0.0)
 
 
 def _full_mask(pred, valid):
