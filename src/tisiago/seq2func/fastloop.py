@@ -35,7 +35,10 @@ Scoring (val transcripts, every cached condition, held-out ones marked): full-le
 predictions, then exactly the scorecard's metrics (:func:`scorecard.library_rows`: gene,
 gene_mrna, bin30, codon, nt as percent of replicate 1 vs 2; CHX frame) and the TIS peak share
 at real Ribo-TISH starts (meta share at the start nt, per-site argmax at the start; sites with
-real pooled signal within +-30 nt). The checkpoint's own predictions (``ckpt.npy``) are scored
+real pooled signal within +-30 nt), also per start class (``atg`` / ``nc`` = any other codon at
+the real call) with the real data's values (``_real``). ``primary2`` (phase 2) is the mean of the
+held-out TIS nt percent and its near-cognate argmax-at-start as percent of real (cap 100),
+appended after the phase-1 columns. The checkpoint's own predictions (``ckpt.npy``) are scored
 alongside as ``ckpt``. One row per config is appended to ``--results`` (:data:`RESULT_COLUMNS`)
 and the full record written to ``--runs-dir/<name>-<hash>.json``.
 """
@@ -71,6 +74,7 @@ CHANNEL = {"tis": 0, "chx": 1}
 FLANK = 30
 EPS = 1e-7
 PRIMARY_SCALES = ("codon", "nt")
+START_CLASSES = ("atg", "nc")
 DEFAULTS: dict = {
     "name": None,
     "seed": 0,
@@ -860,6 +864,22 @@ def peak_summary(profiles: np.ndarray) -> dict[str, float]:
     }
 
 
+def start_classes(codons: Sequence[str]) -> np.ndarray:
+    """Start class of each real call by its codon: ``atg`` or ``nc`` (any other codon)."""
+    return np.array(["atg" if str(c).upper() == "ATG" else "nc" for c in codons], dtype=object)
+
+
+def class_peak_summary(profiles: np.ndarray, classes: np.ndarray) -> dict[str, float]:
+    """:func:`peak_summary` per start class, keys ``meta_share_<cls>`` / ``argmax0_<cls>``."""
+    out = {}
+    for cls in START_CLASSES:
+        summary = peak_summary(profiles[classes == cls])
+        out[f"meta_share_{cls}"] = summary["meta_share"]
+        out[f"argmax0_{cls}"] = summary["argmax0"]
+        out[f"sites_{cls}"] = summary["sites"]
+    return out
+
+
 def score_predictions(
     cache: TxCache,
     sources: Mapping[str, Mapping[str, np.ndarray]],
@@ -900,20 +920,36 @@ def score_predictions(
         sites = cache.sites[cache.sites.condition == condition]
         sites = sites[sites.transcript_id.isin(set(units.transcript_id))]
         index = {t: i for i, t in enumerate(units.transcript_id)}
-        real, preds = [], {name: [] for name in sources}
+        real, preds, classes = [], {name: [] for name in sources}, []
         for tid, group in sites.groupby("transcript_id", sort=False):
             pos = group.tx_pos.to_numpy(int)
             real.append(site_profiles(reps["tis"]["pooled"][index[tid]], pos))
+            classes.append(start_classes(group.codon))
             for name, src in sources.items():
                 preds[name].append(site_profiles(src[tid][k, :, 0], pos))
         if not real:
             continue
         real_p = np.concatenate(real)
         keep = real_p.sum(1) > 0
-        peaks.append({"condition": condition, "source": "real", **peak_summary(real_p[keep])})
+        cls = np.concatenate(classes)[keep]
+        peaks.append(
+            {
+                "condition": condition,
+                "source": "real",
+                **peak_summary(real_p[keep]),
+                **class_peak_summary(real_p[keep], cls),
+            }
+        )
         for name, parts in preds.items():
             prof = np.concatenate(parts)[keep]
-            peaks.append({"condition": condition, "source": name, **peak_summary(prof)})
+            peaks.append(
+                {
+                    "condition": condition,
+                    "source": name,
+                    **peak_summary(prof),
+                    **class_peak_summary(prof, cls),
+                }
+            )
     return pd.DataFrame(rows), pd.DataFrame(peaks)
 
 
@@ -953,6 +989,14 @@ def result_columns(conditions: Sequence[str]) -> list[str]:
             if lib == "chx":
                 cols.append(f"{c}_chx_{FRAME}")
         cols += [f"{c}_tis_peak_meta", f"{c}_tis_peak_argmax0"]
+    cols.append("primary2")
+    for c in conditions:
+        for suffix in ("", "_real"):
+            cols += [
+                f"{c}_tis_peak_{stat}_{cls}{suffix}"
+                for stat in ("meta", "argmax0")
+                for cls in START_CLASSES
+            ]
     return cols
 
 
@@ -978,11 +1022,27 @@ def results_row(
         for r in peaks[peaks.source == source].itertuples():
             row[f"{r.condition}_tis_peak_meta"] = r.meta_share
             row[f"{r.condition}_tis_peak_argmax0"] = r.argmax0
+        for src, suffix in ((source, ""), ("real", "_real")):
+            for r in peaks[peaks.source == src].to_dict(orient="records"):
+                for cls in START_CLASSES:
+                    for stat, key in (("meta", "meta_share"), ("argmax0", "argmax0")):
+                        col = f"{r['condition']}_tis_peak_{stat}_{cls}{suffix}"
+                        if col in row:
+                            row[col] = float(r.get(f"{key}_{cls}", float("nan")))
     heldout = list(meta.get("heldout_list") or [])
     if heldout:
         values = [row.get(f"{heldout[0]}_tis_{s}", float("nan")) for s in PRIMARY_SCALES]
         row["primary"] = float(np.mean(values))
+        row["primary2"] = primary2(row, heldout[0])
     return row
+
+
+def primary2(row: Mapping, condition: str) -> float:
+    """Phase-2 primary: mean of TIS nt % and near-cognate argmax-at-start % of real (cap 100)."""
+    real = row.get(f"{condition}_tis_peak_argmax0_nc_real", float("nan"))
+    pred = row.get(f"{condition}_tis_peak_argmax0_nc", float("nan"))
+    nc = min(100.0, 100.0 * pred / real) if real and np.isfinite(real) else float("nan")
+    return float(np.mean([row.get(f"{condition}_tis_nt", float("nan")), nc]))
 
 
 def append_result(path: str | Path, row: Mapping, columns: Sequence[str]) -> None:

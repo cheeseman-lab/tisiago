@@ -520,3 +520,48 @@ def test_reference_record_scores_ckpt(cache):
     assert set(rows.source) == {"ckpt"} and set(rows.condition) == set(CONDITIONS)
     two_units = rows.condition.isin(["HeLa", "K562"]) & (rows.scale == "gene")
     assert np.isfinite(rows.value[two_units]).all()
+
+
+def test_class_peak_summary_splits_atg_and_near_cognate():
+    vec = np.zeros(200)
+    vec[[40, 100, 131]] = [2.0, 1.0, 3.0]
+    prof = fastloop.site_profiles(vec, [40, 100, 130])
+    classes = fastloop.start_classes(["ATG", "ctg", "GTG"])
+    assert list(classes) == ["atg", "nc", "nc"]
+    summary = fastloop.class_peak_summary(prof, classes)
+    assert summary["argmax0_atg"] == 1.0 and summary["sites_atg"] == 1
+    assert summary["argmax0_nc"] == 0.5 and summary["sites_nc"] == 2
+    assert summary["meta_share_nc"] == pytest.approx((1.0 + 0.0) / 2)
+    empty = fastloop.class_peak_summary(prof[:1], classes[:1])
+    assert empty["sites_nc"] == 0 and math.isnan(empty["argmax0_nc"])
+
+
+def test_class_peaks_rows_keep_phase1_columns_and_primary2(cache):
+    rng = np.random.default_rng(4)
+    preds = {
+        r.transcript_id: rng.gamma(1.0, size=(3, r.length, 2)).astype(np.float32)
+        for r in cache.rows("val").itertuples()
+    }
+    table, peaks = fastloop.score_predictions(
+        cache, {"model": preds}, CONDITIONS, heldout=["K562"], min_reads=5
+    )
+    columns = fastloop.result_columns(CONDITIONS)
+    old = [c for c in columns if c == "primary2" or "_atg" in c or "_nc" in c]
+    assert columns[-len(old) :] == old  # phase-2 columns are appended after phase 1
+    assert "K562_tis_peak_argmax0_nc_real" in columns and "HeLa_tis_peak_meta_atg" in columns
+    meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
+    row = fastloop.results_row(meta, table, peaks, CONDITIONS)
+    assert set(row) == set(columns)
+    model = peaks[(peaks.source == "model") & (peaks.condition == "K562")].iloc[0]
+    real = peaks[(peaks.source == "real") & (peaks.condition == "K562")].iloc[0]
+    assert row["K562_tis_peak_argmax0"] == model.argmax0  # phase-1 column unchanged
+    for cls in ("atg", "nc"):
+        if model[f"sites_{cls}"]:
+            assert row[f"K562_tis_peak_argmax0_{cls}"] == model[f"argmax0_{cls}"]
+            assert row[f"K562_tis_peak_meta_{cls}_real"] == real[f"meta_share_{cls}"]
+    assert model.sites == model.sites_atg + model.sites_nc
+    fake = dict(row, K562_tis_nt=60.0, K562_tis_peak_argmax0_nc=0.1)
+    fake["K562_tis_peak_argmax0_nc_real"] = 0.4
+    assert fastloop.primary2(fake, "K562") == pytest.approx((60.0 + 25.0) / 2)
+    fake["K562_tis_peak_argmax0_nc"] = 0.8
+    assert fastloop.primary2(fake, "K562") == pytest.approx((60.0 + 100.0) / 2)
