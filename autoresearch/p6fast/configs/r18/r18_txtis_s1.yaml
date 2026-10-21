@@ -1,0 +1,15 @@
+name: r18_txtis_s1
+seed: 1
+train: {steps: 30000}
+data: {crop_mode: start}
+inputs: [embedding, rna, rna_onesided]
+model:
+  trunk: {kind: conv, hidden: 256, layers: 2, width: 9}
+  chx_contrast: false
+  tis: {kind: factorised, block: crop}
+  chx: {kind: factorised, block: 1024, two_grids: true}
+losses:
+  - {kind: poisson, scope: sample, weight: 1.0}
+  - {kind: multinomial, scope: local, block: 1024, libraries: [chx], weight: 100}
+  - {kind: multinomial, scope: sample, libraries: [tis], weight: 100}
+  - {kind: multinomial, scope: global, weight: 5.0}
