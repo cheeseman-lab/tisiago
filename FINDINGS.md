@@ -476,6 +476,49 @@ saw that cell line; per-line models = experiment 1, trained on that line from DN
 - Caveats: the RNA input is matched RNA-input from the same lysate; val chromosome only; test (chr8/9)
   not yet scored.
 
+## 14. P6 experiment 3 — loss/structure search and final test (2026-10-20 to 10-22)
+
+Two-speed search (spec `docs/superpowers/specs/2026-10-20-p6-fast-loss-search-design.md`): a fast loop on a
+transcript-space cache of frozen fine-tuned embeddings (~4 min/config; 156 configs in two phases,
+`autoresearch/p6fast/ledger.md`) and full end-to-end confirmations on the leave-one-cell-line-out folds
+(`.superpowers/sdd/2026-10-19-p6-rnacond/task-3-ledger.md`, `.superpowers/sdd/2026-10-20-p6-fastloop/progress.md`).
+
+**Final recipe** (`--head rnacond_fc2d --local-weight 100 --local-libraries tis,chx --local-block 1024
+--local2-block 32 --local2-libraries tis --local2-weight 300`), DNA + RNA input, harringtonine (TIS) + CHX out:
+- factorised outputs for both tracks (amount per 1 kb block x softmax over positions in the block);
+- local (1 kb) multinomial on both tracks — ribosome occupancy is compositional within a transcript region:
+  starts compete for scanning ribosomes and elongating ribosomes share the local ORF;
+- codon-scale (32-nt) multinomial on TIS — alternative starts sit within a few codons of each other;
+- two stacked 9-nt convolutions over the embedding (start-codon and P-site frame context), plus a TIS-only
+  dilated branch (~1 kb) for 5'UTR / uORF context that decides near-cognate use.
+No hand-coded codon features, no annotation or Ribo-TISH calls in training.
+Did not help: explicit 5'->3' scanning (hazard), TIS-CHX coupling, overdispersed noise, CHX frame loss,
+deep/attention trunks without the local losses, extra RNA features.
+
+**Test chromosomes (chr8/9, scored once), each cell line held out, percent of replicate 1 vs 2**
+(final / reference RNA-conditioned model / RNA scaled):
+
+| held-out line | TIS gene | TIS 30-nt | TIS codon | TIS 1 nt | CHX 30-nt | CHX codon | CHX 1 nt | CHX frame |
+|---|---|---|---|---|---|---|---|---|
+| K562 | 95 / 97 / 96 | 84 / 64 / 12 | **76** / 40 / 4 | **74** / 32 / 2 | 80 / 71 / 35 | 65 / 46 / 13 | 58 / 34 / 7 | 72 / 52 / 43 |
+| U2OS | 95 / 96 / 93 | 87 / 67 / 10 | **77** / 44 / 4 | **74** / 33 / 2 | 82 / 74 / 32 | 70 / 51 / 14 | 66 / 40 / 8 | 76 / 52 / 47 |
+| HeLa | 93 / 94 / 93 | 78 / 63 / 14 | **65** / 42 / 4 | **55** / 39 / 2 | 68 / 66 / 38 | 58 / 50 / 14 | 54 / 49 / 10 | 65 / 59 / 56 |
+| RPE1 (3 cond.) | 98 / 99 / 98 | 91 / 75 / 11 | **93** / 49 / 4 | **97** / 40 / 2 | 101 / 95 / 40 | 116 / 92 / 22 | 130 / 88 / 16 | 88 / 63 / 58 |
+
+Test agrees with validation within ~2 points everywhere (val K562 TIS codon/nt 74/73). RPE1 fine-scale CHX
+exceeds 100% because its replicates agree poorly at that scale. Gene level costs 1-2 points vs the reference.
+
+**Start sites from predicted tracks** (Ribo-TISH on predicted vs real K562 tracks, same synthetic pipeline,
+depth-matched, 2 draws; K562 held out): test Jaccard **0.24-0.25** (precision 0.53, recall 0.31; ATG 0.35,
+near-cognate 0.15; annotated starts recall 0.52-0.53, precision 0.93); same-pipeline ceiling (real data
+resampled) 0.69. Val 0.23-0.25. Experiment 1 (per-line model trained on K562) was 0.15 (precision 0.27).
+Peak at the exact start (val, K562): ATG 0.71 (real 0.68), near-cognate 0.20 (real 0.35).
+
+**Where it stands vs the north star** (RNA-seq of an unseen line in -> base-resolution Ribo-seq out, good enough
+to read starts): gene level ~95-98% and 30-nt shape 78-91% of replicate; TIS codon/nt 55-97%; AUG start
+positions at real-data level; the remaining gap is near-cognate starts (about half of real) and start recall
+from Ribo-TISH on predicted tracks (0.25 vs ~0.47 replicate agreement).
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest
