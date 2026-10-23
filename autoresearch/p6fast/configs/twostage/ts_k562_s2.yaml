@@ -1,0 +1,75 @@
+name: ts_k562_s2
+train:
+  steps: 30000
+inputs:
+- embedding
+- rna
+- rna_onesided
+model:
+  trunk:
+    kind: conv
+    hidden: 256
+    layers: 2
+    width: 9
+  chx_contrast: false
+  chx_trunk:
+    kind: conv
+    hidden: 256
+    layers: 2
+    width: 25
+  tis:
+    kind: factorised
+    block: 1024
+    two_grids: true
+  chx:
+    kind: factorised
+    block: 1024
+    two_grids: true
+  tis_context:
+    kind: dilated
+    hidden: 256
+    channels: 128
+    dilations:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    - 256
+  tis_onehot:
+    width: 41
+    channels: 64
+    layers: 1
+losses:
+- kind: poisson
+  scope: sample
+  weight: 1.0
+- kind: multinomial
+  scope: local
+  block: 1024
+  libraries:
+  - tis
+  - chx
+  weight: 300
+- kind: multinomial
+  scope: global
+  weight: 5.0
+- kind: multinomial
+  scope: local
+  block: 32
+  libraries:
+  - tis
+  weight: 300
+- kind: multinomial
+  scope: local
+  block: 3
+  libraries:
+  - tis
+  weight: 300
+cache: data/p6/txcache/fc2d_k562
+heldout:
+- K562
+seed: 2
