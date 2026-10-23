@@ -687,8 +687,13 @@ def chx_log_ratios(chx, widths=(15, 45, 150), eps: float = 0.01):
     return strand_log_ratios(both, tuple(widths), eps)[..., : len(widths)]
 
 
-def make_model(config: Mapping, ctx: Mapping):
-    """Haiku ``forward(batch) -> (rate (B, L, 2) [TIS, CHX], aux)`` of ``config``."""
+def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
+    """Haiku ``forward(batch) -> (rate (B, L, 2) [TIS, CHX], aux)`` of ``config``.
+
+    ``embed_proj``: ``batch["emb"]`` holds raw embeddings ``(B or 1, L, D)``, projected by a
+    learned ``Linear(embed_proj)`` (module ``emb_proj``) and broadcast over the batch before the
+    inputs are built (:mod:`txtrain`; in place of the cache PCA).
+    """
     import haiku as hk
     import jax
     import jax.numpy as jnp
@@ -706,6 +711,9 @@ def make_model(config: Mapping, ctx: Mapping):
 
     def forward(batch):
         valid = batch["valid"]
+        if embed_proj is not None:
+            emb = hk.Linear(int(embed_proj), name="emb_proj")(batch["emb"].astype(jnp.float32))
+            batch = {**batch, "emb": jnp.broadcast_to(emb, (*valid.shape, emb.shape[-1]))}
         x = jnp.concatenate([INPUTS[n](batch, ctx) for n in config["inputs"]], axis=-1)
         x = jnp.where(valid[..., None], x.astype(jnp.float32), 0.0)
         h = trunk(x, valid, model["trunk"])
