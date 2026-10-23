@@ -33,9 +33,15 @@ Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain 
   (74.9 vs 74.8), downstream-only is (73.8): the decision is in the 5' context. |
 - 2026-10-23 01:15 | P3R02 | fam 12 (seeds of onehot41; one-hot into the TIS context = spliced sequence over ~1 kb; onehot + 3-nt
   term), fam 11 (exon features to the TIS branch only) | configs/p3r02 | 11195124 (onehot41 s1/s2, done), 11195125 (preempted and
-  requeued at 01:12) | (pending) |
+  requeued at 01:12) | **onehot41_l3 78.6** (nc .478, first .62 later .27; TIS nt 84.0 codon 83.5); onehot_ctx 76.7; tisexon 74.9 |
+  GAIN +3.8 (single seed) -> P3R04 seeds + extensions. Codon identity at the site plus a codon-scale (3-nt) competition term
+  together move NC recall; either alone gives ~+1. |
 - 2026-10-23 01:20 | P3R03 | fam 4 (noise model: TIS target = 2 x min(rep1, rep2) or 2 x sqrt(rep1 rep2) = reproducible signal only;
-  + onehot), fam 10 (32-nt term with sharpened target, power 2), fam 12 (one-hot 2 x 128) | configs/p3r03 | 11195351-4 | (pending) |
+  + onehot), fam 10 (32-nt term with sharpened target, power 2), fam 12 (one-hot 2 x 128) | configs/p3r03 | 11195351-4 | mintgt 71.2, onehot_mintgt 71.8,
+  geotgt 72.1 (nc .40-.41: worse); l32tp2 75.2; onehot2x128 76.9 | fam 4 NEGATIVE: training on replicate-reproducible signal only
+  removes real (if noisy) starts and hurts reproducible-start recall; sharpened 32-nt target no gain. |
+- 2026-10-23 03:00 | P3R04 | fam 12 + 10 around onehot41_l3: seeds 1-2; 2x128 one-hot + l3; one-hot into context + l3; l3 weight
+  1000; l3 + l9; + tis_exon | configs/p3r02 (seeds), p3r04 | 11195358-62 | (pending) |
 
 ## Phase 2 (near-cognate start recall; primary2)
 primary2 = mean(K562 TIS nt %, min(100, 100 x K562 near-cognate argmax-at-start / real)). Guards: phase-1
