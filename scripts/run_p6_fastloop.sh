@@ -15,6 +15,11 @@
 #       configs/p6fast/ref_rnacond.yaml configs/p6fast/t3_foc_lw5.yaml \
 #       [--results data/p6/fastloop/results.tsv] [--runs-dir data/p6/fastloop/runs]
 #   sbatch --partition=nvidia-A100-20 scripts/run_p6_fastloop.sh --reference
+#   # final, once per fold: a saved head (--export-dir run) on a test cache (txcache --test)
+#   sbatch --partition=nvidia-A100-20 scripts/run_p6_fastloop.sh \
+#       --predict data/p6/fastloop/export/<name> --cache data/p6/txcache/<x>_test \
+#       --split test --i-am-final --export-dir data/p6/fastloop/export_test
+#       # -> data/p6/fastloop/results_test.tsv, runs_test/<name>-<hash>-test.json
 
 set -euo pipefail
 

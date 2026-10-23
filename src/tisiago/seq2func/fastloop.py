@@ -4,6 +4,9 @@ Usage::
 
     python -m tisiago.seq2func.fastloop configs/p6fast/ref_rnacond.yaml [more.yaml ...]
     python -m tisiago.seq2func.fastloop --reference      # score the checkpoint's own predictions
+    python -m tisiago.seq2func.fastloop --predict data/p6/fastloop/export/<name> \
+        --cache data/p6/txcache/<x>_test --split test --i-am-final \
+        --export-dir data/p6/fastloop/export_test     # final: score a saved head on test, once
 
 A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered components:
 
@@ -56,6 +59,14 @@ scored alongside as ``ckpt``. ``--export-dir`` writes each config's val predicti
 float bigWigs (:func:`export_bigwigs`) plus its parameters. One row per config is appended to
 ``--results`` (:data:`RESULT_COLUMNS`) and the full record written to
 ``--runs-dir/<name>-<hash>.json``.
+
+``--predict <export_dir>/<name>`` rebuilds a saved head (``params.npz`` + ``config.json``; the
+parameter tree must match the config's model exactly), predicts every transcript of ``--split``
+of ``--cache`` (``test`` needs a test cache, :mod:`txcache` ``--test``, and ``--i-am-final``),
+scores it with the same scorer (the split's rows in place of val), appends the row to
+``--results`` (default ``data/p6/fastloop/results_test.tsv``; never the main ``results.tsv``),
+writes ``<runs-dir>/<name>-<hash>-<split>.json`` and, with ``--export-dir``, the split's genomic
+bigWigs to ``<export-dir>/<name>/``. No training.
 """
 
 from __future__ import annotations
@@ -1618,12 +1629,193 @@ def reference_record(cache: TxCache, heldout: Sequence[str]) -> dict:
     }
 
 
+MAIN_RESULTS = Path("data/p6/fastloop/results.tsv")
+MAIN_RUNS = Path("data/p6/fastloop/runs")
+TEST_RESULTS = Path("data/p6/fastloop/results_test.tsv")
+TEST_RUNS = Path("data/p6/fastloop/runs_test")
+
+
+class SplitView:
+    """A :class:`TxCache` whose ``rows("val")`` are ``split``'s rows (val scorer on ``split``)."""
+
+    def __init__(self, cache: TxCache, split: str):
+        """Wrap ``cache``; every other attribute is the cache's own."""
+        self._cache, self.split = cache, split
+
+    def rows(self, split: str) -> pd.DataFrame:
+        """Index rows of ``split`` (``val`` -> the viewed split)."""
+        return self._cache.rows(self.split if split == "val" else split)
+
+    def __getattr__(self, name):
+        """Every other attribute is the wrapped cache's."""
+        return getattr(self._cache, name)
+
+
+def load_export(export: str | Path) -> tuple[dict, dict]:
+    """``(config, params)`` saved by :func:`run_config` under ``<export_dir>/<name>/``.
+
+    The config is the exact training config (not re-merged into :data:`DEFAULTS`); its hash
+    must equal the saved one.
+    """
+    export = Path(export)
+    payload = json.loads((export / "config.json").read_text())
+    config = payload["config"]
+    resolve_config(config)  # registry check only
+    if config_hash(config) != payload["config_hash"]:
+        raise ValueError(f"{export}: config hash {config_hash(config)} != saved")
+    return config, load_params(export / "params.npz")
+
+
+def param_shapes(params) -> dict[str, tuple[int, ...]]:
+    """``{"<module>/<name>": shape}`` of a Haiku parameter tree."""
+    return {f"{m}/{n}": tuple(np.shape(v)) for m, sub in params.items() for n, v in sub.items()}
+
+
+def rebuild_model(config: Mapping, cache: TxCache, params, split: str):
+    """:func:`make_model` of ``config``; raises unless ``params`` has exactly its tree."""
+    import jax
+
+    model = make_model(config, context_of(cache))
+    rows = cache.rows(split)
+    if rows.empty:
+        raise ValueError(f"{cache.path} has no {split} transcripts")
+    row = next(rows.itertuples())
+    ecfg = config["eval"]
+    size = bucket_length(
+        min(int(row.length), int(ecfg["max_length"])),
+        int(ecfg["min_bucket"]),
+        int(ecfg["max_length"]),
+    )
+    batch = stack_examples([crop_example(cache, row, cache.conditions[0], 0, size)], [row])
+    expected = param_shapes(model.init(jax.random.PRNGKey(0), _device_batch(batch)))
+    got = param_shapes(params)
+    if expected != got:
+        missing = sorted(set(expected) - set(got))
+        extra = sorted(set(got) - set(expected))
+        shapes = sorted(k for k in set(expected) & set(got) if expected[k] != got[k])
+        raise ValueError(
+            f"params do not match the config's model: missing {missing}, extra {extra}, "
+            f"shape mismatch {shapes}"
+        )
+    return model
+
+
+def check_pca(cache: TxCache, train_cache: str | Path | None) -> None:
+    """Raise if ``cache``'s ``pca.npz`` differs from the training cache's (when that exists)."""
+    if train_cache is None:
+        return
+    train_pca, own = Path(train_cache) / "pca.npz", cache.path / "pca.npz"
+    if not train_pca.exists():
+        return
+    if not own.exists() or train_pca.read_bytes() != own.read_bytes():
+        raise ValueError(f"{own} is not the training cache's {train_pca} (embedding inputs differ)")
+
+
+def predict_export(
+    export: str | Path,
+    cache: TxCache,
+    split: str = "test",
+    results: str | Path = TEST_RESULTS,
+    runs_dir: str | Path = TEST_RUNS,
+    export_dir: str | Path | None = None,
+    export_conditions: Sequence[str] | None = None,
+    i_am_final: bool = False,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Score a saved head on ``split`` of ``cache`` without training (module docstring)."""
+    import jax
+
+    if split not in ("val", "test"):
+        raise ValueError(f"split must be val or test, not {split!r}")
+    if split == "test":
+        if not i_am_final:
+            raise PermissionError("split test reads the held-out chromosomes; pass i_am_final")
+        if cache.config.get("split") != "test":
+            raise ValueError(f"{cache.path} is not a test cache (txcache --test)")
+    results = Path(results)
+    if results.name == MAIN_RESULTS.name or results.resolve() == MAIN_RESULTS.resolve():
+        raise ValueError(f"{results}: predictions never go to the main results.tsv")
+    t0 = time.time()
+    config, params = load_export(export)
+    digest = config_hash(config)
+    check_pca(cache, config.get("cache"))
+    model = rebuild_model(config, cache, params, split)
+
+    @jax.jit
+    def apply(batch):
+        return model.apply(params, batch)[0]
+
+    ecfg = config["eval"]
+    conditions = cache.conditions
+    preds = predict_rows(
+        apply, cache, cache.rows(split), conditions, ecfg["min_bucket"], ecfg["max_length"]
+    )
+    view = SplitView(cache, split)
+    sources = {"model": preds}
+    ckpt = ckpt_predictions(view)
+    if ckpt is not None:
+        sources["ckpt"] = ckpt
+    table, peaks = score_predictions(view, sources, conditions, config["heldout"])
+    meta = {
+        "config_hash": digest,
+        "name": config["name"],
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "git_commit": _git_commit(),
+        "cache": str(cache.path),
+        "heldout": ",".join(config["heldout"]),
+        "heldout_list": list(config["heldout"]),
+        "steps": int(config["train"]["steps"]),
+        "eval_seconds": time.time() - t0,
+        "runtime_seconds": time.time() - t0,
+        "split": split,
+        "export": str(export),
+        "train_cache": config.get("cache"),
+    }
+    columns = result_columns(conditions)
+    row = results_row(meta, table, peaks, conditions)
+    append_result(results, row, columns)
+    record = {
+        "meta": meta,
+        "config": config,
+        "row": row,
+        "reference_row": results_row(meta, table, peaks, conditions, "ckpt")
+        if ckpt is not None
+        else None,
+        "scorecard": table.to_dict(orient="records"),
+        "peaks": peaks.to_dict(orient="records"),
+    }
+    _write_json(Path(runs_dir) / f"{config['name']}-{digest}-{split}.json", record)
+    if export_dir is not None:
+        dest = Path(export_dir) / config["name"]
+        export_bigwigs(
+            cache,
+            preds,
+            list(export_conditions or config["heldout"]),
+            dest,
+            split=split,
+            meta={"name": config["name"], "config_hash": digest, "primary3": row["primary3"]},
+        )
+        log(f"exported {config['name']} {split} tracks to {dest}")
+    log(f"{config['name']} ({digest}) on {split}: primary3 {row['primary3']:.1f}")
+    return record
+
+
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("configs", nargs="*", type=Path, help="YAML / JSON config files")
-    ap.add_argument("--results", type=Path, default=Path("data/p6/fastloop/results.tsv"))
-    ap.add_argument("--runs-dir", type=Path, default=Path("data/p6/fastloop/runs"))
+    ap.add_argument(
+        "--results",
+        type=Path,
+        default=None,
+        help=f"default {MAIN_RESULTS} ({TEST_RESULTS} with --predict)",
+    )
+    ap.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help=f"default {MAIN_RUNS} ({TEST_RUNS} with --predict)",
+    )
     ap.add_argument("--cache", type=Path, default=None, help="override every config's cache")
     ap.add_argument("--steps", type=int, default=None, help="override train.steps (smoke)")
     ap.add_argument(
@@ -1643,6 +1835,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="score the cache's checkpoint predictions (ckpt.npy) and write <runs-dir>/ckpt.json",
     )
+    ap.add_argument(
+        "--predict",
+        type=Path,
+        default=None,
+        help="<export_dir>/<name> (params.npz + config.json): score it on --split of --cache",
+    )
+    ap.add_argument("--split", choices=("val", "test"), default="test", help="with --predict")
+    ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
     return ap
 
 
@@ -1650,6 +1850,27 @@ def main() -> None:
     """CLI: run each config in turn (one results row each)."""
     ap = build_parser()
     args = ap.parse_args()
+    if args.predict is not None:
+        if args.configs or args.reference:
+            ap.error("--predict takes no config files and no --reference")
+        if args.cache is None:
+            ap.error("--predict needs --cache")
+        if args.split == "test" and not args.i_am_final:
+            ap.error("--split test reads the held-out chromosomes; pass --i-am-final to confirm")
+        predict_export(
+            args.predict,
+            TxCache(args.cache),
+            args.split,
+            args.results or TEST_RESULTS,
+            args.runs_dir or TEST_RUNS,
+            args.export_dir,
+            args.export_conditions,
+            i_am_final=args.i_am_final,
+            log=lambda s: print(s, flush=True),
+        )
+        return
+    args.results = args.results or MAIN_RESULTS
+    args.runs_dir = args.runs_dir or MAIN_RUNS
     if not args.configs and not args.reference:
         ap.error("give config files or --reference")
     caches: dict[str, TxCache] = {}

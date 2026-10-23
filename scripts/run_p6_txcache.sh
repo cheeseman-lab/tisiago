@@ -17,6 +17,9 @@
 #   sbatch --partition=nvidia-A100-20 scripts/run_p6_txcache.sh embed \
 #       --shards val_chr7                                                      # GPU (fits PCA)
 #   sbatch --partition=nvidia-A100-20 scripts/run_p6_txcache.sh embed          # remaining shards
+#   # final test cache (test windows only; PCA copied from the train cache, never refit)
+#   sbatch --partition=nvidia-A100-20 scripts/run_p6_txcache.sh build --test --i-am-final \
+#       --name <x>_test --pca-from data/p6/txcache/<x> --checkpoint data/p6/runs/<x>/best
 # Defaults: --name ar_rnacond_k562_v2, --checkpoint data/p6/runs/ar_rnacond_k562_v2/best.
 
 set -euo pipefail

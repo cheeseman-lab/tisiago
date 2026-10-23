@@ -817,3 +817,208 @@ def test_tis_target_min_and_geo_use_both_replicates(cache):
     assert sampler.tis_target == "min"
     with pytest.raises(ValueError, match="tis_target"):
         fastloop.crop_example(cache, rows.loc["A"], "HeLa", 0, 8, "max")
+
+
+def _test_cache(root, seed=1):
+    """A test cache (txcache --test layout): two test_chr8 transcripts, ckpt, sites."""
+    rng = np.random.default_rng(seed)
+    rows, offset = [], 0
+    for tid, strand, length, cs, ce in (("T1", "+", 220, 20, 200), ("T2", "-", 180, 15, 160)):
+        rows.append(
+            {
+                "transcript_id": tid,
+                "gene_id": f"G{tid}",
+                "gene_name": tid,
+                "chrom": "chr2",
+                "strand": strand,
+                "split": "test",
+                "start": 1000 + offset,
+                "end": 1000 + offset + length,
+                "length": length,
+                "cds_start": cs,
+                "cds_end": ce,
+                "exons": [[1000 + offset, 1000 + offset + length]],
+                "cds": [[1000 + offset + cs, 1000 + offset + ce]],
+                "junctions": [],
+                **{f"expressed_{c}": True for c in CONDITIONS},
+                "shard": "test_chr2",
+                "offset": offset,
+            }
+        )
+        offset += length
+    d = root / "shards" / "test_chr2"
+    d.mkdir(parents=True)
+    np.save(d / "emb.npy", rng.normal(size=(offset, DIM)).astype(np.float16))
+    np.save(d / "rna.npy", rng.poisson(3.0, size=(len(CONDITIONS), offset, 2)).astype("f4"))
+    for lib, lam in (("tis", 0.3), ("chx", 2.0)):
+        reps = rng.poisson(lam, size=(len(CONDITIONS), offset, 2)).astype(np.float32)
+        np.save(d / f"{lib}.npy", np.concatenate([reps, reps.sum(-1, keepdims=True)], -1))
+    np.save(d / "ckpt.npy", rng.gamma(1.0, size=(len(CONDITIONS), offset, 2)).astype("f4"))
+    pd.DataFrame(rows).to_parquet(root / "index.parquet", index=False)
+    (root / "cache.json").write_text(json.dumps({"conditions": list(CONDITIONS), "split": "test"}))
+    pd.DataFrame(
+        {
+            "condition": ["K562", "K562"],
+            "transcript_id": ["T1", "T2"],
+            "tx_pos": [20, 30],
+            "codon": ["ATG", "CTG"],
+            "tistype": ["Annotated", "Novel"],
+        }
+    ).to_parquet(root / "sites.parquet", index=False)
+    return TxCache(root)
+
+
+def _trained_export(tmp_path, cache, **override):
+    tracks = _real_tracks(tmp_path / "tracks")
+    cache.config["tracks_dir"] = str(tracks)
+    config = _config(name="exp", cache=str(cache.path), **override)
+    record = fastloop.run_config(
+        config,
+        cache,
+        tmp_path / "results.tsv",
+        tmp_path / "runs",
+        log=lambda s: None,
+        export_dir=tmp_path / "export",
+    )
+    return config, record, tracks
+
+
+def _bw_values(path, chrom="chr1", size=5000):
+    import pyBigWig
+
+    bw = pyBigWig.open(str(path))
+    try:
+        return np.nan_to_num(np.array(bw.values(chrom, 0, size)))
+    finally:
+        bw.close()
+
+
+def test_predict_export_on_val_reproduces_run_config_exactly(tmp_path, cache):
+    config, record, _ = _trained_export(tmp_path, cache, inputs=["embedding_white", "rna"])
+    out = tmp_path / "pred_val"
+    again = fastloop.predict_export(
+        tmp_path / "export" / "exp",
+        cache,
+        split="val",
+        results=tmp_path / "results_test.tsv",
+        runs_dir=tmp_path / "runs_test",
+        export_dir=out,
+        log=lambda s: None,
+    )
+    assert again["meta"]["config_hash"] == fastloop.config_hash(config)
+    for key in ("scorecard", "peaks"):
+        pd.testing.assert_frame_equal(
+            pd.DataFrame(again[key]), pd.DataFrame(record[key]), check_exact=True
+        )
+    for key in fastloop.result_columns(cache.conditions)[11:]:
+        a, b = record["row"][key], again["row"][key]
+        assert (a == b) or (math.isnan(a) and math.isnan(b)), key
+    for lib in fastloop.LIBRARIES:
+        for strand in ("plus", "minus"):
+            name = f"{lib}_pooled.{strand}.bw"
+            np.testing.assert_array_equal(
+                _bw_values(out / "exp" / "K562" / name),
+                _bw_values(tmp_path / "export" / "exp" / "K562" / name),
+            )
+    frame = pd.read_csv(tmp_path / "results_test.tsv", sep="\t")
+    assert len(frame) == 1 and frame.name[0] == "exp"
+    assert (tmp_path / "runs_test" / f"exp-{fastloop.config_hash(config)}-val.json").exists()
+
+
+def test_predict_export_guards(tmp_path, cache):
+    _trained_export(tmp_path, cache)
+    export = tmp_path / "export" / "exp"
+    kw = {"runs_dir": tmp_path / "rt", "log": lambda s: None}
+    with pytest.raises(PermissionError, match="i_am_final"):
+        fastloop.predict_export(export, cache, "test", tmp_path / "r_test.tsv", **kw)
+    with pytest.raises(ValueError, match="not a test cache"):
+        fastloop.predict_export(
+            export, cache, "test", tmp_path / "r_test.tsv", i_am_final=True, **kw
+        )
+    with pytest.raises(ValueError, match="main results"):
+        fastloop.predict_export(export, cache, "val", tmp_path / "results.tsv", **kw)
+    # params of another architecture do not load into this config's model
+    params = fastloop.load_params(export / "params.npz")
+    other = _config(name="exp", model={"trunk": {"kind": "mlp", "hidden": 32, "layers": 1}})
+    with pytest.raises(ValueError, match="do not match"):
+        fastloop.rebuild_model(other, cache, params, "val")
+    fastloop.rebuild_model(fastloop.load_export(export)[0], cache, params, "val")
+    # a changed saved config fails its hash
+    payload = json.loads((export / "config.json").read_text())
+    payload["config"]["seed"] = 99
+    (export / "config.json").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="config hash"):
+        fastloop.load_export(export)
+
+
+def test_check_pca_requires_the_training_cache_pca(tmp_path, cache):
+    train = tmp_path / "train"
+    train.mkdir()
+    fastloop.check_pca(cache, train)  # no training PCA: nothing to compare
+    np.savez(train / "pca.npz", explained_variance=np.ones(DIM))
+    with pytest.raises(ValueError, match="not the training cache"):
+        fastloop.check_pca(cache, train)
+    (cache.path / "pca.npz").write_bytes((train / "pca.npz").read_bytes())
+    fastloop.check_pca(cache, train)
+
+
+def test_predict_export_scores_test_rows_end_to_end(tmp_path, cache):
+    import pyBigWig
+
+    from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
+    from tisiago.seq2func.txcache import unit_of
+
+    config, _, tracks = _trained_export(tmp_path, cache)
+    test = _test_cache(tmp_path / "x_test")
+    test.config["tracks_dir"] = str(tracks)
+    out = tmp_path / "pred_test"
+    record = fastloop.predict_export(
+        tmp_path / "export" / "exp",
+        test,
+        split="test",
+        results=tmp_path / "results_test.tsv",
+        runs_dir=tmp_path / "runs_test",
+        export_dir=out,
+        i_am_final=True,
+        log=lambda s: None,
+    )
+    table = pd.DataFrame(record["scorecard"])
+    assert {"model", "ckpt", "rep1", "rep2"} >= set(table.source) >= {"model", "ckpt"}
+    assert set(table.condition) == set(CONDITIONS)
+    model_rows = table[(table.source == "model") & (table.scale == "nt")]
+    assert len(model_rows) == 2 * len(CONDITIONS) and np.isfinite(model_rows.value).all()
+    assert record["meta"]["split"] == "test" and record["meta"]["cache"] == str(test.path)
+    peaks = pd.DataFrame(record["peaks"])
+    assert set(peaks.source) == {"real", "model", "ckpt"}
+    # exported test tracks hold the head's own predictions at the test transcripts' positions
+    model = fastloop.make_model(config, fastloop.context_of(test))
+    params = fastloop.load_params(tmp_path / "export" / "exp" / "params.npz")
+    preds = fastloop.predict_rows(
+        jax.jit(lambda b: model.apply(params, b)[0]), test, test.rows("test"), CONDITIONS, 64, 256
+    )
+    k = test.condition_index("K562")
+    for r in test.rows("test").itertuples():
+        unit = unit_of(r)
+        suffix, shift = ("plus", 0) if r.strand == "+" else ("minus", RIBOTISH_MINUS_SHIFT)
+        bw = pyBigWig.open(str(out / "exp" / "K562" / f"tis_pooled.{suffix}.bw"))
+        got = np.array(
+            [bw.values("chr2", int(p) + shift, int(p) + shift + 1)[0] for p in unit.positions]
+        )
+        bw.close()
+        np.testing.assert_allclose(got, preds[r.transcript_id][k, :, 0], rtol=1e-6)
+    manifest = json.loads((out / "exp" / "K562" / "predict_tracks.json").read_text())
+    assert manifest["split"] == "test" and manifest["transcripts"] == 2
+    frame = pd.read_csv(tmp_path / "results_test.tsv", sep="\t")
+    assert len(frame) == 1 and frame.cache[0] == str(test.path)
+
+
+def test_predict_cli_requires_the_final_flag(tmp_path, monkeypatch):
+    import sys
+
+    argv = ["fastloop", "--predict", str(tmp_path / "e"), "--cache", str(tmp_path / "c")]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        fastloop.main()
+    monkeypatch.setattr(sys, "argv", [*argv[:3]])
+    with pytest.raises(SystemExit):
+        fastloop.main()

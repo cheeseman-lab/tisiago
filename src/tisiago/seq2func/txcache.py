@@ -7,11 +7,18 @@ Usage::
     python -m tisiago.seq2func.txcache embed --name ar_rnacond_k562_v2 \
         --checkpoint data/p6/runs/ar_rnacond_k562_v2/best                 # GPU
     python -m tisiago.seq2func.txcache build ...                           # all three
+    python -m tisiago.seq2func.txcache build --test --i-am-final --name <x>_test \
+        --pca-from data/p6/txcache/<x> --checkpoint data/p6/runs/<x>/best   # final test cache
 
 Units: one MANE_Select transcript with a CDS per gene (:func:`scorecard.load_units`) whose gene
 is expressed in at least one condition and whose genomic span lies inside the union of the
 ``train`` or ``val`` windows (``test`` is never cached; chromosomes of ``test.parquet`` are
 refused). Every vector is spliced and 5'->3' (cap to poly-A), as :mod:`scorecard`.
+
+A TEST cache (``--test --i-am-final``, final scoring only) holds the units of the ``test``
+windows alone, by the same rules, in shards ``test_<chrom>``, with what the val shards have
+(``ckpt.npy``, ``seq.npy``; ``sites.parquet`` on test). Its ``pca.npz`` is a copy of the train
+cache's (``--pca-from``; recorded in ``cache.json["pca_source"]``), never refit on test.
 
 Layout of ``<cache>/`` (default ``data/p6/txcache/<name>``)::
 
@@ -29,7 +36,9 @@ Layout of ``<cache>/`` (default ``data/p6/txcache/<name>``)::
                        scaled to a 5e7-read library (:func:`data.rna_depth_scale`)
         tis.npy, chx.npy  (C, P, 3) float32: replicate 1, replicate 2, pooled; canonical P-sites
                        (minus strand un-shifted), sense strand
-        ckpt.npy       (C, P, 2) float32, val only: the checkpoint's own TIS, CHX prediction
+        seq.npy        (P,) int8 mRNA base codes A C G T = 0..3, N = 4 (test caches; other
+                       caches via autoresearch/p6fast/build_seq.py)
+        ckpt.npy       (C, P, 2) float32, val / test only: the checkpoint's own TIS, CHX prediction
                        (sense strand; the full-model reference for the fast-loop scorer)
 
 Rows of a shard are its transcripts concatenated in index order (``offset``, ``length``);
@@ -60,6 +69,8 @@ from tisiago.seq2func.tracks import track_prefix
 CACHE_VERSION = 1
 PCA_DIM = 256
 CACHE_SPLITS = ("train", "val")
+TEST_SPLIT = "test"
+SCORED_SPLITS = ("val", TEST_SPLIT)
 REPS = ("rep1", "rep2", "pooled")
 TRACK_LIBRARIES = ("tis", "chx")
 INDEX = "index.parquet"
@@ -92,17 +103,24 @@ def select_transcripts(
     windows: Mapping[str, pd.DataFrame],
     conditions: Sequence[str],
     forbidden_chroms: Sequence[str] = (),
+    test: bool = False,
 ) -> pd.DataFrame:
     """Index rows of the cached transcripts (see the module docstring), shards and offsets.
 
     ``windows`` maps a split (``train`` / ``val``) to its windows. A unit is kept when its gene
     is expressed in at least one of ``conditions`` and its span lies inside the union of one
     split's windows. Raises if a split is not cacheable or a window lies on ``forbidden_chroms``.
+    ``test=True`` (a final test cache) takes ``windows == {"test": ...}`` only, same unit rules.
     """
-    bad = sorted(set(windows) - set(CACHE_SPLITS))
+    allowed = (TEST_SPLIT,) if test else CACHE_SPLITS
+    bad = sorted(set(windows) - set(allowed))
     if bad:
-        raise ValueError(f"splits {bad} are never cached (allowed: {CACHE_SPLITS})")
+        raise ValueError(f"splits {bad} are never cached (allowed: {allowed})")
+    if test and set(windows) != {TEST_SPLIT}:
+        raise ValueError("a test cache takes the test windows only")
     for split, frame in windows.items():
+        if split == TEST_SPLIT:
+            continue
         leaked = sorted(set(frame.chrom) & set(forbidden_chroms))
         if leaked:
             raise ValueError(f"{split} windows on held-out test chromosomes {leaked}")
@@ -114,7 +132,7 @@ def select_transcripts(
     for unit in units:
         if unit.gene_id not in anywhere:
             continue
-        split = next((s for s in CACHE_SPLITS if s in regions and _inside(unit, regions[s])), None)
+        split = next((s for s in allowed if s in regions and _inside(unit, regions[s])), None)
         if split is None:
             continue
         cds_start, cds_end = unit.cds_range
@@ -384,6 +402,71 @@ def ribotish_sites(calls: pd.DataFrame, condition: str, index: pd.DataFrame) -> 
     return pd.DataFrame(out, columns=["condition", "transcript_id", "tx_pos", "codon", "tistype"])
 
 
+SEQ_CODE = np.full(256, 4, np.int8)
+for _i, _b in enumerate("ACGT"):
+    SEQ_CODE[ord(_b)] = SEQ_CODE[ord(_b.lower())] = _i
+SEQ_COMPLEMENT = np.array([3, 2, 1, 0, 4], np.int8)
+
+
+def transcript_codes(fasta, unit: Unit) -> np.ndarray:
+    """Base codes of the mRNA (A C G T = 0..3, N = 4), 5'->3' sense, as ``build_seq.py``."""
+    parts = [str(fasta[unit.chrom][int(s) : int(e)]) for s, e in sorted(unit.exons)]
+    codes = SEQ_CODE[np.frombuffer("".join(parts).encode(), np.uint8)]
+    return codes if unit.strand == "+" else SEQ_COMPLEMENT[codes[::-1]]
+
+
+def shard_codes(fasta, index: pd.DataFrame, shard: str) -> np.ndarray:
+    """``seq.npy`` of ``shard``: :func:`transcript_codes` at each row's ``offset``."""
+    rows = index[index.shard == shard]
+    out = np.full(int(rows.length.sum()), 4, np.int8)
+    for row in rows.itertuples():
+        codes = transcript_codes(fasta, unit_of(row))
+        if len(codes) != int(row.length):
+            raise ValueError(f"{row.transcript_id}: {len(codes)} bases for length {row.length}")
+        out[int(row.offset) : int(row.offset) + int(row.length)] = codes
+    return out
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def reuse_pca(cache: str | Path, source: str | Path) -> dict:
+    """Copy ``<source>/pca.npz`` into ``cache`` (never refit) and record it in ``cache.json``.
+
+    An existing ``pca.npz`` in ``cache`` must be byte-identical to the source's. Returns the
+    ``pca_source`` record (path, sha256, the source's ``cache.json["pca"]``).
+    """
+    import shutil
+
+    cache, source = Path(cache), Path(source)
+    if cache.resolve() == source.resolve():
+        raise ValueError("--pca-from must be the train cache, not the cache being built")
+    src = source / PCA_FILE
+    if not src.exists():
+        raise FileNotFoundError(f"{src} does not exist (embed the train cache first)")
+    digest = _sha256(src)
+    dest = cache / PCA_FILE
+    if dest.exists():
+        if _sha256(dest) != digest:
+            raise ValueError(f"{dest} differs from {src}; a test cache never refits PCA")
+    else:
+        cache.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".tmp.npz")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+    record = {
+        "path": str(src),
+        "sha256": digest,
+        "cache": str(source),
+        "pca": _load_config(source).get("pca"),
+    }
+    _update_config(cache, pca_source=record)
+    return record
+
+
 class TxCache:
     """Read-only, memory-mapped view of a cache directory."""
 
@@ -479,15 +562,16 @@ def stage_index(args) -> pd.DataFrame:
     cache = Path(args.cache)
     cache.mkdir(parents=True, exist_ok=True)
     conditions = tuple(CONDITIONS)
-    windows = {s: pd.read_parquet(Path(args.windows_dir) / f"{s}.parquet") for s in CACHE_SPLITS}
+    test = bool(getattr(args, "test", False))
+    windows = load_windows(args.windows_dir, test)
     test_path = Path(args.windows_dir) / "test.parquet"
     forbidden = sorted(set(pd.read_parquet(test_path).chrom)) if test_path.exists() else []
     genes = pd.read_parquet(args.expression)
-    index = select_transcripts(load_units(args.gtf), genes, windows, conditions, forbidden)
+    index = select_transcripts(load_units(args.gtf), genes, windows, conditions, forbidden, test)
     index.to_parquet(cache / INDEX, index=False)
     sites = []
     if args.calls_run:
-        val = index[index.split == "val"]
+        val = index[index.split.isin(SCORED_SPLITS)]
         for condition in conditions:
             path = Path(args.calls_run) / condition / "pooled" / f"{condition}_pooled.calls.tsv"
             calls = filter_predictions(pd.read_csv(path, sep="\t"))
@@ -509,6 +593,7 @@ def stage_index(args) -> pd.DataFrame:
         tracks_dir=str(args.tracks_dir),
         calls_run=str(args.calls_run) if args.calls_run else None,
         forbidden_chroms=forbidden,
+        **({"split": TEST_SPLIT, "test_chroms": forbidden} if test else {}),
         rna_reference_depth=5e7,
         rna_depth_scales=rna_depth_scales(args.tracks_dir, conditions),
         splits={s: {k: int(v) for k, v in r.items()} for s, r in counts.iterrows()},
@@ -519,6 +604,12 @@ def stage_index(args) -> pd.DataFrame:
     )
     print(f"index: {len(index)} transcripts, {len(sites_frame)} sites", flush=True)
     return index
+
+
+def load_windows(windows_dir: str | Path, test: bool = False) -> dict[str, pd.DataFrame]:
+    """Windows of the cached splits: ``train`` and ``val``, or ``test`` alone for a test cache."""
+    splits = (TEST_SPLIT,) if test else CACHE_SPLITS
+    return {s: pd.read_parquet(Path(windows_dir) / f"{s}.parquet") for s in splits}
 
 
 def _tracks_job(job) -> str:
@@ -632,7 +723,11 @@ def load_backbone(checkpoint: Path, base_checkpoint: str, arm: str, head_kind: s
 
 
 def stage_embed(args) -> None:
-    """PCA fit (if absent) and every shard's ``emb.npy`` (+ ``ckpt.npy`` for val), on the GPU."""
+    """PCA fit (if absent) and every shard's ``emb.npy`` (+ ``ckpt.npy`` for val), on the GPU.
+
+    A test cache (``args.test``) copies the train cache's PCA (:func:`reuse_pca`, never a fit)
+    and also writes ``seq.npy`` per shard.
+    """
     import jax
     import jax.numpy as jnp
     from pyfaidx import Fasta
@@ -650,7 +745,10 @@ def stage_embed(args) -> None:
     head_kind = args.head or head_kind_of(checkpoint)
     embed, head_apply = load_backbone(checkpoint, args.base_checkpoint, arm, head_kind)
     print(f"model load {time.time() - t0:.1f}s on {jax.devices()}", flush=True)
-    windows = {s: pd.read_parquet(Path(args.windows_dir) / f"{s}.parquet") for s in CACHE_SPLITS}
+    test = bool(getattr(args, "test", False))
+    if test != (config.get("split") == TEST_SPLIT):
+        raise ValueError(f"{cache}: --test must match how the index was built")
+    windows = load_windows(args.windows_dir, test)
     fasta = Fasta(str(args.genome), as_raw=True)
     rng = np.random.default_rng(args.seed)
     pca_path = cache / PCA_FILE
@@ -663,7 +761,9 @@ def stage_embed(args) -> None:
         positions, strands = shard_positions(index, shard)
         return positions, strands, window_rows(windows[split], chrom, positions)
 
-    if not pca_path.exists():
+    if test:
+        reuse_pca(cache, args.pca_from)
+    elif not pca_path.exists():
         t1 = time.time()
         plans = [(s, *plan_of(s)) for s in shard_sizes(index) if s.startswith("train_")]
         candidates = [(s, p, w) for s, p, _, plan in plans for w in plan]
@@ -704,7 +804,7 @@ def stage_embed(args) -> None:
             t1 = time.time()
             split, chrom = shard.split("_", 1)
             positions, strands, plan = plan_of(shard)
-            val = split == "val"
+            val = split in SCORED_SPLITS
             emb = np.zeros((len(positions), PCA_DIM), np.float16)
             ckpt = np.zeros((len(conditions), len(positions), 4), np.float32) if val else None
             for start, end, rows in plan:
@@ -724,6 +824,8 @@ def stage_embed(args) -> None:
             _save_npy(out / "emb.npy", emb)
             if val:
                 _save_npy(out / "ckpt.npy", select_strand(ckpt, strands))
+            if test:
+                _save_npy(out / "seq.npy", shard_codes(fasta, index, shard))
             print(
                 f"embed {shard}: {len(plan)} windows, {len(positions)} rows, "
                 f"{time.time() - t1:.0f}s (total {time.time() - t0:.0f}s)",
@@ -770,7 +872,38 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--workers", type=int, default=1, help="processes for the tracks stage")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument(
+        "--test",
+        action="store_true",
+        help="build a final TEST cache (test windows only; needs --i-am-final and --pca-from)",
+    )
+    ap.add_argument("--i-am-final", action="store_true", help="required for --test")
+    ap.add_argument(
+        "--pca-from", type=Path, default=None, help="train cache whose pca.npz is reused (--test)"
+    )
     return ap
+
+
+def check_args(ap: argparse.ArgumentParser, args) -> None:
+    """CLI guards: a test cache needs ``--i-am-final``, ``--pca-from`` and its own name."""
+    if args.test:
+        if not args.i_am_final:
+            ap.error("--test reads the held-out test chromosomes; pass --i-am-final to confirm")
+        if args.stage in ("embed", "build") and args.pca_from is None:
+            ap.error("--test needs --pca-from <train cache> (PCA is never refit on test)")
+        if (
+            args.pca_from is not None
+            and Path(args.pca_from).resolve() == Path(args.cache).resolve()
+        ):
+            ap.error("--pca-from must be the train cache, not the test cache")
+    elif args.pca_from is not None:
+        ap.error("--pca-from is only for --test")
+    if (Path(args.cache) / INDEX).exists():
+        is_test = _load_config(Path(args.cache)).get("split") == TEST_SPLIT
+        if is_test and not args.test:
+            ap.error(f"{args.cache} is a test cache; pass --test --i-am-final")
+        if args.test and not is_test:
+            ap.error(f"{args.cache} is a train/val cache; give a new --name for the test cache")
 
 
 def main() -> None:
@@ -778,6 +911,7 @@ def main() -> None:
     ap = build_parser()
     args = ap.parse_args()
     args.cache = args.cache or DEFAULT_ROOT / args.name
+    check_args(ap, args)
     if args.stage in ("index", "build") and not args.gtf:
         ap.error("--gtf is required (or set TISIAGO_GTF in .env)")
     if args.stage in ("embed", "build"):

@@ -298,3 +298,160 @@ def test_tx_cache_reader_memory_maps_shards(tmp_path, tracks):
     view.preload("val", ["tis"])
     tis = view.array("val_chr7", "tis")
     assert not isinstance(tis, np.memmap) and tis.shape == (2, 300, 3)
+
+
+def test_select_test_cache_takes_test_windows_only_with_the_same_rules(tmp_path):
+    units = load_units(_gtf(tmp_path))
+    test_windows = {"test": pd.DataFrame({"chrom": ["chr8"], "start": [0], "end": [1000]})}
+    index = txcache.select_transcripts(
+        units, _genes(), test_windows, CONDITIONS, ["chr8"], test=True
+    )
+    assert index.transcript_id.tolist() == ["T5"]
+    assert index.split.tolist() == ["test"] and index.shard.tolist() == ["test_chr8"]
+    with pytest.raises(ValueError, match="never cached"):
+        txcache.select_transcripts(
+            units, _genes(), {**_windows(), **test_windows}, CONDITIONS, test=True
+        )
+    with pytest.raises(ValueError, match="never cached"):  # default unchanged
+        txcache.select_transcripts(units, _genes(), test_windows, CONDITIONS, ["chr8"])
+
+
+def _pca_cache(root, dim=8, seed=0):
+    rng = np.random.default_rng(seed)
+    root.mkdir(parents=True)
+    pca = {
+        "mean": rng.normal(size=dim).astype(np.float32),
+        "components": rng.normal(size=(txcache.PCA_DIM, dim)).astype(np.float32),
+        "explained_variance": np.ones(txcache.PCA_DIM),
+        "total_variance": np.float64(txcache.PCA_DIM),
+    }
+    np.savez(root / txcache.PCA_FILE, **pca)
+    (root / txcache.CONFIG).write_text('{"pca": {"dim": 256, "samples": 7}}')
+    return pca
+
+
+def test_reuse_pca_copies_and_records_never_refits(tmp_path):
+    import json
+
+    train = tmp_path / "train"
+    _pca_cache(train)
+    test = tmp_path / "test"
+    record = txcache.reuse_pca(test, train)
+    assert (test / txcache.PCA_FILE).read_bytes() == (train / txcache.PCA_FILE).read_bytes()
+    saved = json.loads((test / txcache.CONFIG).read_text())["pca_source"]
+    assert saved == record and saved["pca"] == {"dim": 256, "samples": 7}
+    assert saved["path"] == str(train / txcache.PCA_FILE)
+    txcache.reuse_pca(test, train)  # idempotent on identical bytes
+    other = tmp_path / "other"
+    _pca_cache(other, seed=1)
+    with pytest.raises(ValueError, match="never refits"):
+        txcache.reuse_pca(test, other)
+    with pytest.raises(ValueError, match="train cache"):
+        txcache.reuse_pca(train, train)
+
+
+def test_cli_refuses_test_without_the_final_flag_and_pca_source(tmp_path):
+    ap = txcache.build_parser()
+
+    def check(argv):
+        args = ap.parse_args(argv)
+        args.cache = args.cache or tmp_path / args.name
+        txcache.check_args(ap, args)
+        return args
+
+    with pytest.raises(SystemExit):
+        check(["build", "--test", "--pca-from", str(tmp_path / "train"), "--name", "x_test"])
+    with pytest.raises(SystemExit):
+        check(["build", "--test", "--i-am-final", "--name", "x_test"])
+    with pytest.raises(SystemExit):
+        check(["embed", "--pca-from", str(tmp_path / "train")])
+    args = check(["index", "--test", "--i-am-final", "--name", "x_test"])
+    assert args.test and args.pca_from is None
+    check(["build", "--name", "x"])  # default behaviour unchanged
+
+
+def test_test_cache_build_reuses_pca_and_writes_val_like_shards(tmp_path, tracks, monkeypatch):
+    """Stages index -> tracks -> embed on a synthetic test window, the backbone faked."""
+    import json
+    import types
+
+    from tisiago.seq2func import data, samples
+
+    jnp = pytest.importorskip("jax.numpy")
+    monkeypatch.setattr(samples, "CONDITIONS", CONDITIONS)
+    monkeypatch.setattr(data, "rna_depth_scales", lambda d, cs: {c: 1.0 for c in cs})
+    windows = tmp_path / "windows"
+    windows.mkdir()
+    for split, frame in {
+        **_windows(),
+        "test": pd.DataFrame({"chrom": ["chr8"], "start": [0], "end": [1000]}),
+    }.items():
+        frame.to_parquet(windows / f"{split}.parquet")
+    genome = tmp_path / "genome.fa"
+    rng = np.random.default_rng(3)
+    bases = {c: "".join(rng.choice(list("ACGT"), size=n)) for c, n in SIZES}
+    genome.write_text("".join(f">{c}\n{s}\n" for c, s in bases.items()))
+    train = tmp_path / "train"
+    pca = _pca_cache(train)
+
+    def load_backbone(*_):
+        def embed(onehot):  # (S, 4) -> (S, 8): one-hot then constants
+            return jnp.concatenate([onehot, jnp.ones((onehot.shape[0], 4))], -1)
+
+        def head_apply(x, onehot, rna):
+            k = rna.shape[0]
+            return (
+                jnp.broadcast_to(x[None, :, :4], (k, x.shape[0], 4)) + jnp.arange(k)[:, None, None]
+            )
+
+        return embed, head_apply
+
+    class Readers:
+        def __init__(self, _):
+            pass
+
+        def get(self, condition):
+            rna = types.SimpleNamespace(read=lambda c, s, e: np.zeros((e - s, 2), np.float32))
+            return None, rna, 1.0
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(txcache, "load_backbone", load_backbone)
+    monkeypatch.setattr(data, "RnaCondReaders", Readers)
+    monkeypatch.setattr(txcache, "fit_pca", lambda *a, **k: pytest.fail("PCA refit on test"))
+    cache = tmp_path / "x_test"
+    ap = txcache.build_parser()
+    args = ap.parse_args(
+        [
+            "build", "--test", "--i-am-final", "--cache", str(cache), "--pca-from", str(train),
+            "--windows-dir", str(windows), "--tracks-dir", str(tracks), "--gtf",
+            str(_gtf(tmp_path)), "--genome", str(genome), "--base-checkpoint", "x",
+            "--arm", "rnacond:K562", "--head", "rnacond", "--calls-run", "",
+            "--expression", str(tmp_path / "genes.parquet"),
+        ]
+    )  # fmt: skip
+    _genes().to_parquet(args.expression)
+    txcache.check_args(ap, args)
+    txcache.stage_index(args)
+    txcache.stage_tracks(args)
+    txcache.stage_embed(args)
+    view = txcache.TxCache(cache)
+    assert view.config["split"] == "test" and view.config["pca_source"]["cache"] == str(train)
+    assert (cache / "pca.npz").read_bytes() == (train / "pca.npz").read_bytes()
+    assert view.rows("test").transcript_id.tolist() == ["T5"] and view.rows("val").empty
+    for key in ("emb", "rna", "tis", "chx", "ckpt", "seq"):
+        assert view.has("test_chr8", key), key
+    t5 = txcache.unit_of(view.rows("test").iloc[0])
+    expected_seq = txcache.SEQ_CODE[np.frombuffer(bases["chr8"][100:190].encode(), np.uint8)]
+    np.testing.assert_array_equal(view.array("test_chr8", "seq"), expected_seq)
+    onehot = np.eye(4, dtype=np.float32)[expected_seq]
+    x = np.concatenate([onehot, np.ones((90, 4), np.float32)], -1)
+    proj = ((x - pca["mean"]) @ pca["components"].T).astype(np.float16)
+    np.testing.assert_array_equal(view.array("test_chr8", "emb"), proj)
+    ckpt = view.array("test_chr8", "ckpt")
+    assert ckpt.shape == (2, t5.length, 2)
+    np.testing.assert_allclose(ckpt[1, :, 0], onehot[:, 0] + 1)  # + strand -> TIS+ channel
+    assert json.loads((cache / "cache.json").read_text())["splits"] == {
+        "test": {"transcripts": 1, "positions": 90}
+    }
