@@ -1,5 +1,47 @@
 # P6 fast search ledger
 
+## Phase 3 summary
+Stopped 2026-10-23 04:15 on the phase-3 stop rule: rounds P3R01 (fams 10, 11, 12, 13), P3R02 (fams 11, 12), P3R03 (fams 4, 10, 12)
+and P3R04 (fams 10, 11, 12) gave no primary3 gain > 2 over the baseline (multi-seed means). 5 rounds + baseline, 29 scored configs,
+~20 GPU-hours (A100 x2, A6000 x2, L40S x1; A6000/L40S run this head ~3x slower than A100). No promotion (threshold +4).
+
+**Main result: the transcript-space head on the final backbone.** K562 held out, val chr7, fc2d_k562 cache:
+| | primary3 | TIS nt / codon | nc rep_hit (all / first exon / later) [rep1 ref .652 / .733 / .530] | ATG rep_hit (all / later) [.845 / .797] | CHX bin30 / codon / nt |
+|---|---|---|---|---|---|
+| full fc2d model, genomic head (ckpt) | 66.3 | 73.0 / 73.7 | .389 / .523 / .188 | .834 / .726 | |
+| **transcript-space head (p2 leader recipe), 4 seeds** | **75.0+-0.8** | 81.8 / 82.4 | .445 / .578 / .246 | .836 / .730 | 83.7 / 71.4 / 66.4 |
+| + one-hot +-20 TIS branch (onehot41), 3 seeds | 75.9+-0.9 | 83.0 / 83.7 | .448 / .562 / .276 | .835 / .751 | 83.7 / 71.2 / 66.3 |
+| + one-hot + 3-nt TIS term (onehot41_l3), 4 seeds | 76.1+-1.8 | 83.3 / 83.5 | .449 / .572 / .263 | .844 / .761 | 83.7 / 71.0 / 66.6 |
+The two-stage model (frozen fc2d embeddings -> transcript-coordinate head) is +8.7 primary3 over the deployed genomic model and
++8.8 TIS nt: near-cognate reproducible-start recall .389 -> .445 (60% -> 68% of the replicate ceiling). No head variant moved NC
+recall further (.43-.48 across all 29 configs; seed sd ~.015, i.e. ~2 primary3 points from 293 sites). Later-exon NC recall
+stays at ~half the replicate ceiling (.25 vs .53) in every variant.
+
+**What mattered / what did not (one line each):**
+- Transcript (spliced) coordinates for the TIS context: the biggest single effect (+8.7 vs the genomic head). Bio: the scanning
+  ribosome sees the mature mRNA, so start choice depends on spliced 5' context, not on intronic DNA.
+- One-hot +-20 nt TIS branch (fam 12): +1.3 TIS nt/codon consistently (3 seeds), +0.9 primary3 (noise). Bio: exact codon and
+  Kozak identity across junctions sharpen the peak; it does not decide which weak start fires.
+- Peak sharpness (fam 10): 3/9-nt local terms, temperature .5, sharpened 32-nt target: +0-1.5, within noise.
+- Exon structure inputs (fam 11): no gain (exon index, junction distances; also TIS-only). The context stack already sees spliced
+  neighbourhood; junction proximity per se is not informative.
+- Context causality (fam 13): upstream-only context = bidirectional (74.9 vs 75.0); downstream-only worse (73.8). Bio: consistent
+  with scanning; the start decision is carried by 5' context.
+- Noise model (fam 4 re-test): training on replicate-reproducible TIS signal (2 min(rep1, rep2) or geometric mean) HURTS (71-72,
+  nc .40-.41): discarding non-reproducible counts removes real low-count starts.
+
+**Recommended recipe to scale:** phase-2 leader head (conv trunk + TIS-only dilated context RF ~1 kb, 1 kb factorised outputs,
+local 1 kb + 32 nt multinomials) run in transcript coordinates on the fc2d backbone embeddings, plus the one-hot +-20 TIS branch
+(`model.tis_onehot: {width: 41, channels: 64, layers: 1}`) for TIS shape. Config: `configs/p3r01/p3r01_onehot41.yaml`.
+Remaining NC gap looks like a data/representation ceiling for this head family (later exons especially), not a loss choice.
+
+**Exports for Ribo-TISH (val, K562, genomic float bigWigs, predict_tracks pooled layout, Ribo-TISH minus convention, MANE exons):**
+`data/p6/fastloop/export/p3r02_onehot41_l3_s3/K562/` (primary3 75.1), `data/p6/fastloop/export/p3r00_tisdil_l32_s3/K562/` (75.8,
+baseline recipe), plus params.npz + config.json. Command (repeat for any config):
+`bash autoresearch/p6fast/submit.sh nvidia-A100-20 --export-dir data/p6/fastloop/export <config.yaml>`
+(`--export-conditions K562 HeLa ...` for more lines). Test-split export is not possible from the fast loop: txcache never caches
+test chromosomes; it needs a test cache built on the controller's instruction.
+
 ## Phase 3 (transcript-space head on the final fc2d backbone; primary3)
 primary3 = mean(K562 TIS nt %, 100 x min(1, nc_rep_hit / nc_rep_ref)); nc_rep_hit = P(model argmax within +-1 nt of a
 K562 val near-cognate Ribo-TISH start | replicate-2 argmax within +-1 nt), nc_rep_ref = the same for replicate 1 (columns
@@ -8,10 +50,28 @@ K562 val near-cognate Ribo-TISH start | replicate-2 argmax within +-1 nt), nc_re
 Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain > 2 (3-seed means).
 
 ### Phase 3 leaderboard
-(pending)
+(guard-passing; K562 held out; fc2d_k562; seeds = n)
+| name | primary3 | TIS nt / codon | nc rep_hit (first / later) | seeds |
+|---|---|---|---|---|
+| p3r03_onehot2x128 | 76.9 | 83.6 / 84.2 | .457 (.56 / .30) | 1 |
+| p3r02_onehot_ctx | 76.7 | 83.2 / 83.9 | .457 (.59 / .26) | 1 |
+| p3r01_l32_l3 | 76.5 | 82.3 / 81.4 | .461 (.59 / .27) | 1 |
+| p3r02_onehot41_l3 | 76.1+-1.8 | 83.3 / 83.5 | .449 (.57 / .26) | 4 |
+| p3r01_onehot41 | 75.9+-0.9 | 83.0 / 83.7 | .448 (.56 / .28) | 3 |
+| p3r04_oh41_l3_l9 | 75.9 | 83.2 / 82.9 | .447 | 1 |
+| p3r01_temp05 | 75.8 | 81.0 / 82.0 | .461 | 1 |
+| p3r01_l32_l9 | 75.8 | 83.0 / 82.6 | .447 | 1 |
+| p3r04_oh41_l3w1000 | 75.7 | 83.4 / 83.1 | .444 | 1 |
+| p3r00_tisdil_l32 (baseline) | 75.0+-0.8 | 81.8 / 82.4 | .445 (.58 / .25) | 4 |
+| full fc2d model (ckpt reference) | 66.3 | 73.0 / 73.7 | .389 (.52 / .19) | - |
 
 ### Phase 3 findings
-(pending)
+- Transcript coordinates: +8.7 primary3 over the genomic full model (see summary).
+- Fam 10 (peak sharpness): finer local terms / temperature / sharpened targets are within noise.
+- Fam 11 (exon structure inputs): no gain, whole-model or TIS-only.
+- Fam 12 (one-hot branch): +1.3 TIS shape, NC recall unchanged; wider/deeper or into-context no better.
+- Fam 13 (causality): 5' context carries the decision (up-only = both; down-only -1.2).
+- Fam 4 (reproducible-signal targets): negative (-3 to -4).
 
 ### Phase 3 rounds
 - 2026-10-22 22:10 | scorer/export | reproducible-start columns + `primary3` appended after phase-2 columns (results.tsv
@@ -41,7 +101,9 @@ Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain 
   geotgt 72.1 (nc .40-.41: worse); l32tp2 75.2; onehot2x128 76.9 | fam 4 NEGATIVE: training on replicate-reproducible signal only
   removes real (if noisy) starts and hurts reproducible-start recall; sharpened 32-nt target no gain. |
 - 2026-10-23 03:00 | P3R04 | fam 12 + 10 around onehot41_l3: seeds 1-2; 2x128 one-hot + l3; one-hot into context + l3; l3 weight
-  1000; l3 + l9; + tis_exon | configs/p3r02 (seeds), p3r04 | 11195358-62 | (pending) |
+  1000; l3 + l9; + tis_exon | configs/p3r02 (seeds), p3r04 | 11195358-62 | onehot41_l3 seeds 74.6 / 75.9 (+ s3 75.1 in 11195363):
+  **4-seed 76.1+-1.8** (+1.0 over baseline 75.0+-0.8 after its s3 75.8, 11195364); oh2x128_l3 74.0; ohctx_l3 74.0; l3w1000 75.7;
+  l3_l9 75.9; tisexon 75.7 | NO GAIN > 2 (streak 4 rounds, fams 4, 10, 11, 12, 13) -> STOP; seed-3 runs exported val bigWigs. |
 
 ## Phase 2 (near-cognate start recall; primary2)
 primary2 = mean(K562 TIS nt %, min(100, 100 x K562 near-cognate argmax-at-start / real)). Guards: phase-1
