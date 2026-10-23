@@ -120,3 +120,32 @@ NEAR-COGNATE starts: predicted peak share at near-cognate starts 0.06 vs real 0.
 - Stop rule (phase 2): deadline 2026-10-24 18:00, or 3 consecutive rounds across >= 3 families without a
   primary2 gain > 2 (3-seed means). Write a "Phase 2 summary" above the phase-1 summary when stopping, and a
   promotion file for any config that beats the phase-1 leader on primary2 by >= 5 with guards intact.
+
+## Phase 3 (started 2026-10-22 ~21:00) — transcript-space head on the final backbone, near-cognate + start calls
+
+Diagnosis (`.superpowers/sdd/2026-10-22-p6-nc-diagnosis/progress.md`): base AlphaGenome lacks local NC information
+(fine-tuning created it); most NC "misses" are irreproducible in the data; the residual is (a) spliced 5'->3' context —
+the full model's TIS context runs in GENOMIC windows, so reproducible NC starts in later exons are hit 0.31 vs 0.60 in
+the first exon (ATG 0.89 -> 0.30 across junctions) — and (b) peaks ~6x too flat. The fast loop's heads already run in
+TRANSCRIPT coordinates. Phase 3 makes that the deployed architecture: final fine-tuned backbone + transcript-space head.
+
+- Cache: `data/p6/txcache/fc2d_k562` (built from `data/p6/runs/ar_rnacond_k562_fc2d_l2w300/best`, K562 held out).
+  Rescore the phase-2 leader config on it (3 seeds) as the phase-3 baseline.
+- First tasks (allowed scoring additions, new columns only, unit-tested, committed):
+  1. Reproducible-start NC metric: K562 val NC (and ATG) Ribo-TISH starts where rep1 AND rep2 tracks both peak
+     within +-1 nt; report `nc_rep_hit` = P(model argmax within +-1 | rep2 hit) and `nc_rep_ref` = P(rep1 hit | rep2
+     hit), and the ratio; same for ATG; split first exon vs later exons.
+  2. `primary3` = mean of K562 TIS nt percent and 100 x min(1, nc_rep_hit / nc_rep_ref).
+  3. An export path: write a config's val (and, only when the controller asks, test) predictions back to GENOMIC
+     per-replicate float bigWigs in the predict_tracks layout (`<out>/<C>/{tis,chx}_pooled.{plus,minus}.bw`,
+     Ribo-TISH minus convention, MANE transcripts only; positions outside MANE exons = 0) so the controller can
+     run Ribo-TISH start-site comparisons on the two-stage model.
+- Families: 10. peak sharpness (local multinomial at 3/9/16 nt, temperature, combinations with the 32-nt term);
+  11. exon-structure inputs (exon index, distance to nearest junction, distance to cap in spliced coordinates —
+  exon structure is allowed, CDS annotation and calls are not); 12. one-hot sequence branch (+-20 nt) into the TIS
+  head; 13. TIS context range/causality in transcript space (upstream-only context = what a scanning ribosome has
+  seen); plus re-tests where primary3 could change a phase-1/2 conclusion.
+- GPU: all of nvidia-A100-20 (2), nvidia-A6000-20 (2), nvidia-L40S-24 (1) — nothing else is running; respect caps.
+- Promotion: any config beating the phase-3 baseline by >= 4 on primary3 (3 seeds) with phase-2 guards — write
+  promote/p3_<name>.md including the export command.
+- Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain > 2. Write "Phase 3 summary" on top.
