@@ -106,6 +106,7 @@ DEFAULTS: dict = {
         "batch_condition": "single",
         "sample_weight": "length",
         "preload": True,
+        "tis_target": "pooled",
     },
     "inputs": ["embedding", "rna"],
     "model": {
@@ -249,12 +250,13 @@ def exon_features(junctions: Sequence[int], positions: np.ndarray, length: int) 
 
 
 def crop_example(
-    cache: TxCache, row, condition: str, start: int, crop: int
+    cache: TxCache, row, condition: str, start: int, crop: int, tis_target: str = "pooled"
 ) -> dict[str, np.ndarray]:
     """One transcript ``[start, start + crop)`` of ``condition``, zero-padded to ``crop``.
 
     Also ``exon`` (:func:`exon_features`) and ``seq`` (``seq.npy`` codes when the cache has
-    them, else ``SEQ_N``).
+    them, else ``SEQ_N``). ``tis_target``: ``pooled`` (rep1 + rep2), ``min`` (2 x min(rep1,
+    rep2): only replicate-reproducible signal) or ``geo`` (2 x sqrt(rep1 x rep2)).
     """
     k = cache.condition_index(condition)
     n = max(0, min(crop, int(row.length) - start))
@@ -280,7 +282,15 @@ def crop_example(
     )
     out["emb"][:n] = cache.array(row.shard, "emb")[lo : lo + n]
     out["rna"][:n] = cache.array(row.shard, "rna")[k, lo : lo + n]
-    out["target"][:n, 0] = cache.array(row.shard, "tis")[k, lo : lo + n, 2]
+    tis = cache.array(row.shard, "tis")[k, lo : lo + n]
+    if tis_target == "pooled":
+        out["target"][:n, 0] = tis[:, 2]
+    elif tis_target == "min":
+        out["target"][:n, 0] = 2.0 * np.minimum(tis[:, 0], tis[:, 1])
+    elif tis_target == "geo":
+        out["target"][:n, 0] = 2.0 * np.sqrt(np.maximum(tis[:, 0] * tis[:, 1], 0.0))
+    else:
+        raise ValueError(f"tis_target must be pooled, min or geo, not {tis_target!r}")
     out["target"][:n, 1] = cache.array(row.shard, "chx")[k, lo : lo + n, 2]
     out["valid"][:n] = True
     out["pos"][:n] = np.arange(start, start + n)
@@ -303,6 +313,7 @@ class Sampler:
         self.cache = cache
         data = config["data"]
         self.crop, self.size = int(data["crop"]), int(data["batch"])
+        self.tis_target = data.get("tis_target", "pooled")
         self.mode, self.single = data["crop_mode"], data["batch_condition"] == "single"
         if self.mode not in ("random", "start"):
             raise ValueError(f"crop_mode must be random or start, not {self.mode!r}")
@@ -349,7 +360,7 @@ class Sampler:
         """One training batch."""
         rows, conditions, starts = self.draw()
         examples = [
-            crop_example(self.cache, r, c, s, self.crop)
+            crop_example(self.cache, r, c, s, self.crop, self.tis_target)
             for r, c, s in zip(rows, conditions, starts, strict=True)
         ]
         return stack_examples(examples, rows)

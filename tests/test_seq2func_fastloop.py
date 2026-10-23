@@ -801,3 +801,19 @@ def test_causal_tis_context_ignores_the_other_side(cache, causal, keep):
     b = np.asarray(model.apply(params, changed)[0])[..., 0]
     np.testing.assert_allclose(a[:, keep], b[:, keep], rtol=1e-5, atol=1e-6)
     assert not np.allclose(a, b)
+
+
+def test_tis_target_min_and_geo_use_both_replicates(cache):
+    rows = cache.index.set_index("transcript_id", drop=False)
+    tis = cache.array("train_chr1", "tis")[0, :300]
+    ex = fastloop.crop_example(cache, rows.loc["A"], "HeLa", 0, 300, "min")
+    np.testing.assert_allclose(ex["target"][:, 0], 2 * np.minimum(tis[:, 0], tis[:, 1]))
+    ex = fastloop.crop_example(cache, rows.loc["A"], "HeLa", 0, 300, "geo")
+    np.testing.assert_allclose(ex["target"][:, 0], 2 * np.sqrt(tis[:, 0] * tis[:, 1]), rtol=1e-6)
+    pooled = fastloop.crop_example(cache, rows.loc["A"], "HeLa", 0, 300)
+    np.testing.assert_allclose(pooled["target"][:, 0], tis[:, 2])
+    np.testing.assert_allclose(ex["target"][:, 1], pooled["target"][:, 1])
+    sampler = fastloop.Sampler(cache, _config(data={"tis_target": "min"}))
+    assert sampler.tis_target == "min"
+    with pytest.raises(ValueError, match="tis_target"):
+        fastloop.crop_example(cache, rows.loc["A"], "HeLa", 0, 8, "max")

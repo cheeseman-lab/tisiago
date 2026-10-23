@@ -24,7 +24,18 @@ Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain 
 - 2026-10-22 22:55 | P3R00 + P3R01 | baseline (leader on fc2d, 3 seeds); fam 10 (l32 + 9-nt / 3-nt TIS block, TIS temperature .5),
   fam 11 (exon input), fam 12 (one-hot +-20 TIS branch), fam 13 (causal up / down TIS context), 11+12 combo | configs/p3r00, p3r01 |
   11194735, 11194818 (A100); 11194996-8 (A6000/L40S; first submission 11194736-8 cancelled: those GPUs are ~3x slower,
-  submit.sh now allows 90 min/config off A100) | (pending) |
+  submit.sh now allows 90 min/config off A100) | **baseline 3 seeds 74.8+-0.8** (75.4/75.2/73.9; TIS nt 81.7 codon 82.5;
+  nc rep_hit .443 vs ref .652; first exon .58/.73, later .24/.53; ATG .835/.845); full fc2d model (ckpt) 66.3 (nc .389, TIS nt 73.0);
+  onehot41 76.9 -> 3 seeds **75.9** (76.9/75.2/75.6; TIS nt 83.1 codon 83.4 = +1.4 both); l32_l3 76.5; l32_l9 75.8; temp05 75.8;
+  exon 75.5; exon_onehot 75.4; causal_up 74.9; causal_down 73.8; all pass guards | NO GAIN > 2 (streak 1: fams 10, 11, 12, 13).
+  The transcript-space head is +8.5 over the deployed genomic model. The NC hit rate is flat (.44-.46) across every variant;
+  the one-hot branch improves TIS shape (+1.4 nt) but not NC recall. Upstream-only context is not worse than bidirectional
+  (74.9 vs 74.8), downstream-only is (73.8): the decision is in the 5' context. |
+- 2026-10-23 01:15 | P3R02 | fam 12 (seeds of onehot41; one-hot into the TIS context = spliced sequence over ~1 kb; onehot + 3-nt
+  term), fam 11 (exon features to the TIS branch only) | configs/p3r02 | 11195124 (onehot41 s1/s2, done), 11195125 (preempted and
+  requeued at 01:12) | (pending) |
+- 2026-10-23 01:20 | P3R03 | fam 4 (noise model: TIS target = 2 x min(rep1, rep2) or 2 x sqrt(rep1 rep2) = reproducible signal only;
+  + onehot), fam 10 (32-nt term with sharpened target, power 2), fam 12 (one-hot 2 x 128) | configs/p3r03 | 11195351-4 | (pending) |
 
 ## Phase 2 (near-cognate start recall; primary2)
 primary2 = mean(K562 TIS nt %, min(100, 100 x K562 near-cognate argmax-at-start / real)). Guards: phase-1
