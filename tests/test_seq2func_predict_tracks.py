@@ -608,3 +608,98 @@ def test_rnacond_cli_any_condition(monkeypatch, tmp_path, capsys):
         with pytest.raises(SystemExit):
             predict_tracks.main()
     assert "--condition" in capsys.readouterr().err
+
+
+def _write_float(float_dir, plus, minus):
+    """Pooled float tracks; ``plus``/``minus`` map chrom -> {file position: value}."""
+    for library in ("tis", "chx"):
+        counts = {}
+        for chrom, size in SIZES:
+            counts[(chrom, "+")] = Counter({size - 5: 0.5, **plus.get(chrom, {})})
+            counts[(chrom, "-")] = Counter({size - 5: 0.5, **minus.get(chrom, {})})
+        write_bigwigs(counts, SIZES, predict_tracks.pooled_prefix(float_dir, "K562", library))
+
+
+def test_float_resample_expectation_is_float_tracks_split_by_real_fractions(world, tmp_path):
+    # real replicate totals 3:1 (region), float content independent of the real counts
+    _write_reps(world["tracks"], {"chr7": {10: 6}}, {}, reps=(1,))
+    _write_reps(world["tracks"], {"chr7": {10: 2}}, {}, reps=(2,))
+    float_dir = tmp_path / "float"
+    # minus: file 31 is canonical 30 -> already Ribo-TISH convention, must not be shifted again
+    _write_float(float_dir, {"chr7": {10: 8.0}}, {"chr7": {31: 4.0, 201: 9.0}})
+    manifest = _run(
+        world, world["out"], None, mode="expected", source="float-resample", float_dir=float_dir
+    )
+    assert manifest["source"] == "float-resample"
+    assert manifest["float_dir"] == str(float_dir)
+    assert manifest["expected_totals"]["tis"] == pytest.approx(12.0)
+    for library in ("tis", "chx"):
+        for rep, share in ((1, 0.75), (2, 0.25)):
+            prefix = track_prefix(world["out"], "K562", library, rep)
+            assert dict(read_bigwig_counts(f"{prefix}.plus.bw")["chr7"]) == {10: 8.0 * share}
+            got = dict(read_bigwig_counts(f"{prefix}.minus.bw")["chr7"])
+            assert got == {31: 4.0 * share}  # not 31 + shift; 201 is outside the region
+
+
+def test_float_resample_match_depth_and_seeded_sampling(world, tmp_path):
+    _write_reps(world["tracks"], {"chr7": {10: 300, 50: 100}}, {}, reps=(1, 2))
+    float_dir = tmp_path / "float"
+    _write_float(float_dir, {"chr7": {10: 0.5, 50: 1.5}}, {})
+    manifest = _run(
+        world,
+        world["out"],
+        None,
+        mode="expected",
+        source="float-resample",
+        float_dir=float_dir,
+        match_depth=True,
+    )
+    assert manifest["expected_totals"]["tis"] == pytest.approx(800.0)  # real pooled total
+    assert manifest["depth_factors"]["tis"] == pytest.approx(400.0)
+
+    def read(name, seed):
+        out = world["out"].with_name(name)
+        _run(
+            world,
+            out,
+            None,
+            mode="sample",
+            seed=seed,
+            source="float-resample",
+            float_dir=float_dir,
+            match_depth=True,
+        )
+        return read_bigwig_counts(f"{track_prefix(out, 'K562', 'tis', 1)}.plus.bw")["chr7"]
+
+    a, b, c = read("a", 5), read("b", 5), read("c", 6)
+    assert a == b and a != c
+
+
+def test_float_resample_requires_float_dir(world):
+    with pytest.raises(ValueError, match="float_dir"):
+        _run(world, world["out"], None, source="float-resample")
+
+
+def test_float_resample_cli_and_test_split_guard(world, monkeypatch, tmp_path):
+    _write_reps(world["tracks"], {"chr7": {10: 4}}, {}, reps=(1, 2))
+    float_dir = tmp_path / "float"
+    _write_float(float_dir, {"chr7": {10: 2.0}}, {})
+    windows_dir = tmp_path / "win"
+    windows_dir.mkdir()
+    WINDOWS.to_parquet(windows_dir / "val.parquet")
+    WINDOWS.to_parquet(windows_dir / "test.parquet")
+    argv = [
+        "predict_tracks", "--source", "float-resample", "--float-dir", str(float_dir),
+        "--condition", "K562", "--tracks-dir", str(world["tracks"]),
+        "--windows-dir", str(windows_dir), "--out-dir", str(world["out"]), "--mode", "expected",
+    ]  # fmt: skip
+    monkeypatch.setattr(sys, "argv", argv)
+    predict_tracks.main()
+    saved = json.loads((world["out"] / "K562" / "predict_tracks.json").read_text())
+    assert saved["source"] == "float-resample" and saved["float_dir"] == str(float_dir)
+    monkeypatch.setattr(sys, "argv", [*argv[:-4], "--split", "test", "--mode", "expected"])
+    with pytest.raises(SystemExit):
+        predict_tracks.main()
+    monkeypatch.setattr(sys, "argv", argv[:5] + argv[7:])  # drop --float-dir
+    with pytest.raises(SystemExit):
+        predict_tracks.main()

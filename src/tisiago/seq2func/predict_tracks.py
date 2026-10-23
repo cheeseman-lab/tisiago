@@ -27,7 +27,9 @@ region equals the real pooled total there (factors in the manifest). ``--source 
 replaces the model by the real pooled tracks (already in Ribo-TISH convention, read back to
 canonical coordinates and re-shifted once on writing) and draws replicates the same way: the
 same-pipeline noise ceiling for the comparison; it needs no checkpoint
-(``--condition --tracks-dir --windows-dir --out-dir``).
+(``--condition --tracks-dir --windows-dir --out-dir``). ``--source float-resample --float-dir D``
+does the same with the expectation read from pooled float bigWigs
+``D/<C>/{tis,chx}_pooled.{plus,minus}.bw`` (Ribo-TISH convention, not shifted again).
 
 Overlapping windows are stitched by nearest centre: each position takes the prediction of the
 window whose centre is nearest (ties to the earlier window), i.e. the central part of every
@@ -59,7 +61,7 @@ from tisiago.seq2func.windows import merge_spans
 LIBRARIES = ("tis", "chx")
 REPS = (1, 2)
 MODES = ("sample", "expected", "float")
-SOURCES = ("model", "real-resample")
+SOURCES = ("model", "real-resample", "float-resample")
 SPLIT_FILES = {"val": "val.parquet", "test": "test.parquet"}
 MANIFEST = "predict_tracks.json"
 
@@ -215,6 +217,23 @@ def _real_span(arrays: dict, chrom: str, lo: int, hi: int) -> np.ndarray:
     return dense
 
 
+def float_span(readers: dict, chrom: str, lo: int, hi: int, shift: int, size: int) -> np.ndarray:
+    """Dense pooled values over canonical ``[lo, hi)`` read from a float bigWig.
+
+    The file is already in Ribo-TISH convention, so canonical ``p`` sits at ``p + shift``;
+    positions outside the chromosome or without an entry are 0.
+    """
+    dense = np.zeros(max(hi - lo, 0))
+    bw = readers[0]
+    if chrom not in readers[1]:
+        return dense
+    a, b = max(lo + shift, 0), min(hi + shift, size, readers[1][chrom])
+    if b > a:
+        values = np.nan_to_num(np.array(bw.values(chrom, a, b), dtype=np.float64))
+        dense[a - lo - shift : b - lo - shift] = values
+    return dense
+
+
 def predict_condition(
     predict_fn: Callable[[dict], np.ndarray] | None,
     windows: pd.DataFrame,
@@ -235,6 +254,7 @@ def predict_condition(
     prefetch: int = 4,
     meta: dict | None = None,
     rna_conditioned: bool = False,
+    float_dir: str | Path | None = None,
 ) -> dict:
     """Write ``condition``'s predicted per-replicate TIS/CHX bigWigs; return the manifest.
 
@@ -247,6 +267,9 @@ def predict_condition(
     (the same-pipeline noise ceiling); ``predict_fn``, ``fasta``, ``genes`` are then unused.
     ``rna_conditioned`` (``rnacond`` models): batches carry ``condition``'s RNA and predictions
     are in :func:`tisiago.seq2func.targets.rnacond_layout` order; ``conditions`` is unused.
+    ``source="float-resample"`` takes the expectation from ``float_dir``'s pooled float
+    bigWigs (``<C>/{tis,chx}_pooled.{plus,minus}.bw``, Ribo-TISH convention, never re-shifted
+    on reading) and otherwise behaves like ``real-resample``.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, not {mode!r}")
@@ -254,6 +277,8 @@ def predict_condition(
         raise ValueError(f"source must be one of {SOURCES}, not {source!r}")
     if copies < 1:
         raise ValueError("copies must be >= 1")
+    if source == "float-resample" and float_dir is None:
+        raise ValueError("source float-resample needs float_dir")
     model = source == "model"
     channel = {}
     if model:
@@ -288,6 +313,31 @@ def predict_condition(
 
     def expectations():
         """Yield ``(chrom, lo, hi, {(library, strand): pooled expectation})`` per window."""
+        if source == "float-resample":
+            readers = {}
+            try:
+                for library in LIBRARIES:
+                    for strand, name in STRAND_FILES.items():
+                        prefix = pooled_prefix(float_dir, condition, library)
+                        bw = pyBigWig.open(str(prefix.with_name(f"{prefix.name}.{name}.bw")))
+                        readers[(library, strand)] = (bw, bw.chroms())
+                for i, row in enumerate(windows.itertuples()):
+                    lo, hi = spans[i]
+                    yield (
+                        row.chrom,
+                        lo,
+                        hi,
+                        {
+                            key: float_span(
+                                reader, row.chrom, lo, hi, strand_shift(key[1]), size_of[row.chrom]
+                            )
+                            for key, reader in readers.items()
+                        },
+                    )
+            finally:
+                for bw, _ in readers.values():
+                    bw.close()
+            return
         if not model:
             real = pooled_real_arrays(tracks_dir, condition, region)
             for i, row in enumerate(windows.itertuples()):
@@ -401,6 +451,7 @@ def predict_condition(
         **(meta or {}),
         "condition": condition,
         "source": source,
+        "float_dir": str(float_dir) if float_dir else None,
         "mode": mode,
         "layout": "pooled" if pooled_only else "replicates",
         "files": files,
@@ -458,7 +509,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=SOURCES,
         default="model",
         help="model: checkpoint predictions; real-resample: Poisson resample of the real pooled\n"
-        "tracks (same-pipeline noise ceiling; no checkpoint needed)",
+        "tracks (same-pipeline noise ceiling; no checkpoint needed); float-resample: the same\n"
+        "resample of pooled float bigWigs from --float-dir",
+    )
+    ap.add_argument(
+        "--float-dir",
+        type=Path,
+        help="pooled float bigWigs <DIR>/<C>/{tis,chx}_pooled.{plus,minus}.bw (float-resample)",
     )
     ap.add_argument(
         "--match-depth",
@@ -489,7 +546,9 @@ def main() -> None:
     if model and not (args.checkpoint and args.arm):
         ap.error("--checkpoint and --arm are required for --source model")
     if not model and not (args.condition or args.arm):
-        ap.error("--source real-resample needs --condition (or --arm)")
+        ap.error(f"--source {args.source} needs --condition (or --arm)")
+    if args.source == "float-resample" and not args.float_dir:
+        ap.error("--source float-resample needs --float-dir")
     from tisiago.seq2func.samples import CONDITIONS
     from tisiago.seq2func.train import is_rnacond_arm, parse_arm, parse_rnacond_arm
 
@@ -591,6 +650,7 @@ def main() -> None:
         mask_unexpressed=args.mask_unexpressed,
         match_depth=args.match_depth,
         source=args.source,
+        float_dir=args.float_dir,
         prefetch=args.prefetch,
         meta=meta,
         **kwargs,
