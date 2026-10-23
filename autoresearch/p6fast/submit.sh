@@ -7,7 +7,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 part="$1"; shift
 [[ $# -gt 0 ]] || { echo "no configs" >&2; exit 2; }
-mins=$(( 10 + 28 * $# ))  # 30k-step configs take 10-26 min each (dilated TIS context ~23)
-sbatch --parsable --partition="$part" --job-name=mdiberna_tisiago_p6fast_ar \
+per=28  # 30k-step configs take 10-26 min each on A100 (dilated TIS context ~23)
+[[ "$part" == nvidia-A100-20 ]] || per=90  # A6000 / L40S are ~3x slower (GPU-bound)
+mins=$(( 10 + per * $# ))
+sbatch --parsable --partition="$part" ${P6FAST_DEPENDENCY:+--dependency=$P6FAST_DEPENDENCY} --job-name=mdiberna_tisiago_p6fast_ar \
     --time="0-$(printf '%02d:%02d:00' $((mins / 60)) $((mins % 60)))" \
     scripts/run_p6_fastloop.sh --results autoresearch/p6fast/results.tsv "$@"

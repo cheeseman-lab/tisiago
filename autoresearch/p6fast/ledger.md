@@ -18,6 +18,13 @@ Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain 
   header extended, old rows nan); `--export-dir` writes val genomic float bigWigs `<dir>/<name>/<C>/{tis,chx}_pooled.
   {plus,minus}.bw` (Ribo-TISH minus convention, MANE exons only) + params.npz; new components `exon` input, `onehot` input,
   `model.tis_onehot` branch, `tis_context.causal: up|down`; `build_seq.py` writes `seq.npy` into caches. Unit-tested. |
+- 2026-10-22 22:20 | P3R00-v2 | metric check | phase-2 leader on the OLD cache (ar_rnacond_k562_v2) + export smoke | 11194719 |
+  primary3 75.6 (TIS nt 80.0; nc rep_hit .464 vs rep_ref .652 = 71%; first exon .61/.73, later exons .24/.53; ATG .83/.85);
+  v2 checkpoint itself nc .12 (ratio .19). Export wrote data/p6/fastloop/export/p3r00_v2_tisdil_l32/K562/*.bw | metric + export work. |
+- 2026-10-22 22:55 | P3R00 + P3R01 | baseline (leader on fc2d, 3 seeds); fam 10 (l32 + 9-nt / 3-nt TIS block, TIS temperature .5),
+  fam 11 (exon input), fam 12 (one-hot +-20 TIS branch), fam 13 (causal up / down TIS context), 11+12 combo | configs/p3r00, p3r01 |
+  11194735, 11194818 (A100); 11194996-8 (A6000/L40S; first submission 11194736-8 cancelled: those GPUs are ~3x slower,
+  submit.sh now allows 90 min/config off A100) | (pending) |
 
 ## Phase 2 (near-cognate start recall; primary2)
 primary2 = mean(K562 TIS nt %, min(100, 100 x K562 near-cognate argmax-at-start / real)). Guards: phase-1

@@ -21,8 +21,9 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   its config); ``model.tis_context`` stacks a trunk on the shared one for TIS only (e.g. a
   dilated stack for 5'UTR-scale context; ``causal: up`` sees only the 5' side, ``down`` only
   the 3' side); ``model.tis_onehot`` (``width``, ``channels``, ``layers``) adds a one-hot
-  sequence conv branch to the TIS head input; ``model.chx_contrast`` feeds log ratios of the
-  gradient-stopped CHX prediction to the TIS output.
+  sequence conv branch to the TIS head input (``into: context``: to the TIS context input);
+  ``model.tis_exon`` feeds the ``exon`` features to the TIS branch only; ``model.chx_contrast``
+  feeds log ratios of the gradient-stopped CHX prediction to the TIS output.
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
@@ -694,10 +695,7 @@ def make_model(config: Mapping, ctx: Mapping):
         n_chx, chx_fn = OUTPUTS[model["chx"]["kind"]]
         chx = chx_fn(head(h_chx, batch["strand"], n_chx, "chx_out"), valid, model["chx"])
         tis_in = h
-        if model.get("tis_context"):
-            with hk.name_scope("tis_context"):
-                ctx_cfg = model["tis_context"]
-                tis_in = TRUNKS[ctx_cfg["kind"]](h, valid, ctx_cfg)
+        seq_h = None
         if model.get("tis_onehot"):
             oh_cfg = model["tis_onehot"]
             seq_h = _onehot(batch)
@@ -709,6 +707,15 @@ def make_model(config: Mapping, ctx: Mapping):
                     name=f"tis_onehot{i}",
                 )
                 seq_h = jax.nn.relu(conv(seq_h)) * valid[..., None]
+            if oh_cfg.get("into", "head") == "context":
+                tis_in, seq_h = jnp.concatenate([tis_in, seq_h], axis=-1), None
+        if model.get("tis_exon"):
+            tis_in = jnp.concatenate([tis_in, batch["exon"].astype(jnp.float32)], axis=-1)
+        if model.get("tis_context"):
+            with hk.name_scope("tis_context"):
+                ctx_cfg = model["tis_context"]
+                tis_in = TRUNKS[ctx_cfg["kind"]](tis_in, valid, ctx_cfg)
+        if seq_h is not None:
             tis_in = jnp.concatenate([tis_in, seq_h], axis=-1)
         if model.get("chx_contrast"):
             ratios = chx_log_ratios(jax.lax.stop_gradient(chx))

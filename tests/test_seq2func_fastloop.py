@@ -321,6 +321,13 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
                 "tis_onehot": {"width": 5, "channels": 4, "layers": 2},
             },
         },
+        {
+            "model": {
+                "tis_context": {"kind": "dilated", "dilations": [1, 4], "channels": 8},
+                "tis_onehot": {"width": 5, "channels": 4, "into": "context"},
+                "tis_exon": True,
+            },
+        },
     ],
 )
 def test_every_component_gives_finite_gradients_for_every_loss(cache, override):
