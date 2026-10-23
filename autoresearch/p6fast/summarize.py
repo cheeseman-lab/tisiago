@@ -1,8 +1,9 @@
 """Summarise autoresearch/p6fast/results.tsv: primary, K562 guards vs ref_rnacond_ps, seed groups.
 
-Usage: python autoresearch/p6fast/summarize.py [--p2] [name-substring ...]
+Usage: python autoresearch/p6fast/summarize.py [--p2 | --p3] [name-substring ...]
 Seed replicates are grouped by stripping a trailing ``_s<k>`` from the name. ``--p2`` shows phase-2
 rows only (``primary2`` scored), the per-start-class peak columns, and the phase-2 TIS guard.
+``--p3`` shows phase-3 rows (``primary3`` scored) with the reproducible-start columns.
 """
 
 import re
@@ -31,6 +32,23 @@ SHOW2 = [
     "K562_tis_peak_argmax0_atg",
     "K562_tis_peak_argmax0_nc",
 ]
+SHOW3 = [
+    "primary3",
+    "K562_tis_nt",
+    "K562_tis_codon",
+    "K562_chx_bin30",
+    "K562_chx_codon",
+    "K562_chx_nt",
+    "K562_tis_rep_hit_nc",
+    "K562_tis_rep_ref_nc",
+    "K562_tis_rep_hit_nc_first",
+    "K562_tis_rep_hit_nc_later",
+    "K562_tis_rep_hit_atg",
+    "K562_tis_rep_hit_atg_later",
+    "K562_tis_peak_argmax0_nc",
+    "K562_tis_peak_meta_nc",
+    "primary2",
+]
 SHOW = [
     "primary",
     "K562_tis_codon",
@@ -46,14 +64,17 @@ SHOW = [
 
 
 def main(filters):
-    p2 = "--p2" in filters
-    filters = [f for f in filters if f != "--p2"]
-    show = SHOW2 if p2 else SHOW
+    p3 = "--p3" in filters
+    p2 = "--p2" in filters or p3
+    filters = [f for f in filters if f not in ("--p2", "--p3")]
+    show = SHOW3 if p3 else SHOW2 if p2 else SHOW
     df = pd.read_csv(HERE / "results.tsv", sep="\t")
     df = df.drop_duplicates("name", keep="last")
     ref = df[df.name == REF].iloc[0]
     if p2:
         df = df[df.primary2.notna()]
+    if p3:
+        df = df[df.primary3.notna()]
     fails = []
     for _, r in df.iterrows():
         bad = [c.replace("K562_", "") for c in GUARD_1 if r[c] < ref[c] - 1.0]
@@ -70,7 +91,7 @@ def main(filters):
     print(df[["name", *show, "guards"]].round(3).to_string(index=False))
     key = show[0]
     g = df.groupby("group")
-    agg = g[show[: 12 if p2 else 7]].mean().round(3)
+    agg = g[show[: 15 if p3 else 12 if p2 else 7]].mean().round(3)
     agg[f"{key}_sd"] = g[key].std().round(2)
     agg["n"] = g.size()
     agg["guards_all"] = g["guards"].agg(lambda s: "pass" if (s == "pass").all() else "FAIL")

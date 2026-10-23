@@ -1,5 +1,24 @@
 # P6 fast search ledger
 
+## Phase 3 (transcript-space head on the final fc2d backbone; primary3)
+primary3 = mean(K562 TIS nt %, 100 x min(1, nc_rep_hit / nc_rep_ref)); nc_rep_hit = P(model argmax within +-1 nt of a
+K562 val near-cognate Ribo-TISH start | replicate-2 argmax within +-1 nt), nc_rep_ref = the same for replicate 1 (columns
+`K562_tis_rep_{hit,ref,ratio,n}_{atg,nc}[_first|_later]`, `_rep_both_`). Cache `data/p6/txcache/fc2d_k562`. Guards: phase-2
+(phase-1 guards vs ref_rnacond_ps + K562 TIS codon >= 74.4, nt >= 72.7). GPU: A100 (2), A6000 (2), L40S (1).
+Stop: 2026-10-25 18:00 or 3 rounds across >= 3 families without a primary3 gain > 2 (3-seed means).
+
+### Phase 3 leaderboard
+(pending)
+
+### Phase 3 findings
+(pending)
+
+### Phase 3 rounds
+- 2026-10-22 22:10 | scorer/export | reproducible-start columns + `primary3` appended after phase-2 columns (results.tsv
+  header extended, old rows nan); `--export-dir` writes val genomic float bigWigs `<dir>/<name>/<C>/{tis,chx}_pooled.
+  {plus,minus}.bw` (Ribo-TISH minus convention, MANE exons only) + params.npz; new components `exon` input, `onehot` input,
+  `model.tis_onehot` branch, `tis_context.causal: up|down`; `build_seq.py` writes `seq.npy` into caches. Unit-tested. |
+
 ## Phase 2 (near-cognate start recall; primary2)
 primary2 = mean(K562 TIS nt %, min(100, 100 x K562 near-cognate argmax-at-start / real)). Guards: phase-1
 guards + K562 TIS codon >= 74.4 and nt >= 72.7 (phase-1 leader r20_l300_chx25x2 3-seed 76.4 / 74.7 minus 2).

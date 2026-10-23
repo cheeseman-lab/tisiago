@@ -8,7 +8,8 @@ Usage::
 A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered components:
 
 - ``inputs``: names from :data:`INPUTS` (``embedding``, ``embedding_white``, ``rna``,
-  ``rna_sense``, ``rna_onesided``, ``rna_onset``, ``rna_relative``, ``position``),
+  ``rna_sense``, ``rna_onesided``, ``rna_onset``, ``rna_relative``, ``position``, ``exon``
+  (spliced exon structure), ``onehot`` (mRNA base; needs ``seq.npy`` in the cache)),
   concatenated per position.
 - ``model.trunk``: :data:`TRUNKS` (``mlp``, ``conv``, ``dilated``, ``attention``).
 - ``model.tis`` / ``model.chx``: output parameterisations from :data:`OUTPUTS`: ``softplus``
@@ -18,7 +19,9 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   output layer (the genomic head predicts both strands from one embedding); ``model.
   split_trunk`` gives CHX its own trunk (TIS keeps the first; ``model.chx_trunk`` sets
   its config); ``model.tis_context`` stacks a trunk on the shared one for TIS only (e.g. a
-  dilated stack for 5'UTR-scale context); ``model.chx_contrast`` feeds log ratios of the
+  dilated stack for 5'UTR-scale context; ``causal: up`` sees only the 5' side, ``down`` only
+  the 3' side); ``model.tis_onehot`` (``width``, ``channels``, ``layers``) adds a one-hot
+  sequence conv branch to the TIS head input; ``model.chx_contrast`` feeds log ratios of the
   gradient-stopped CHX prediction to the TIS output.
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
@@ -42,9 +45,16 @@ at real Ribo-TISH starts (meta share at the start nt, per-site argmax at the sta
 real pooled signal within +-30 nt), also per start class (``atg`` / ``nc`` = any other codon at
 the real call) with the real data's values (``_real``). ``primary2`` (phase 2) is the mean of the
 held-out TIS nt percent and its near-cognate argmax-at-start as percent of real (cap 100),
-appended after the phase-1 columns. The checkpoint's own predictions (``ckpt.npy``) are scored
-alongside as ``ckpt``. One row per config is appended to ``--results`` (:data:`RESULT_COLUMNS`)
-and the full record written to ``--runs-dir/<name>-<hash>.json``.
+appended after the phase-1 columns. Phase 3 appends reproducible-start columns: at real starts
+whose replicate 2 argmax (+-30 nt) is within 1 nt of the start, ``rep_hit`` = P(prediction
+argmax within 1 nt) and ``rep_ref`` = P(replicate 1 argmax within 1 nt), per start class, overall
+and split by first vs later exon (``_first`` / ``_later``); ``rep_both`` = P(prediction hit |
+both replicates hit); ``primary3`` = mean of held-out TIS nt percent and
+``100 x min(1, rep_hit_nc / rep_ref_nc)``. The checkpoint's own predictions (``ckpt.npy``) are
+scored alongside as ``ckpt``. ``--export-dir`` writes each config's val predictions as genomic
+float bigWigs (:func:`export_bigwigs`) plus its parameters. One row per config is appended to
+``--results`` (:data:`RESULT_COLUMNS`) and the full record written to
+``--runs-dir/<name>-<hash>.json``.
 """
 
 from __future__ import annotations
@@ -79,6 +89,8 @@ FLANK = 30
 EPS = 1e-7
 PRIMARY_SCALES = ("codon", "nt")
 START_CLASSES = ("atg", "nc")
+EXON_REGIONS = ("", "_first", "_later")
+REP_STATS = ("hit", "ref", "ratio", "n")
 RNA_HEAD = 129
 DEFAULTS: dict = {
     "name": None,
@@ -187,10 +199,62 @@ def train_conditions_of(config: Mapping, conditions: Sequence[str]) -> tuple[str
     return tuple(chosen)
 
 
+SEQ_N = 4  # ``seq.npy`` code of N / no sequence (A, C, G, T = 0..3)
+EXON_FEATURES = 5
+JUNCTION_CAP = 10000
+
+
+def optional_array(cache: TxCache, shard: str, key: str) -> np.ndarray | None:
+    """``cache.array(shard, key)`` or None when the file is absent (absence memoised)."""
+    missing = cache.__dict__.setdefault("_fastloop_missing", set())
+    if (shard, key) in missing:
+        return None
+    try:
+        return cache.array(shard, key)
+    except FileNotFoundError:
+        missing.add((shard, key))
+        return None
+
+
+def exon_features(junctions: Sequence[int], positions: np.ndarray, length: int) -> np.ndarray:
+    """``(n, 5)`` spliced exon structure at mRNA ``positions``.
+
+    Columns: log1p(exon index) / 3, first exon (0/1), log1p(distance from the exon's 5' end, the
+    cap for the first exon) / 10, log1p(distance to the next exon start or the mRNA end) / 10,
+    log1p(distance to the nearest exon junction, capped at ``JUNCTION_CAP``) / 10.
+    """
+    j = np.asarray(junctions, np.int64).reshape(-1)
+    pos = np.asarray(positions, np.int64)
+    idx = np.searchsorted(j, pos, side="right")
+    if len(j):
+        exon_start = np.where(idx > 0, j[np.maximum(idx - 1, 0)], 0)
+        exon_next = np.where(idx < len(j), j[np.minimum(idx, len(j) - 1)], int(length))
+    else:
+        exon_start, exon_next = np.zeros_like(pos), np.full_like(pos, int(length))
+    up, down = pos - exon_start, exon_next - pos
+    near = np.minimum(
+        np.where(idx > 0, up, JUNCTION_CAP), np.where(idx < len(j), down, JUNCTION_CAP)
+    )
+    return np.stack(
+        [
+            np.log1p(idx) / 3.0,
+            (idx == 0).astype(float),
+            np.log1p(np.maximum(up, 0)) / 10.0,
+            np.log1p(np.maximum(down, 0)) / 10.0,
+            np.log1p(np.minimum(near, JUNCTION_CAP)) / 10.0,
+        ],
+        axis=-1,
+    ).astype(np.float32)
+
+
 def crop_example(
     cache: TxCache, row, condition: str, start: int, crop: int
 ) -> dict[str, np.ndarray]:
-    """One transcript ``[start, start + crop)`` of ``condition``, zero-padded to ``crop``."""
+    """One transcript ``[start, start + crop)`` of ``condition``, zero-padded to ``crop``.
+
+    Also ``exon`` (:func:`exon_features`) and ``seq`` (``seq.npy`` codes when the cache has
+    them, else ``SEQ_N``).
+    """
     k = cache.condition_index(condition)
     n = max(0, min(crop, int(row.length) - start))
     lo = int(row.offset) + start
@@ -200,7 +264,15 @@ def crop_example(
         "target": np.zeros((crop, 2), np.float32),
         "valid": np.zeros(crop, bool),
         "pos": np.zeros(crop, np.int32),
+        "exon": np.zeros((crop, EXON_FEATURES), np.float32),
+        "seq": np.full(crop, SEQ_N, np.int8),
     }
+    out["exon"][:n] = exon_features(
+        getattr(row, "junctions", ()), np.arange(start, start + n), int(row.length)
+    )
+    seq = optional_array(cache, row.shard, "seq")
+    if seq is not None:
+        out["seq"][:n] = seq[lo : lo + n]
     tx = cache.array(row.shard, "rna")[k, int(row.offset) : int(row.offset) + int(row.length), 0]
     out["rna_tx"] = np.array(
         [tx[:RNA_HEAD].mean() if len(tx) else 0.0, tx.mean() if len(tx) else 0.0], np.float32
@@ -395,6 +467,28 @@ def _input_rna_relative(batch, ctx):
     return jnp.concatenate([b33 - head, b129 - head, b33 - mean, b129 - mean], axis=-1)
 
 
+@register(INPUTS, "exon")
+def _input_exon(batch, ctx):
+    """Spliced exon structure (:func:`exon_features`): index, first, distances."""
+    import jax.numpy as jnp
+
+    return batch["exon"].astype(jnp.float32)
+
+
+def _onehot(batch):
+    import jax
+    import jax.numpy as jnp
+
+    seq = batch["seq"].astype(jnp.int32)
+    return jax.nn.one_hot(seq, 4) * (seq < 4)[..., None]
+
+
+@register(INPUTS, "onehot")
+def _input_onehot(batch, ctx):
+    """One-hot mRNA base (A, C, G, T; N = 0)."""
+    return _onehot(batch)
+
+
 @register(INPUTS, "position")
 def _input_position(batch, ctx):
     import jax.numpy as jnp
@@ -435,10 +529,11 @@ def _trunk_dilated(x, valid, cfg):
 
     zeros = hk.initializers.Constant(0.0)
     h = jax.nn.relu(hk.Linear(int(cfg.get("hidden", 256)), name="hidden0")(x)) * valid[..., None]
+    causal = cfg.get("causal", False)  # "up": 5' context only; "down": 3' only
     for i, rate in enumerate(cfg.get("dilations", (1, 2, 4, 8, 16, 32, 64, 128, 256, 512))):
-        y = hk.Conv1D(
-            int(cfg.get("channels", 128)), 3, rate=int(rate), padding="SAME", name=f"dil{i}"
-        )(h)
+        rate = int(rate)
+        pad = {"up": ((2 * rate, 0),), "down": ((0, 2 * rate),)}.get(causal, "SAME")
+        y = hk.Conv1D(int(cfg.get("channels", 128)), 3, rate=rate, padding=pad, name=f"dil{i}")(h)
         y = hk.Conv1D(h.shape[-1], 1, w_init=zeros, b_init=zeros, name=f"dil{i}_out")(
             jax.nn.relu(y)
         )
@@ -603,6 +698,18 @@ def make_model(config: Mapping, ctx: Mapping):
             with hk.name_scope("tis_context"):
                 ctx_cfg = model["tis_context"]
                 tis_in = TRUNKS[ctx_cfg["kind"]](h, valid, ctx_cfg)
+        if model.get("tis_onehot"):
+            oh_cfg = model["tis_onehot"]
+            seq_h = _onehot(batch)
+            for i in range(int(oh_cfg.get("layers", 1))):
+                conv = hk.Conv1D(
+                    int(oh_cfg.get("channels", 64)),
+                    int(oh_cfg.get("width", 41)) if i == 0 else 3,
+                    padding="SAME",
+                    name=f"tis_onehot{i}",
+                )
+                seq_h = jax.nn.relu(conv(seq_h)) * valid[..., None]
+            tis_in = jnp.concatenate([tis_in, seq_h], axis=-1)
         if model.get("chx_contrast"):
             ratios = chx_log_ratios(jax.lax.stop_gradient(chx))
             tis_in = jax.nn.relu(
@@ -838,7 +945,11 @@ def train(config: Mapping, cache: TxCache, log: Callable[[str], None] = print) -
     ctx = context_of(cache)
     model = make_model(config, ctx)
     if config["data"].get("preload"):
-        cache.preload("train", ("emb", "rna", "tis", "chx"))
+        keys = ("emb", "rna", "tis", "chx")
+        shards = cache.rows("train").shard.unique()
+        if len(shards) and all(cache.has(sh, "seq") for sh in shards):
+            keys += ("seq",)
+        cache.preload("train", keys)
         log(f"preloaded the train split ({time.time() - t0:.0f}s)")
     sampler = Sampler(cache, config)
     tcfg = config["train"]
@@ -970,6 +1081,52 @@ def class_peak_summary(profiles: np.ndarray, classes: np.ndarray) -> dict[str, f
     return out
 
 
+def site_hits(profiles: np.ndarray, tolerance: int = 1) -> np.ndarray:
+    """Per site: profile positive and its argmax within ``tolerance`` nt of the centre."""
+    if not len(profiles):
+        return np.zeros(0, bool)
+    return (profiles.sum(1) > 0) & (np.abs(profiles.argmax(1) - FLANK) <= tolerance)
+
+
+def exon_regions(positions: Sequence[int], first_junction: int | None) -> np.ndarray:
+    """``first`` for mRNA positions in the 5'-most exon (before the first junction), else later."""
+    pos = np.asarray(positions, int)
+    if first_junction is None:
+        return np.full(len(pos), "first", dtype=object)
+    return np.where(pos < int(first_junction), "first", "later").astype(object)
+
+
+def rep_summary(
+    pred: np.ndarray,
+    rep1: np.ndarray,
+    rep2: np.ndarray,
+    classes: np.ndarray,
+    regions: np.ndarray,
+) -> dict[str, float]:
+    """Reproducible-start hit rates of ``pred`` vs replicate 1, conditioned on replicate 2.
+
+    Keys ``rep_{hit,ref,ratio,n}_<cls><region>`` (region ``""``, ``_first``, ``_later``) and
+    ``rep_both_<cls>`` (P(pred hit | both replicates hit)).
+    """
+    hit_p, hit_1, hit_2 = site_hits(pred), site_hits(rep1), site_hits(rep2)
+    out = {}
+    for cls in START_CLASSES:
+        for region in EXON_REGIONS:
+            sel = (classes == cls) & hit_2
+            if region:
+                sel &= regions == region[1:]
+            n = int(sel.sum())
+            hit = float(hit_p[sel].mean()) if n else float("nan")
+            ref = float(hit_1[sel].mean()) if n else float("nan")
+            out[f"rep_hit_{cls}{region}"] = hit
+            out[f"rep_ref_{cls}{region}"] = ref
+            out[f"rep_ratio_{cls}{region}"] = hit / ref if n and ref > 0 else float("nan")
+            out[f"rep_n_{cls}{region}"] = n
+        both = (classes == cls) & hit_1 & hit_2
+        out[f"rep_both_{cls}"] = float(hit_p[both].mean()) if both.any() else float("nan")
+    return out
+
+
 def score_predictions(
     cache: TxCache,
     sources: Mapping[str, Mapping[str, np.ndarray]],
@@ -1010,10 +1167,18 @@ def score_predictions(
         sites = cache.sites[cache.sites.condition == condition]
         sites = sites[sites.transcript_id.isin(set(units.transcript_id))]
         index = {t: i for i, t in enumerate(units.transcript_id)}
+        first_junction = {
+            r.transcript_id: (int(r.junctions[0]) if len(r.junctions) else None)
+            for r in units.itertuples()
+        }
         real, preds, classes = [], {name: [] for name in sources}, []
+        rep1, rep2, regions = [], [], []
         for tid, group in sites.groupby("transcript_id", sort=False):
             pos = group.tx_pos.to_numpy(int)
             real.append(site_profiles(reps["tis"]["pooled"][index[tid]], pos))
+            rep1.append(site_profiles(reps["tis"]["rep1"][index[tid]], pos))
+            rep2.append(site_profiles(reps["tis"]["rep2"][index[tid]], pos))
+            regions.append(exon_regions(pos, first_junction[tid]))
             classes.append(start_classes(group.codon))
             for name, src in sources.items():
                 preds[name].append(site_profiles(src[tid][k, :, 0], pos))
@@ -1022,12 +1187,15 @@ def score_predictions(
         real_p = np.concatenate(real)
         keep = real_p.sum(1) > 0
         cls = np.concatenate(classes)[keep]
+        r1, r2 = np.concatenate(rep1)[keep], np.concatenate(rep2)[keep]
+        region = np.concatenate(regions)[keep]
         peaks.append(
             {
                 "condition": condition,
                 "source": "real",
                 **peak_summary(real_p[keep]),
                 **class_peak_summary(real_p[keep], cls),
+                **rep_summary(r1, r1, r2, cls, region),
             }
         )
         for name, parts in preds.items():
@@ -1038,6 +1206,7 @@ def score_predictions(
                     "source": name,
                     **peak_summary(prof),
                     **class_peak_summary(prof, cls),
+                    **rep_summary(prof, r1, r2, cls, region),
                 }
             )
     return pd.DataFrame(rows), pd.DataFrame(peaks)
@@ -1087,6 +1256,13 @@ def result_columns(conditions: Sequence[str]) -> list[str]:
                 for stat in ("meta", "argmax0")
                 for cls in START_CLASSES
             ]
+    cols.append("primary3")
+    for c in conditions:
+        for cls in START_CLASSES:
+            cols += [
+                f"{c}_tis_rep_{stat}_{cls}{region}" for region in EXON_REGIONS for stat in REP_STATS
+            ]
+            cols.append(f"{c}_tis_rep_both_{cls}")
     return cols
 
 
@@ -1119,11 +1295,17 @@ def results_row(
                         col = f"{r['condition']}_tis_peak_{stat}_{cls}{suffix}"
                         if col in row:
                             row[col] = float(r.get(f"{key}_{cls}", float("nan")))
+        for r in peaks[peaks.source == source].to_dict(orient="records"):
+            for key, value in r.items():
+                col = f"{r['condition']}_tis_{key}"
+                if key.startswith("rep_") and col in row:
+                    row[col] = float(value)
     heldout = list(meta.get("heldout_list") or [])
     if heldout:
         values = [row.get(f"{heldout[0]}_tis_{s}", float("nan")) for s in PRIMARY_SCALES]
         row["primary"] = float(np.mean(values))
         row["primary2"] = primary2(row, heldout[0])
+        row["primary3"] = primary3(row, heldout[0])
     return row
 
 
@@ -1132,6 +1314,14 @@ def primary2(row: Mapping, condition: str) -> float:
     real = row.get(f"{condition}_tis_peak_argmax0_nc_real", float("nan"))
     pred = row.get(f"{condition}_tis_peak_argmax0_nc", float("nan"))
     nc = min(100.0, 100.0 * pred / real) if real and np.isfinite(real) else float("nan")
+    return float(np.mean([row.get(f"{condition}_tis_nt", float("nan")), nc]))
+
+
+def primary3(row: Mapping, condition: str) -> float:
+    """Phase-3 primary: mean of TIS nt % and ``100 x min(1, rep_hit_nc / rep_ref_nc)``."""
+    hit = row.get(f"{condition}_tis_rep_hit_nc", float("nan"))
+    ref = row.get(f"{condition}_tis_rep_ref_nc", float("nan"))
+    nc = 100.0 * min(1.0, hit / ref) if ref and np.isfinite(ref) else float("nan")
     return float(np.mean([row.get(f"{condition}_tis_nt", float("nan")), nc]))
 
 
@@ -1176,14 +1366,143 @@ def _write_json(path: Path, payload: Mapping) -> None:
     os.replace(tmp, path)
 
 
+EXPORT_MANIFEST = "predict_tracks.json"
+
+
+def export_bigwigs(
+    cache: TxCache,
+    preds: Mapping[str, np.ndarray],
+    conditions: Sequence[str],
+    out_dir: str | Path,
+    tracks_dir: str | Path | None = None,
+    split: str = "val",
+    meta: Mapping | None = None,
+) -> dict[str, dict]:
+    """Write transcript-space predictions as genomic float bigWigs (predict_tracks layout).
+
+    ``preds[transcript_id]`` is ``(len(cache.conditions), L, 2)`` sense TIS, CHX (as
+    :func:`predict_rows`). Writes ``<out_dir>/<C>/{tis,chx}_pooled.{plus,minus}.bw`` for each
+    of ``conditions``: the sense prediction at every exonic position of the ``split``'s MANE
+    transcripts on that transcript's strand, minus strand in the Ribo-TISH convention
+    (canonical + ``RIBOTISH_MINUS_SHIFT``); no entry (= 0) elsewhere. A genomic position shared
+    by two transcripts on one strand keeps the first in index order. Chromosome sizes come from
+    the real pooled tracks; ``<out_dir>/<C>/predict_tracks.json`` records provenance and totals.
+    """
+    import pyBigWig
+
+    from tisiago.seq2func.predict_tracks import chrom_sizes_of, pooled_prefix, strand_shift
+    from tisiago.seq2func.targets import STRAND_FILES
+    from tisiago.seq2func.tracks import track_prefix
+    from tisiago.seq2func.txcache import unit_of
+
+    tracks_dir = Path(tracks_dir or cache.config.get("tracks_dir", "data/p6/tracks"))
+    rows = cache.rows(split)
+    missing = sorted(set(rows.transcript_id) - set(preds))
+    if missing:
+        raise ValueError(f"no predictions for {len(missing)} {split} transcripts")
+    coords: dict[str, list] = {"+": [], "-": []}
+    for i, row in enumerate(rows.itertuples()):
+        unit = unit_of(row)
+        coords[unit.strand].append((row.chrom, np.asarray(unit.positions, np.int64), i))
+    manifests = {}
+    for condition in conditions:
+        k = cache.condition_index(condition)
+        sizes = chrom_sizes_of(f"{track_prefix(tracks_dir, condition, 'tis', 'pooled')}.plus.bw")
+        size_of = dict(sizes)
+        files, totals = {}, {}
+        for c, library in enumerate(LIBRARIES):
+            prefix = pooled_prefix(out_dir, condition, library)
+            prefix.parent.mkdir(parents=True, exist_ok=True)
+            totals[library] = 0.0
+            for strand, suffix in STRAND_FILES.items():
+                per_chrom: dict[str, tuple[list, list, list]] = {}
+                for chrom, positions, order in coords[strand]:
+                    values = np.asarray(preds[rows.transcript_id.iloc[order]][k, :, c], np.float64)
+                    entry = per_chrom.setdefault(chrom, ([], [], []))
+                    entry[0].append(positions + strand_shift(strand))
+                    entry[1].append(values)
+                    entry[2].append(np.full(len(positions), order))
+                path = prefix.with_name(f"{prefix.name}.{suffix}.bw")
+                files.setdefault(library, {})[strand] = path.name
+                bw = pyBigWig.open(str(path), "w")
+                bw.addHeader(sizes)
+                try:
+                    for chrom, _ in sizes:
+                        if chrom not in per_chrom:
+                            continue
+                        pos = np.concatenate(per_chrom[chrom][0])
+                        val = np.concatenate(per_chrom[chrom][1])
+                        rank = np.concatenate(per_chrom[chrom][2])
+                        sort = np.lexsort((rank, pos))
+                        pos, val = pos[sort], val[sort]
+                        first = np.ones(len(pos), bool)
+                        first[1:] = pos[1:] != pos[:-1]
+                        keep = first & (pos >= 0) & (pos < size_of[chrom])
+                        if keep.any():
+                            bw.addEntries(
+                                chrom,
+                                pos[keep].tolist(),
+                                values=val[keep].tolist(),
+                                span=1,
+                            )
+                            totals[library] += float(val[keep].sum())
+                finally:
+                    bw.close()
+        manifest = {
+            **(meta or {}),
+            "condition": condition,
+            "source": "fastloop",
+            "mode": "float",
+            "layout": "pooled",
+            "split": split,
+            "files": files,
+            "cache": str(cache.path),
+            "windows_dir": cache.config.get("windows_dir"),
+            "tracks_dir": str(tracks_dir),
+            "transcripts": int(len(rows)),
+            "region": "MANE exons of the cached split (0 elsewhere)",
+            "written_totals": totals,
+        }
+        _write_json(Path(out_dir) / condition / EXPORT_MANIFEST, manifest)
+        manifests[condition] = manifest
+    return manifests
+
+
+def save_params(params, path: str | Path) -> None:
+    """Haiku ``params`` as ``<module>/<name>`` arrays in one ``.npz``."""
+    flat = {f"{m}/{n}": np.asarray(v) for m, sub in params.items() for n, v in sub.items()}
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, **flat)
+
+
+def load_params(path: str | Path) -> dict:
+    """Inverse of :func:`save_params`."""
+    import jax.numpy as jnp
+
+    out: dict[str, dict] = {}
+    with np.load(path) as data:
+        for key in data.files:
+            module, name = key.rsplit("/", 1)
+            out.setdefault(module, {})[name] = jnp.asarray(data[key])
+    return out
+
+
 def run_config(
     config: Mapping,
     cache: TxCache,
     results: str | Path,
     runs_dir: str | Path,
     log: Callable[[str], None] = print,
+    export_dir: str | Path | None = None,
+    export_conditions: Sequence[str] | None = None,
 ) -> dict:
-    """Train, predict the val transcripts, score, append the results row, write the JSON."""
+    """Train, predict the val transcripts, score, append the results row, write the JSON.
+
+    With ``export_dir``, also write ``<export_dir>/<name>/`` val bigWigs of
+    ``export_conditions`` (default the held-out ones; :func:`export_bigwigs`) and
+    ``params.npz`` + ``config.json``.
+    """
     import jax
 
     t0 = time.time()
@@ -1235,8 +1554,21 @@ def run_config(
         "peaks": peaks.to_dict(orient="records"),
     }
     _write_json(Path(runs_dir) / f"{config['name']}-{digest}.json", record)
+    if export_dir is not None:
+        dest = Path(export_dir) / config["name"]
+        save_params(params, dest / "params.npz")
+        _write_json(dest / "config.json", {"config": config, "config_hash": digest})
+        export_bigwigs(
+            cache,
+            preds,
+            list(export_conditions or config["heldout"]),
+            dest,
+            meta={"name": config["name"], "config_hash": digest, "primary3": row["primary3"]},
+        )
+        log(f"exported {config['name']} val tracks to {dest}")
     log(
         f"{config['name']} ({digest}): primary {row['primary']:.1f}, "
+        f"primary3 {row['primary3']:.1f}, "
         f"train {train_seconds:.0f}s, eval {eval_seconds:.0f}s"
     )
     return record
@@ -1277,6 +1609,18 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--cache", type=Path, default=None, help="override every config's cache")
     ap.add_argument("--steps", type=int, default=None, help="override train.steps (smoke)")
     ap.add_argument(
+        "--export-dir",
+        type=Path,
+        default=None,
+        help="write <dir>/<name>/ val genomic float bigWigs + params (export_bigwigs)",
+    )
+    ap.add_argument(
+        "--export-conditions",
+        nargs="+",
+        default=None,
+        help="conditions to export (default: the config's held-out ones)",
+    )
+    ap.add_argument(
         "--reference",
         action="store_true",
         help="score the cache's checkpoint predictions (ckpt.npy) and write <runs-dir>/ckpt.json",
@@ -1316,6 +1660,8 @@ def main() -> None:
             args.results,
             args.runs_dir,
             log=lambda s: print(s, flush=True),
+            export_dir=args.export_dir,
+            export_conditions=args.export_conditions,
         )
 
 

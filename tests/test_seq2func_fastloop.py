@@ -314,6 +314,13 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
         {"model": {"chx_trunk": {"kind": "conv", "width": 7, "hidden": 8}}},
         {"model": {"tis_context": {"kind": "dilated", "dilations": [1, 4], "channels": 8}}},
         {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
+        {
+            "inputs": ["embedding", "rna", "exon", "onehot"],
+            "model": {
+                "tis_context": {"kind": "dilated", "dilations": [1, 4], "causal": "up"},
+                "tis_onehot": {"width": 5, "channels": 4, "layers": 2},
+            },
+        },
     ],
 )
 def test_every_component_gives_finite_gradients_for_every_loss(cache, override):
@@ -550,8 +557,9 @@ def test_class_peaks_rows_keep_phase1_columns_and_primary2(cache):
         cache, {"model": preds}, CONDITIONS, heldout=["K562"], min_reads=5
     )
     columns = fastloop.result_columns(CONDITIONS)
-    old = [c for c in columns if c == "primary2" or "_atg" in c or "_nc" in c]
-    assert columns[-len(old) :] == old  # phase-2 columns are appended after phase 1
+    p3 = columns.index("primary3")
+    old = [c for c in columns[:p3] if c == "primary2" or "_atg" in c or "_nc" in c]
+    assert columns[p3 - len(old) : p3] == old  # phase-2 columns are appended after phase 1
     assert "K562_tis_peak_argmax0_nc_real" in columns and "HeLa_tis_peak_meta_atg" in columns
     meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
     row = fastloop.results_row(meta, table, peaks, CONDITIONS)
@@ -621,3 +629,168 @@ def test_local_multinomial_offset_shifts_the_block_grid():
     assert float(fastloop.loss_multinomial(pred, target, valid, AUX, loss)) != pytest.approx(
         float(got)
     )
+
+
+def test_rep_summary_conditions_on_replicate_2_and_splits_exons():
+    vec = np.zeros(300)
+
+    def prof(peaks):
+        v = vec.copy()
+        v[peaks] = 1.0
+        return fastloop.site_profiles(v, [50, 150, 250])
+
+    # site 50: rep2 hits, rep1 hits, pred hits (+1); 150: rep2 hits, rep1 misses, pred misses;
+    # 250: rep2 misses (excluded)
+    rep2 = prof([50, 150, 270])
+    rep1 = prof([50, 140, 250])
+    pred = prof([51, 160, 250])
+    classes = fastloop.start_classes(["CTG", "GTG", "CTG"])
+    regions = fastloop.exon_regions([50, 150, 250], 100)
+    assert list(regions) == ["first", "later", "later"]
+    assert list(fastloop.exon_regions([5], None)) == ["first"]
+    out = fastloop.rep_summary(pred, rep1, rep2, classes, regions)
+    assert out["rep_n_nc"] == 2 and out["rep_hit_nc"] == 0.5 and out["rep_ref_nc"] == 0.5
+    assert out["rep_ratio_nc"] == 1.0
+    assert out["rep_hit_nc_first"] == 1.0 and out["rep_n_nc_first"] == 1
+    assert out["rep_hit_nc_later"] == 0.0 and out["rep_ref_nc_later"] == 0.0
+    assert math.isnan(out["rep_ratio_nc_later"]) and out["rep_both_nc"] == 1.0
+    assert out["rep_n_atg"] == 0 and math.isnan(out["rep_hit_atg"])
+
+
+def test_phase3_columns_appended_and_primary3(cache):
+    rng = np.random.default_rng(6)
+    preds = {
+        r.transcript_id: rng.gamma(1.0, size=(3, r.length, 2)).astype(np.float32)
+        for r in cache.rows("val").itertuples()
+    }
+    table, peaks = fastloop.score_predictions(
+        cache, {"model": preds}, CONDITIONS, heldout=["K562"], min_reads=5
+    )
+    columns = fastloop.result_columns(CONDITIONS)
+    start = columns.index("primary3")
+    assert all("_rep_" in c for c in columns[start + 1 :])
+    assert columns.index("primary2") < start and "K562_tis_rep_hit_nc_later" in columns
+    meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
+    row = fastloop.results_row(meta, table, peaks, CONDITIONS)
+    assert set(row) == set(columns)
+    model = peaks[(peaks.source == "model") & (peaks.condition == "K562")].iloc[0]
+    for key in ("rep_hit_nc", "rep_ref_atg", "rep_n_nc_first"):
+        assert row[f"K562_tis_{key}"] == pytest.approx(model[key], nan_ok=True)
+    real = peaks[(peaks.source == "real") & (peaks.condition == "K562")].iloc[0]
+    assert real.rep_hit_nc == pytest.approx(real.rep_ref_nc, nan_ok=True)
+    fake = dict(row, K562_tis_nt=60.0, K562_tis_rep_hit_nc=0.3, K562_tis_rep_ref_nc=0.6)
+    assert fastloop.primary3(fake, "K562") == pytest.approx((60.0 + 50.0) / 2)
+    fake["K562_tis_rep_hit_nc"] = 0.9
+    assert fastloop.primary3(fake, "K562") == pytest.approx((60.0 + 100.0) / 2)
+
+
+def _real_tracks(root, conditions=CONDITIONS, size=5000):
+    import pyBigWig
+
+    for c in conditions:
+        (root / c).mkdir(parents=True)
+        for strand in ("plus", "minus"):
+            bw = pyBigWig.open(str(root / c / f"tis_reppooled.{strand}.bw"), "w")
+            bw.addHeader([("chr1", size), ("chr2", size)])
+            bw.close()
+    return root
+
+
+def test_export_bigwigs_writes_sense_predictions_at_genomic_positions(tmp_path, cache):
+    import pyBigWig
+
+    from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
+    from tisiago.seq2func.txcache import unit_of
+
+    tracks = _real_tracks(tmp_path / "tracks")
+    rng = np.random.default_rng(7)
+    rows = cache.rows("val")
+    preds = {
+        r.transcript_id: rng.gamma(1.0, size=(3, r.length, 2)).astype(np.float32)
+        for r in rows.itertuples()
+    }
+    out = tmp_path / "export"
+    manifests = fastloop.export_bigwigs(cache, preds, ["K562"], out, tracks_dir=tracks)
+    assert manifests["K562"]["layout"] == "pooled"
+    k = cache.condition_index("K562")
+    for c, lib in enumerate(fastloop.LIBRARIES):
+        for r in rows.itertuples():
+            unit = unit_of(r)
+            suffix, shift = ("plus", 0) if r.strand == "+" else ("minus", RIBOTISH_MINUS_SHIFT)
+            bw = pyBigWig.open(str(out / "K562" / f"{lib}_pooled.{suffix}.bw"))
+            got = np.array(
+                [bw.values("chr1", int(p) + shift, int(p) + shift + 1)[0] for p in unit.positions]
+            )
+            bw.close()
+            np.testing.assert_allclose(got, preds[r.transcript_id][k, :, c], rtol=1e-6)
+    saved = json.loads((out / "K562" / "predict_tracks.json").read_text())
+    assert saved["split"] == "val" and saved["files"]["tis"]["-"] == "tis_pooled.minus.bw"
+    with pytest.raises(ValueError, match="no predictions"):
+        fastloop.export_bigwigs(cache, {}, ["K562"], out, tracks_dir=tracks)
+
+
+def test_run_config_export_and_params_roundtrip(tmp_path, cache, monkeypatch):
+    tracks = _real_tracks(tmp_path / "tracks")
+    cache.config["tracks_dir"] = str(tracks)
+    config = _config(name="exp")
+    out = tmp_path / "export"
+    fastloop.run_config(
+        config, cache, tmp_path / "r.tsv", tmp_path / "runs", log=lambda s: None, export_dir=out
+    )
+    assert (out / "exp" / "K562" / "tis_pooled.plus.bw").exists()
+    assert not (out / "exp" / "HeLa").exists()
+    params = fastloop.load_params(out / "exp" / "params.npz")
+    model = fastloop.make_model(config, fastloop.context_of(cache))
+    rows = cache.rows("val").iloc[:1]
+    pred = fastloop.predict_rows(lambda b: model.apply(params, b)[0], cache, rows, ["K562"], 64)
+    assert np.isfinite(next(iter(pred.values()))).all()
+
+
+def test_exon_features_on_hand_junctions():
+    feats = fastloop.exon_features([10, 30], np.array([0, 9, 10, 29, 35]), 40)
+    np.testing.assert_allclose(feats[:, 0] * 3, np.log1p([0, 0, 1, 1, 2]), rtol=1e-6)
+    np.testing.assert_array_equal(feats[:, 1], [1, 1, 0, 0, 0])
+    np.testing.assert_allclose(np.expm1(feats[:, 2] * 10), [0, 9, 0, 19, 5], atol=1e-4)
+    np.testing.assert_allclose(np.expm1(feats[:, 3] * 10), [10, 1, 20, 1, 5], atol=1e-4)
+    np.testing.assert_allclose(np.expm1(feats[:, 4] * 10), [10, 1, 0, 1, 5], atol=1e-4)
+    none = fastloop.exon_features([], np.array([3]), 8)
+    np.testing.assert_allclose(np.expm1(none[0, [2, 3]] * 10), [3, 5], atol=1e-4)
+    assert np.expm1(none[0, 4] * 10) == pytest.approx(fastloop.JUNCTION_CAP, rel=1e-4)
+
+
+def test_seq_codes_are_cropped_when_cached_and_n_otherwise(cache):
+    rows = cache.index.set_index("transcript_id", drop=False)
+    ex = fastloop.crop_example(cache, rows.loc["A"], "HeLa", 0, 64)
+    assert (ex["seq"] == fastloop.SEQ_N).all()
+    codes = (np.arange(300 + 120 + 50) % 4).astype(np.int8)
+    np.save(cache.path / "shards" / "train_chr1" / "seq.npy", codes)
+    fresh = TxCache(cache.path)
+    ex = fastloop.crop_example(fresh, rows.loc["B"], "HeLa", 0, 128)
+    np.testing.assert_array_equal(ex["seq"][:120], codes[300:420])
+    assert (ex["seq"][120:] == fastloop.SEQ_N).all()
+    onehot = np.asarray(fastloop._input_onehot({"seq": jnp.asarray(ex["seq"])}, {}))
+    assert onehot[:120].sum(1).min() == 1 and onehot[120:].sum() == 0
+
+
+@pytest.mark.parametrize("causal,keep", [("up", slice(0, 60)), ("down", slice(70, 128))])
+def test_causal_tis_context_ignores_the_other_side(cache, causal, keep):
+    config = _config(
+        inputs=["embedding"],
+        model={
+            "tis_context": {"kind": "dilated", "dilations": [1, 2, 4], "causal": causal},
+            "tis": {"kind": "softplus"},
+        },
+    )
+    model = fastloop.make_model(config, fastloop.context_of(cache))
+    batch = fastloop._device_batch(fastloop.Sampler(cache, config).batch())
+    batch["valid"] = jnp.ones_like(batch["valid"])
+    params = model.init(jax.random.PRNGKey(0), batch)
+    changed = dict(batch)
+    if causal == "up":
+        changed["emb"] = batch["emb"].at[:, 60:].add(5.0)
+    else:
+        changed["emb"] = batch["emb"].at[:, :70].add(5.0)
+    a = np.asarray(model.apply(params, batch)[0])[..., 0]
+    b = np.asarray(model.apply(params, changed)[0])[..., 0]
+    np.testing.assert_allclose(a[:, keep], b[:, keep], rtol=1e-5, atol=1e-6)
+    assert not np.allclose(a, b)
