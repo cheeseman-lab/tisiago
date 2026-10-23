@@ -37,10 +37,12 @@ non-starts. Live status is in [`ROADMAP.md`](ROADMAP.md); results in [`FINDINGS.
   on dense in-transcript negatives at true imbalance: clean-protocol recall **0.306 @ 0.99
   FP/transcript**, AUPRC 0.304 (5 seeds, FINDINGS §10). Richer heads tie (§9). Recall is driven
   by AUG (0.58); near-cognate starts are mostly missed (0.07). This head is the **baseline**.
-- **Next — P6, seq2func.** Fine-tune AlphaGenome to predict the raw Ribo-seq tracks (5 cell
-  lines × 2 replicates) and derive start-site calls on top, instead of training a binary head on
-  sparse labels. Needs a spec: per-line vs multi-output model, handling of untranscribed genes
-  (missing data, not zero), where fine-tuning code lives.
+- **P6, seq2func (current).** RNA-seq of a cell line in -> base-resolution harringtonine (initiation) and
+  CHX (elongation) Ribo-seq out, via fine-tuned AlphaGenome (alphagenome-ft) + an RNA-conditioned head, evaluated
+  leave-one-cell-line-out in percent of replicate agreement (`seq2func/scorecard.py`) and by Ribo-TISH on
+  predicted tracks (`predicted_calls.py`). Results FINDINGS §11-14; status ROADMAP P6. Loss/structure search runs
+  in the fast loop (`seq2func/txcache.py` + `fastloop.py`, `autoresearch/p6fast/`); full fine-tunes via
+  `scripts/run_p6_trial.sh` (GPU lanes from `.env` `P6_TRIAL_LANES`). Test chr8/9 have been scored once (§14).
 
 **Evaluation rules** (`docs/INFERENCE_AND_EVALUATION.md`): group splits by transcript/chromosome;
 keep train / calibration / operating-threshold / test disjoint; pick thresholds on validation,
@@ -109,9 +111,14 @@ src/tisiago/
     targets.py, augment.py, masking.py   window targets, augmentation, loss masks
     loss.py, model.py                 profile loss, agft model + 6-channel heads
     overfit.py                        single-window overfit gate (own training loop)
+    rna_features.py, expression.py    RNA input features (depth-scaled), expression masks
+    train.py, evaluate.py             full fine-tune (rnacond arms) + per-channel evaluation
+    scorecard.py                      percent-of-replicate concordance at gene/30-nt/codon/nt + frame
+    track_tis_eval.py                 predicted-track TIS score on the frozen baseline's protocol
+    txcache.py, fastloop.py           transcript-space embedding cache + fast loss/structure trainer
 scripts/        Slurm wrappers (_common.sh shared header), store builders, compare_heads, report
 configs/        gruyerenome backend configs + dense dataset configs
-autoresearch/   4-objective head-search harness (done; winners.md)
+autoresearch/   head-search harness (done); p6/ (TIS search tools), p6fast/ (fast loop: program, ledger, results), p6nc/ (near-cognate diagnosis)
 docs/           INFERENCE_AND_EVALUATION.md; superpowers/ specs + plans (historical record)
 logs/           Slurm output (gitignored)
 data/           manifest + stores (gitignored)

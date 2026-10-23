@@ -11,11 +11,12 @@ floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution); and (
 
 _Last updated: 2026-10-05._
 
-> **Current (2026-10-18): P6 experiment 1 done; next is an RNA-conditioned model.** Per-condition
-> fine-tuned AlphaGenome models predict Ribo-seq tracks well (FINDINGS §12) but start calls read off
-> them do not beat the frozen `ag7` baseline (≈0.30 recall @ ≈1 FP/transcript, §10). Next: give the
-> model the cell line's RNA track (cheap) and predict harringtonine + CHX (expensive), evaluated on
-> held-out cell lines.
+> **Current (2026-10-23): P6 = RNA-seq in -> base-resolution harringtonine + CHX out.** Experiments 1-3 and a
+> three-phase fast loss/structure search are done (FINDINGS §12-14). Best: a fine-tuned AlphaGenome backbone plus a
+> transcript-space (spliced mRNA) head — K562 held out: harringtonine codon/1 nt ~83% of replicate, AUG start
+> positions at replicate level, near-cognate starts 68% of replicate, Ribo-TISH start-site Jaccard 0.35 (replicate
+> vs replicate ~0.47). Next: (1) lock in that two-stage model on all four held-out lines + test once; (2) fine-tune
+> the backbone in transcript space for later-exon / 5'UTR starts.
 
 ---
 
@@ -150,7 +151,7 @@ tracks directly instead of regressing a summary label on frozen features.
 
 ---
 
-## P6 — seq2func on raw Ribo-seq tracks 🟡 (experiment 1 done, FINDINGS §11-12)
+## P6 — seq2func on raw Ribo-seq tracks 🟡 (experiments 1-3 done, FINDINGS §11-14)
 
 Fine-tune AlphaGenome to predict the raw Ribo-seq coverage tracks (5 cell lines × 2 replicates)
 rather than training a binary head on sparse, frozen start-site labels. Start-site calls are then
@@ -174,6 +175,23 @@ track and predicts harringtonine + CHX; evaluated leave-one-cell-line-out (HeLa,
 RPE1 as one group) against replicate agreement and an RNA-scaled baseline, reported in plain
 units (Pearson at gene / 30-nt / codon / 1-nt). Spec first.
 
+**Experiment 2 (2026-10-19, FINDINGS §13).** One shared RNA-conditioned model (DNA + the line's RNA track ->
+harringtonine + CHX), leave-one-cell-line-out: gene level 98% of replicate on unseen lines.
+
+**Experiment 3 (2026-10-20 to 10-23, FINDINGS §14; `autoresearch/p6fast/ledger.md` phases 1-3).** Fast loop on a
+transcript-space cache of fine-tuned embeddings (~4 min/config, ~195 configs) + full fine-tune confirmations.
+Final full model `rnacond_fc2d` (local 1 kb multinomial on both tracks, 32-nt TIS term, TIS ~1 kb context): test
+harringtonine codon/1 nt 55-97% by line, CHX frame 65-88%. Near-cognate diagnosis
+(`.superpowers/sdd/2026-10-22-p6-nc-diagnosis/`): base AlphaGenome lacks local near-cognate information (fine-tuning
+creates it); most near-cognate calls are irreproducible; the residual is spliced context. The transcript-space head
+on the final backbone lifts Ribo-TISH start-site Jaccard 0.23 -> 0.35 (val, K562).
+
+**Next.**
+1. Two-stage model (fine-tuned backbone + transcript-space head with the ±20 nt sequence branch and 3-nt term,
+   config `autoresearch/p6fast/configs/p3r02/p3r02_onehot41_l3*.yaml`) for all four held-out lines: per-fold
+   transcript caches, heads, genomic export, scorecard + Ribo-TISH; then test chr8/9 once.
+2. Backbone fine-tuned on spliced-transcript input, for later-exon (~50% of replicate) and 5'UTR starts.
+
 **Original open questions (2026-10-05):**
 - One model per cell line vs one multi-output model. The working hypothesis is that cross-line
   differences are mainly driven by which genes are transcribed — an unexpressed gene has a blank
@@ -187,7 +205,4 @@ units (Pearson at gene / 30-nt / codon / 1-nt). Spec first.
 
 ## Immediate next action
 
-1. **Spec P6** (brainstorm → spec → plan): data/track preparation per cell line × replicate,
-   model/fine-tune setup, call derivation, and the evaluation contract against the frozen baseline.
-2. **Carry the frozen baseline forward** under the §10 protocol so P6 has a fixed comparator,
-   stratified by AUG vs near-cognate (near-cognate recall is 0.07 today).
+See P6 "Next" above: (1) two-stage model on all held-out lines + test once, (2) transcript-space backbone.
