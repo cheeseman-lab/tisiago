@@ -40,9 +40,10 @@ non-starts. Live status is in [`ROADMAP.md`](ROADMAP.md); results in [`FINDINGS.
 - **P6, seq2func (current).** RNA-seq of a cell line in -> base-resolution harringtonine (initiation) and
   CHX (elongation) Ribo-seq out, via fine-tuned AlphaGenome (alphagenome-ft) + an RNA-conditioned head, evaluated
   leave-one-cell-line-out in percent of replicate agreement (`seq2func/scorecard.py`) and by Ribo-TISH on
-  predicted tracks (`predicted_calls.py`). Results FINDINGS §11-14; status ROADMAP P6. Loss/structure search runs
+  predicted tracks (`predicted_calls.py`). Current best: backbone fine-tuned on spliced mRNA + transcript-space head
+  (`seq2func/txtrain.py`, FINDINGS §15). Results FINDINGS §11-15; status ROADMAP P6. Loss/structure search runs
   in the fast loop (`seq2func/txcache.py` + `fastloop.py`, `autoresearch/p6fast/`); full fine-tunes via
-  `scripts/run_p6_trial.sh` (GPU lanes from `.env` `P6_TRIAL_LANES`). Test chr8/9 have been scored once (§14).
+  `scripts/run_p6_trial.sh` (GPU lanes from `.env` `P6_TRIAL_LANES`). Test chr8/9 have been scored once per model (§14, §15).
 
 **Evaluation rules** (`docs/INFERENCE_AND_EVALUATION.md`): group splits by transcript/chromosome;
 keep train / calibration / operating-threshold / test disjoint; pick thresholds on validation,
@@ -116,6 +117,7 @@ src/tisiago/
     scorecard.py                      percent-of-replicate concordance at gene/30-nt/codon/nt + frame
     track_tis_eval.py                 predicted-track TIS score on the frozen baseline's protocol
     txcache.py, fastloop.py           transcript-space embedding cache + fast loss/structure trainer
+    txtrain.py                        AlphaGenome fine-tuned on spliced-transcript input + transcript-space head
 scripts/        Slurm wrappers (_common.sh shared header), store builders, compare_heads, report
 configs/        gruyerenome backend configs + dense dataset configs
 autoresearch/   head-search harness (done); p6/ (TIS search tools), p6fast/ (fast loop: program, ledger, results), p6nc/ (near-cognate diagnosis)

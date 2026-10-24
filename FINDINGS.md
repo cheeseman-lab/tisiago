@@ -519,6 +519,52 @@ to read starts): gene level ~95-98% and 30-nt shape 78-91% of replicate; TIS cod
 positions at real-data level; the remaining gap is near-cognate starts (about half of real) and start recall
 from Ribo-TISH on predicted tracks (0.25 vs ~0.47 replicate agreement).
 
+## 15. P6 steps 1-2 — two-stage model and spliced-input backbone on all held-out lines (2026-10-23/24)
+
+Step 1 = fine-tuned genomic backbone (`rnacond_fc2d`, §14) + transcript-space head (`p3r02_onehot41_l3`: conv trunks,
+factorised TIS/CHX, TIS dilated context, ±20 nt one-hot branch, 3/32-nt and 1 kb local multinomials) trained on
+per-fold transcript caches (`fastloop`). Step 2 = the same head end to end on an AlphaGenome backbone that sees the
+spliced mRNA (one MANE transcript per input, 4-32 kb buckets), warm-started from the fold's genomic backbone
+(`txtrain`, spec `docs/superpowers/specs/2026-10-23-p6-spliced-backbone-design.md`). Leave-one-line-out, 3 seeds
+each (seed spread <=0.7 points on tracks). Test chr8/9 scored once per step, after all validation decisions.
+
+**Test chr8/9, percent of replicate (mean of 3 seeds): step 2 / step 1 / genomic model (§14).**
+
+| Held out | TIS codon | TIS nt | CHX 30 nt | CHX codon | CHX nt | gene |
+|---|---|---|---|---|---|---|
+| K562 | 84 / 84 / 76 | 83 / 82 / 74 | 86 / 85 / 80 | 75 / 74 / 65 | 71 / 69 / 58 | 98 / 98 / 95 |
+| U2OS | 86 / 85 / 77 | 85 / 84 / 74 | 88 / 88 / 82 | 83 / 81 / 70 | 84 / 81 / 66 | 96 / 97 / 95 |
+| HeLa | 70 / 70 / 65 | 58 / 57 / 55 | 69 / 73 / 68 | 66 / 68 / 58 | 61 / 61 / 54 | 93 / 94 / 93 |
+| RPE1 (3 cond.) | 105 / 104 / 93 | 114 / 112 / 97 | 112 / 112 / 101 | 147 / 143 / 116 | 179 / 172 / 130 | 100 / 100 / 98 |
+
+**Reproducible near-cognate starts** (P(model peak within ±1 nt | rep2 start) / P(rep1 hit | rep2 start); later
+exons n ~105-166 starts per line, so ±~0.07): test, step 2 / step 1 / genomic.
+
+| Held out | all NC | NC in later exons |
+|---|---|---|
+| K562 | 0.69 / 0.63 / 0.59 | **0.63** / 0.43 / 0.42 |
+| HeLa | 0.51 / 0.43 / 0.44 | **0.40** / 0.27 / 0.23 |
+| U2OS | 0.76 / 0.76 / 0.68 | 0.46 / 0.52 / 0.38 |
+| RPE1 | 0.98 / 0.96 / 0.81 | 0.91 / 0.95 / 0.72 |
+
+Validation (chr7) showed the later-exon gain on all four lines (K562 .51->.61, HeLa .26->.48, U2OS .37->.56, RPE1
+.84->.99); on test it holds for K562 and HeLa and not for U2OS/RPE1 (within noise). ATG starts are at replicate
+level everywhere.
+
+**Ribo-TISH on predicted vs real tracks** (same synthetic pipeline, depth-matched; replicate vs replicate ~0.47,
+resampled-real ceiling 0.69). Val K562, 3 seeds: Jaccard step 2 0.367±0.006 vs step 1 0.329±0.012 (precision 0.59
+vs 0.50, recall 0.50 vs 0.49); val HeLa 0.268 vs 0.263. Test (seed 0): K562 step 2 J 0.35 (R 0.53, P 0.51, annotated
+R 0.82) / step 1 0.34 (R 0.48, P 0.54, annotated R 0.73) / genomic 0.24-0.25 (R 0.31); HeLa 0.29 / 0.30. 5'UTR
+recall stays 0.04-0.19. U2OS/RPE1 Ribo-TISH did not run: Ribo-TISH's TIS-background grouping (`zbio/ribo.py`,
+`if s >= ctotal*parts[ip]`) leaves the last group limit `None` when one transcript holds >10% of the TIS reads, and
+`predict` then fails on the real tracks (fix: `while`); lives in the ribotish repo.
+
+**Reading.** The transcript-space head is the main gain over the genomic model (+5-15 points on tracks, Ribo-TISH
+0.25 -> 0.34 on test). Giving the backbone the spliced mRNA adds a smaller, consistent gain on fine-scale tracks
+(0-7 points) and on near-cognate starts past the first exon in K562 and HeLa, but start-call agreement overall is
+about equal on test and 5'UTR starts remain unsolved. Step 2 is the current best model (equal or better everywhere
+except HeLa CHX 30 nt, -4).
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest

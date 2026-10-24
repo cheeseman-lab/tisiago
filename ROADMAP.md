@@ -11,12 +11,12 @@ floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution); and (
 
 _Last updated: 2026-10-05._
 
-> **Current (2026-10-23): P6 = RNA-seq in -> base-resolution harringtonine + CHX out.** Experiments 1-3 and a
-> three-phase fast loss/structure search are done (FINDINGS §12-14). Best: a fine-tuned AlphaGenome backbone plus a
-> transcript-space (spliced mRNA) head — K562 held out: harringtonine codon/1 nt ~83% of replicate, AUG start
-> positions at replicate level, near-cognate starts 68% of replicate, Ribo-TISH start-site Jaccard 0.35 (replicate
-> vs replicate ~0.47). Next: (1) lock in that two-stage model on all four held-out lines + test once; (2) fine-tune
-> the backbone in transcript space for later-exon / 5'UTR starts.
+> **Current (2026-10-24): P6 = RNA-seq in -> base-resolution harringtonine + CHX out.** Experiments 1-3, the fast
+> loss/structure search and steps 1-2 are done (FINDINGS §12-15). Best: AlphaGenome fine-tuned on the spliced mRNA +
+> a transcript-space head, each line held out, test chr8/9: harringtonine codon/1 nt 70-105 / 58-114% of replicate
+> (K562 84/83), CHX 30 nt 69-112%, ATG starts at replicate level, near-cognate starts 0.51-0.98 of replicate,
+> Ribo-TISH start-site Jaccard K562 0.35 (genomic model 0.25; replicate vs replicate ~0.47). Open: 5'UTR starts
+> (recall <=0.19), HeLa, start-call precision.
 
 ---
 
@@ -186,11 +186,11 @@ harringtonine codon/1 nt 55-97% by line, CHX frame 65-88%. Near-cognate diagnosi
 creates it); most near-cognate calls are irreproducible; the residual is spliced context. The transcript-space head
 on the final backbone lifts Ribo-TISH start-site Jaccard 0.23 -> 0.35 (val, K562).
 
-**Next.**
-1. Two-stage model (fine-tuned backbone + transcript-space head with the ±20 nt sequence branch and 3-nt term,
-   config `autoresearch/p6fast/configs/p3r02/p3r02_onehot41_l3*.yaml`) for all four held-out lines: per-fold
-   transcript caches, heads, genomic export, scorecard + Ribo-TISH; then test chr8/9 once.
-2. Backbone fine-tuned on spliced-transcript input, for later-exon (~50% of replicate) and 5'UTR starts.
+**Steps 1-2 (2026-10-23/24, FINDINGS §15).** Two-stage model on all four held-out lines, then the same head on a
+backbone fine-tuned on spliced-transcript input (`seq2func/txtrain.py`); both tested once. Step 2 is the current best.
+
+**Next.** 5'UTR / uORF starts (recall <=0.19: non-MANE isoforms, 5'-end precision of the RNA input); HeLa; Ribo-TISH
+fix for U2OS/RPE1 comparisons (ribotish repo).
 
 **Original open questions (2026-10-05):**
 - One model per cell line vs one multi-output model. The working hypothesis is that cross-line
@@ -205,4 +205,4 @@ on the final backbone lifts Ribo-TISH start-site Jaccard 0.23 -> 0.35 (val, K562
 
 ## Immediate next action
 
-See P6 "Next" above: (1) two-stage model on all held-out lines + test once, (2) transcript-space backbone.
+See P6 "Next" above.
