@@ -1,8 +1,10 @@
 """Tests for the spliced-input backbone trainer (CPU, synthetic cache, stub backbone)."""
 
 import json
+import math
 
 import numpy as np
+import pandas as pd
 import pytest
 
 jax = pytest.importorskip("jax")
@@ -250,3 +252,159 @@ def test_init_must_come_from_the_same_fold(tmp_path):
     with pytest.raises(ValueError, match="held out"):
         txtrain.check_init_heldout(run / "best", ["K562"])
     txtrain.check_init_heldout(run / "best", ["HeLa"])
+
+
+def _trained_run(tmp_path, txc, pca=False):
+    """A finished 2-step stub run (``<tmp>/runs/run``) with its val export; the tracks dir."""
+    tracks = _real_tracks(tmp_path / "tracks")
+    txc.config["tracks_dir"] = str(tracks)
+    cfg = {"conditions": list(CONDITIONS), "tracks_dir": str(tracks)}
+    (txc.path / "cache.json").write_text(json.dumps(cfg))
+    if pca:
+        rng = np.random.default_rng(2)
+        np.savez(
+            txc.path / "pca.npz", mean=rng.normal(size=16), components=rng.normal(size=(8, 16))
+        )
+    run = tmp_path / "runs" / "run"
+    txtrain.main(
+        _argv(txc, run, tmp_path / "results.tsv", "--export-dir", str(tmp_path / "export")), _stub
+    )
+    return run, tracks
+
+
+def _txc_test(root, tracks, train=None):
+    """The fast-loop synthetic test cache plus seq.npy (and the training cache's pca.npz)."""
+    test = _test_cache(root)
+    size = int(test.index.length.sum())
+    codes = np.random.default_rng(4).integers(0, 5, size=size).astype(np.int8)
+    np.save(test.path / "shards" / "test_chr2" / "seq.npy", codes)
+    config = {"conditions": list(CONDITIONS), "split": "test", "tracks_dir": str(tracks)}
+    (test.path / "cache.json").write_text(json.dumps(config))
+    if train is not None and (train / "pca.npz").exists():
+        (test.path / "pca.npz").write_bytes((train / "pca.npz").read_bytes())
+    return TxCache(test.path)
+
+
+def test_predict_val_reproduces_the_runs_own_val_record(tmp_path, txc):
+    run, _ = _trained_run(tmp_path, txc)
+    out = tmp_path / "pred_val"
+    txtrain.main(
+        ["--predict", str(run), "--cache", str(txc.path), "--split", "val",
+         "--results", str(tmp_path / "results_val.tsv"), "--export-dir", str(out)],
+        _stub,
+    )  # fmt: skip
+    record = json.loads((run / "record.json").read_text())
+    again = json.loads((run / "record_val.json").read_text())
+    assert again["meta"]["config_hash"] == record["meta"]["config_hash"]
+    assert again["meta"]["best_step"] == record["meta"]["best_step"]
+    for key in ("scorecard", "peaks"):
+        pd.testing.assert_frame_equal(
+            pd.DataFrame(again[key]), pd.DataFrame(record[key]), check_exact=True
+        )
+    assert again["reference_row"] is not None
+    for key in fastloop.result_columns(txc.conditions)[11:]:
+        a, b = record["row"][key], again["row"][key]
+        assert (a == b) or (a is None and b is None) or (math.isnan(a) and math.isnan(b)), key
+    for lib in fastloop.LIBRARIES:
+        for strand in ("plus", "minus"):
+            name = f"{lib}_pooled.{strand}.bw"
+            np.testing.assert_array_equal(
+                _bw_values(out / "run" / "K562" / name),
+                _bw_values(tmp_path / "export" / "run" / "K562" / name),
+            )
+    frame = pd.read_csv(tmp_path / "results_val.tsv", sep="\t")
+    assert len(frame) == 1 and frame.name[0] == "run"
+    assert len(pd.read_csv(tmp_path / "results.tsv", sep="\t")) == 1  # training row untouched
+
+
+def test_predict_scores_a_test_cache_end_to_end(tmp_path, txc):
+    import pyBigWig
+
+    from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
+    from tisiago.seq2func.txcache import unit_of
+
+    run, tracks = _trained_run(tmp_path, txc, pca=True)
+    test = _txc_test(tmp_path / "x_test", tracks, train=txc.path)
+    out = tmp_path / "pred_test"
+    results = tmp_path / "results_test.tsv"
+    txtrain.main(
+        ["--predict", str(run), "--cache", str(test.path), "--split", "test", "--i-am-final",
+         "--results", str(results), "--export-dir", str(out)],
+        _stub,
+    )  # fmt: skip
+    record = json.loads((run / "record_test.json").read_text())
+    table = pd.DataFrame(record["scorecard"])
+    assert {"model", "ckpt"} <= set(table.source) and set(table.condition) == set(CONDITIONS)
+    model_rows = table[(table.source == "model") & (table.scale == "nt")]
+    assert len(model_rows) == 2 * len(CONDITIONS) and np.isfinite(model_rows.value).all()
+    assert record["meta"]["split"] == "test" and record["meta"]["cache"] == str(test.path)
+    assert set(pd.DataFrame(record["peaks"]).source) == {"real", "model", "ckpt"}
+    frame = pd.read_csv(results, sep="\t")
+    assert len(frame) == 1 and frame.cache[0] == str(test.path)
+    assert list(frame.columns) == fastloop.result_columns(CONDITIONS)
+    # exported test tracks are the best/ parameters' own tiled predictions
+    payload, settings = txtrain.load_run(run)
+    backbone = _stub(None)
+    net = txtrain.Net(payload["config"], backbone, settings.proj_dim)
+    row0 = next(test.rows("test").itertuples())
+    ex = txtrain.transcript_example(test, row0, CONDITIONS, 0, MIN)
+    template = {"backbone": backbone.params, "head": net.init_head(jax.random.PRNGKey(0), ex)}
+    params = txtrain.load_tree(template, run / "best" / "params.npz")
+    preds = txtrain.predict_transcripts(
+        txtrain.predictor(net.forward(), params, backbone.state),
+        test, test.rows("test"), CONDITIONS, MIN, MAX,
+    )  # fmt: skip
+    k = test.condition_index("K562")
+    for r in test.rows("test").itertuples():
+        unit = unit_of(r)
+        suffix, shift = ("plus", 0) if r.strand == "+" else ("minus", RIBOTISH_MINUS_SHIFT)
+        bw = pyBigWig.open(str(out / "run" / "K562" / f"tis_pooled.{suffix}.bw"))
+        got = [bw.values("chr2", int(p) + shift, int(p) + shift + 1)[0] for p in unit.positions]
+        bw.close()
+        np.testing.assert_allclose(got, preds[r.transcript_id][k, :, 0], rtol=1e-6)
+    manifest = json.loads((out / "run" / "K562" / "predict_tracks.json").read_text())
+    assert manifest["split"] == "test" and manifest["transcripts"] == 2
+
+
+def test_predict_refusals(tmp_path, txc):
+    run, tracks = _trained_run(tmp_path, txc, pca=True)
+    test = _txc_test(tmp_path / "x_test", tracks, train=txc.path)
+    base = ["--predict", str(run), "--results", str(tmp_path / "r_test.tsv")]
+
+    def refused(*extra):
+        with pytest.raises(SystemExit):
+            txtrain.main([*base, *extra], _stub)
+
+    refused("--cache", str(test.path), "--split", "test")  # no --i-am-final
+    refused("--cache", str(txc.path), "--split", "test", "--i-am-final")  # not a test cache
+    refused("--cache", str(test.path), "--split", "val")  # val on a test cache
+    for flag in (["--steps", "5"], ["--out", str(tmp_path / "o")], ["--seed=1"], ["--preload"]):
+        refused("--cache", str(test.path), "--split", "test", "--i-am-final", *flag)
+    with pytest.raises(SystemExit):  # predict flags without --predict
+        txtrain.main(_argv(txc, tmp_path / "o2", tmp_path / "r.tsv", "--i-am-final"), _stub)
+    assert not (tmp_path / "o2").exists() and not (tmp_path / "r_test.tsv").exists()
+    kw = {"log": lambda s: None}
+    with pytest.raises(PermissionError, match="i_am_final"):
+        txtrain.predict_run(run, test, _stub(None), "test", tmp_path / "r_test.tsv", **kw)
+    with pytest.raises(ValueError, match="not a test cache"):
+        txtrain.predict_run(
+            run, txc, _stub(None), "test", tmp_path / "r_test.tsv", i_am_final=True, **kw
+        )
+    with pytest.raises(ValueError, match="main results"):
+        txtrain.predict_run(run, txc, _stub(None), "val", tmp_path / "results.tsv", **kw)
+    # the test cache's PCA must be the training cache's, byte for byte
+    np.savez(test.path / "pca.npz", mean=np.zeros(16), components=np.ones((8, 16)))
+    with pytest.raises(ValueError, match="not the training cache"):
+        txtrain.predict_run(
+            run, test, _stub(None), "test", tmp_path / "r_test.tsv", i_am_final=True, **kw
+        )
+    # a backbone of another shape does not load into best/
+    with pytest.raises(ValueError, match="shape|leaves"):
+        txtrain.predict_run(run, txc, txtrain.stub_backbone(dim=8), "val", tmp_path / "r.tsv", **kw)
+    # an edited run.json fails its hash
+    payload = json.loads((run / "run.json").read_text())
+    payload["settings"]["seed"] = 7
+    (run / "run.json").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="run hash"):
+        txtrain.load_run(run)
+    assert not (tmp_path / "r_test.tsv").exists()

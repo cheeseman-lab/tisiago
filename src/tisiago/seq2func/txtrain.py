@@ -6,6 +6,9 @@ Usage::
         --init data/p6/runs/ar_rnacond_k562_fc2d_l2w300/best --heldout K562 \
         --out data/p6/txtrain/k562 --export-dir data/p6/txtrain/export
     # smoke: --steps 50 --eval-every 50; resume: rerun the same command (``<out>/last``)
+    python -m tisiago.seq2func.txtrain --predict data/p6/txtrain/k562 \
+        --cache data/p6/txcache/fc2d_k562_test --split test --i-am-final \
+        --export-dir data/p6/txtrain/export_test      # final: score best/ on test, once
 
 Spec ``docs/superpowers/specs/2026-10-23-p6-spliced-backbone-design.md``. One example is one
 MANE transcript of a :class:`txcache.TxCache`: its spliced, sense mRNA (``seq.npy`` codes ->
@@ -34,7 +37,17 @@ At the end the best parameters are scored on every condition (the cache's ``ckpt
 ``ckpt``), one row is appended to ``--results`` (:func:`fastloop.result_columns`), the record
 is written to ``<out>/record.json`` and, with ``--export-dir``, the val predictions of the
 held-out conditions to ``<export-dir>/<name>/`` (:func:`fastloop.export_bigwigs`). Test caches
-are refused; only the train and val rows of a cache are read.
+are refused for training; only the train and val rows of a cache are read.
+
+``--predict <out>`` loads ``<out>/best`` and the run's ``run.json`` (head config, settings; the
+run hash must match), rebuilds the backbone from the run's ``init`` and predicts every transcript
+of ``--split`` of ``--cache`` with the val-eval tiling. ``test`` needs a test cache
+(:mod:`txcache` ``build --test --pca-from <train cache>``, whose ``pca.npz`` must equal the
+training cache's) and ``--i-am-final``; ``val`` on the training cache reproduces the run's own
+val record. The row goes to ``--results`` (default ``data/p6/txtrain/results_test.tsv``; never
+the main ``results.tsv``), the record to ``<out>/record_<split>.json`` and, with
+``--export-dir``, the split's genomic bigWigs to ``<export-dir>/<name>/``. Training flags are
+refused with ``--predict``.
 """
 
 from __future__ import annotations
@@ -357,6 +370,16 @@ class Net:
         emb = self.embed(params["backbone"], state, seq)
         return self.head.apply(params["head"], {**batch, "emb": emb})
 
+    def forward(self) -> Callable:
+        """Jitted ``(params, state, batch, seq) -> pred (K, S, 2)`` (training eval and predict)."""
+        import jax
+
+        @jax.jit
+        def forward(params, state, batch, seq):
+            return self.apply(params, state, batch, seq)[0]
+
+        return forward
+
     def init_head(self, key, example: Mapping[str, np.ndarray]):
         """Fresh head parameters (shapes from ``example``)."""
         import jax.numpy as jnp
@@ -476,6 +499,17 @@ def _json_default(value):
     if isinstance(value, np.generic):
         return value.item()
     return str(value)
+
+
+def predictor(forward: Callable, params, state) -> Callable[[Mapping], np.ndarray]:
+    """``predict(example) -> (K, S, 2)`` of ``forward`` (:meth:`Net.forward`) at ``params``."""
+    import jax.numpy as jnp
+
+    def predict(example):
+        batch = {k: jnp.asarray(v) for k, v in head_batch(example).items()}
+        return forward(params, state, batch, jnp.asarray(example["seq"]))
+
+    return predict
 
 
 def predict_transcripts(
@@ -605,16 +639,10 @@ def train_run(
         updates, opt_state = opt.update(grads, opt_state, params)
         return optax.apply_updates(params, updates), opt_state, loss, parts
 
-    @jax.jit
-    def forward(params, state, batch, seq):
-        return net.apply(params, state, batch, seq)[0]
+    forward = net.forward()
 
     def predict_with(p):
-        def predict(example):
-            batch = {k: jnp.asarray(v) for k, v in head_batch(example).items()}
-            return forward(p, bstate, batch, jnp.asarray(example["seq"]))
-
-        return predict
+        return predictor(forward, p, bstate)
 
     status = {
         "step": 0,
@@ -809,14 +837,160 @@ def train_run(
     return record
 
 
+TEST_RESULTS = Path("data/p6/txtrain/results_test.tsv")
+
+
+def load_run(run: str | Path) -> tuple[dict, Settings]:
+    """``(run.json, settings)`` of a finished training run; the run hash must match ``best/``."""
+    run = Path(run)
+    for need in ("run.json", f"best/{PARAMS}", f"best/{STATE}"):
+        if not (run / need).exists():
+            raise FileNotFoundError(f"{run / need} missing: not a txtrain run with a best/")
+    payload = json.loads((run / "run.json").read_text())
+    settings = Settings(**payload["settings"])
+    digest = run_hash(payload["config"], settings)
+    if digest != payload["digest"]:
+        raise ValueError(f"{run}/run.json: run hash {digest} != saved {payload['digest']}")
+    best = json.loads((run / "best" / STATE).read_text())
+    if best.get("digest") != digest:
+        raise ValueError(f"{run}/best is run {best.get('digest')}, not {digest}")
+    return payload, settings
+
+
+def predict_run(
+    run: str | Path,
+    cache: TxCache,
+    backbone: Backbone,
+    split: str = "test",
+    results: str | Path = TEST_RESULTS,
+    export_dir: str | Path | None = None,
+    export_conditions: Sequence[str] | None = None,
+    i_am_final: bool = False,
+    log: Callable[[str], None] = print,
+) -> dict:
+    """Score a finished run's ``best/`` on ``split`` of ``cache`` without training.
+
+    ``backbone`` must be the run's (same parameter tree; its weights are replaced by
+    ``best/``). The head config, projection and buckets are the run's own; predictions use the
+    val-eval tiling, scoring the unchanged :func:`fastloop.score_predictions` with ``split``'s
+    rows in place of val (:class:`fastloop.SplitView`). Writes ``<run>/record_<split>.json``,
+    one row to ``results`` (never a main ``results.tsv``) and, with ``export_dir``, the split's
+    genomic bigWigs to ``<export_dir>/<name>/``.
+    """
+    import jax
+
+    if split not in ("val", "test"):
+        raise ValueError(f"split must be val or test, not {split!r}")
+    if split == TEST_SPLIT:
+        if not i_am_final:
+            raise PermissionError("split test reads the held-out chromosomes; pass i_am_final")
+        if cache.config.get("split") != TEST_SPLIT:
+            raise ValueError(f"{cache.path} is not a test cache (txcache --test)")
+    else:
+        check_cache(cache)
+    results = Path(results)
+    if results.name == DEFAULT_RESULTS.name or results.resolve() == DEFAULT_RESULTS.resolve():
+        raise ValueError(f"{results}: predictions never go to the main results.tsv")
+    t0 = time.time()
+    run = Path(run)
+    payload, settings = load_run(run)
+    config, digest, name = payload["config"], payload["digest"], payload["config"]["name"]
+    heldout = list(config["heldout"])
+    conditions = tuple(cache.conditions)
+    missing = sorted((set(heldout) | set(payload["train_conditions"])) - set(conditions))
+    if missing:
+        raise ValueError(f"{cache.path} lacks the run's conditions {missing}")
+    fastloop.check_pca(cache, payload.get("cache"))
+    rows = cache.rows(split)
+    if rows.empty:
+        raise ValueError(f"{cache.path} has no {split} transcripts")
+    first = next(rows.itertuples())
+    size = bucket_of(first.length, settings.min_bucket, settings.max_bucket)
+    net = Net(config, backbone, settings.proj_dim)
+    example = transcript_example(cache, first, conditions, 0, size)
+    template = {
+        "backbone": backbone.params,
+        "head": net.init_head(jax.random.PRNGKey(settings.seed), example),
+    }
+    params = load_tree(template, run / "best" / PARAMS)
+    best = json.loads((run / "best" / STATE).read_text())
+    preds = predict_transcripts(
+        predictor(net.forward(), params, backbone.state),
+        cache,
+        rows,
+        conditions,
+        settings.min_bucket,
+        settings.max_bucket,
+    )
+    view = fastloop.SplitView(cache, split)
+    sources = {"model": preds}
+    ckpt = fastloop.ckpt_predictions(view)
+    if ckpt is not None:
+        sources["ckpt"] = ckpt
+    table, peaks = fastloop.score_predictions(view, sources, conditions, heldout)
+    meta = {
+        "config_hash": digest,
+        "name": name,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "git_commit": fastloop._git_commit(),
+        "cache": str(cache.path),
+        "heldout": ",".join(heldout),
+        "heldout_list": heldout,
+        "steps": int(settings.steps),
+        "best_step": best.get("best_step"),
+        "eval_seconds": time.time() - t0,
+        "runtime_seconds": time.time() - t0,
+        "split": split,
+        "run": str(run),
+        "train_cache": payload.get("cache"),
+        "init": settings.init,
+        "backbone": backbone.source,
+    }
+    row = fastloop.results_row(meta, table, peaks, conditions)
+    fastloop.append_result(results, row, fastloop.result_columns(conditions))
+    record = {
+        "meta": meta,
+        "config": config,
+        "settings": asdict(settings),
+        "row": row,
+        "reference_row": fastloop.results_row(meta, table, peaks, conditions, "ckpt")
+        if ckpt is not None
+        else None,
+        "scorecard": table.to_dict(orient="records"),
+        "peaks": peaks.to_dict(orient="records"),
+    }
+    if export_dir is not None:
+        dest = Path(export_dir) / name
+        fastloop.export_bigwigs(
+            cache,
+            preds,
+            list(export_conditions or heldout),
+            dest,
+            split=split,
+            meta={
+                "name": name,
+                "config_hash": digest,
+                "primary3": row["primary3"],
+                "params": str(run / "best"),
+            },
+        )
+        record["export"] = str(dest)
+        log(f"exported {name} {split} tracks to {dest}")
+    fastloop._write_json(run / f"record_{split}.json", record)
+    log(f"{name} ({digest}) on {split}: primary3 {row['primary3']:.1f}")
+    return record
+
+
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument("--cache", type=Path, required=True, help="train/val txcache (never test)")
+    ap.add_argument(
+        "--cache", type=Path, required=True, help="train/val txcache (test only with --predict)"
+    )
     ap.add_argument("--init", type=Path, default=None, help="fold's fine-tuned run best/")
     ap.add_argument("--head-config", type=Path, default=DEFAULT_HEAD_CONFIG)
     ap.add_argument("--heldout", nargs="+", default=None, help="default: the head config's")
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path, default=None, help="run directory (training)")
     ap.add_argument("--name", default=None, help="default: the --out directory name")
     ap.add_argument("--steps", type=int, default=Settings.steps)
     ap.add_argument("--min-bucket", type=int, default=MIN_BUCKET)
@@ -832,17 +1006,103 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--proj-init", choices=("pca", "random"), default="pca")
     ap.add_argument("--preload", action="store_true", help="read the train split into memory")
     ap.add_argument("--stop-after", type=int, default=None, help="stop at this step (resumable)")
-    ap.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
+    ap.add_argument(
+        "--results",
+        type=Path,
+        default=None,
+        help=f"default {DEFAULT_RESULTS} ({TEST_RESULTS} with --predict)",
+    )
     ap.add_argument("--export-dir", type=Path, default=None)
     ap.add_argument("--export-conditions", nargs="+", default=None)
     ap.add_argument("--base-checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
+    ap.add_argument(
+        "--predict",
+        type=Path,
+        default=None,
+        help="finished run directory (<out>): score its best/ on --split of --cache, no training",
+    )
+    ap.add_argument("--split", choices=("val", "test"), default="test", help="with --predict")
+    ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
     return ap
+
+
+PREDICT_FLAGS = frozenset(
+    {"cache", "results", "export_dir", "export_conditions", "base_checkpoint", "predict", "split",
+     "i_am_final", "help"}
+)  # fmt: skip
+
+
+def training_flags_given(ap: argparse.ArgumentParser, argv: Sequence[str]) -> list[str]:
+    """Training-only option strings present in ``argv`` (refused with ``--predict``)."""
+    given = []
+    for action in ap._actions:
+        if action.dest in PREDICT_FLAGS:
+            continue
+        for opt in action.option_strings:
+            if any(a == opt or a.startswith(opt + "=") for a in argv):
+                given.append(opt)
+    return given
+
+
+def predict_main(ap, args, argv: Sequence[str], backbone_factory: Callable | None) -> None:
+    """``--predict``: rebuild the run's backbone, score its ``best/`` on ``--split``."""
+    flags = training_flags_given(ap, argv)
+    if flags:
+        ap.error(f"--predict takes no training flags: {' '.join(flags)}")
+    if args.split == TEST_SPLIT and not args.i_am_final:
+        ap.error("--split test reads the held-out chromosomes; pass --i-am-final to confirm")
+    cache = TxCache(args.cache)
+    if args.split == TEST_SPLIT and cache.config.get("split") != TEST_SPLIT:
+        ap.error(f"{args.cache} is not a test cache (txcache build --test)")
+    if args.split != TEST_SPLIT:
+        try:
+            check_cache(cache)
+        except ValueError as exc:
+            ap.error(str(exc))
+    try:
+        _, settings = load_run(args.predict)
+    except (FileNotFoundError, ValueError) as exc:
+        ap.error(str(exc))
+    t0 = time.time()
+    if backbone_factory is not None:
+        backbone = backbone_factory(args)
+    else:
+        import jax
+
+        if not settings.init:
+            ap.error(f"{args.predict}: the run has no init to rebuild its backbone from")
+        if not args.base_checkpoint:
+            ap.error("--base-checkpoint is required (or set ALPHAGENOME_WEIGHTS_PATH in .env)")
+        backbone = alphagenome_backbone(settings.init, args.base_checkpoint)
+        print(f"backbone {backbone.source} built in {time.time() - t0:.0f}s on {jax.devices()}")
+    predict_run(
+        args.predict,
+        cache,
+        backbone,
+        args.split,
+        args.results or TEST_RESULTS,
+        args.export_dir,
+        args.export_conditions,
+        i_am_final=args.i_am_final,
+        log=lambda s: print(s, flush=True),
+    )
 
 
 def main(argv: Sequence[str] | None = None, backbone_factory: Callable | None = None) -> None:
     """CLI; ``backbone_factory(args) -> Backbone`` replaces AlphaGenome (tests)."""
+    import sys
+
     ap = build_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = ap.parse_args(argv)
+    if args.predict is not None:
+        predict_main(ap, args, argv, backbone_factory)
+        return
+    if args.out is None:
+        ap.error("--out is required for training")
+    if args.i_am_final or "--split" in argv or any(a.startswith("--split=") for a in argv):
+        ap.error("--split / --i-am-final go with --predict")
+    args.results = args.results or DEFAULT_RESULTS
     cache = TxCache(args.cache)
     try:
         check_cache(cache)
