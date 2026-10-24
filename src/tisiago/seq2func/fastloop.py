@@ -26,7 +26,10 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   the 3' side); ``model.tis_onehot`` (``width``, ``channels``, ``layers``) adds a one-hot
   sequence conv branch to the TIS head input (``into: context``: to the TIS context input);
   ``model.tis_exon`` feeds the ``exon`` features to the TIS branch only; ``model.chx_contrast``
-  feeds log ratios of the gradient-stopped CHX prediction to the TIS output.
+  feeds log ratios of the gradient-stopped CHX prediction to the TIS output;
+  ``model.chx_onehot`` (as ``tis_onehot``; needs ``chx_trunk``) adds a one-hot sequence conv
+  branch to the CHX trunk input and ``model.chx_context`` stacks a trunk on the CHX trunk
+  (uORF-scale frame context).
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
@@ -103,6 +106,20 @@ PRIMARY_SCALES = ("codon", "nt")
 START_CLASSES = ("atg", "nc")
 EXON_REGIONS = ("", "_first", "_later")
 REP_STATS = ("hit", "ref", "ratio", "n")
+UTR5_TYPE = "5'UTR"
+UTR5_STATS = (
+    "tis_rep_hit",
+    "tis_rep_ref",
+    "tis_rep_ratio",
+    "tis_rep_n",
+    "orf_frame",
+    "orf_framed",
+    "orf_n",
+    "orf_frame_real",
+    "orf_framed_real",
+)
+UTR5_MIN_ORF_READS = 10.0
+STOP_CODES = frozenset({(3, 0, 0), (3, 0, 2), (3, 2, 0)})  # TAA TAG TGA, A C G T = 0..3
 RNA_HEAD = 129
 DEFAULTS: dict = {
     "name": None,
@@ -178,7 +195,9 @@ def resolve_config(raw: Mapping) -> dict:
     for name in config["inputs"]:
         if name not in INPUTS:
             raise ValueError(f"unknown input {name!r}; choose from {sorted(INPUTS)}")
-    for key in ("trunk", "chx_trunk", "tis_context"):
+    if config["model"].get("chx_onehot") and not config["model"].get("chx_trunk"):
+        raise ValueError("model.chx_onehot needs model.chx_trunk")
+    for key in ("trunk", "chx_trunk", "tis_context", "chx_context"):
         kind = (config["model"].get(key) or {"kind": "mlp"})["kind"]
         if kind not in TRUNKS:
             raise ValueError(f"unknown {key} {kind!r}")
@@ -720,8 +739,25 @@ def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
         h_chx = h
         if model.get("split_trunk") or model.get("chx_trunk"):
             chx_cfg = model.get("chx_trunk") or model["trunk"]
+            x_chx = x
+            if model.get("chx_onehot"):
+                oh_cfg = model["chx_onehot"]
+                chx_seq = _onehot(batch)
+                for i in range(int(oh_cfg.get("layers", 1))):
+                    conv = hk.Conv1D(
+                        int(oh_cfg.get("channels", 64)),
+                        int(oh_cfg.get("width", 41)) if i == 0 else 3,
+                        padding="SAME",
+                        name=f"chx_onehot{i}",
+                    )
+                    chx_seq = jax.nn.relu(conv(chx_seq)) * valid[..., None]
+                x_chx = jnp.concatenate([x, chx_seq], axis=-1)
             with hk.name_scope("chx_trunk"):
-                h_chx = TRUNKS[chx_cfg["kind"]](x, valid, chx_cfg)
+                h_chx = TRUNKS[chx_cfg["kind"]](x_chx, valid, chx_cfg)
+        if model.get("chx_context"):
+            with hk.name_scope("chx_context"):
+                cctx = model["chx_context"]
+                h_chx = TRUNKS[cctx["kind"]](h_chx, valid, cctx)
         n_chx, chx_fn = OUTPUTS[model["chx"]["kind"]]
         chx = chx_fn(head(h_chx, batch["strand"], n_chx, "chx_out"), valid, model["chx"])
         tis_in = h
@@ -1164,6 +1200,53 @@ def rep_summary(
     return out
 
 
+def orf_stop(seq: np.ndarray, start: int) -> int:
+    """End (exclusive) of the ORF from ``start``: its first in-frame stop, else the last codon."""
+    seq = np.asarray(seq)
+    for i in range(int(start), len(seq) - 2, 3):
+        if (int(seq[i]), int(seq[i + 1]), int(seq[i + 2])) in STOP_CODES:
+            return i + 3
+    return int(start) + (len(seq) - int(start)) // 3 * 3
+
+
+def orf_frame(chx: np.ndarray, start: int, stop: int) -> float:
+    """In-frame share of ``chx`` over ``[start, stop)`` (NaN without signal)."""
+    orf = np.asarray(chx[start:stop], np.float64)
+    total = orf.sum()
+    return float(orf[0::3].sum() / total) if total > 0 else float("nan")
+
+
+def utr5_summary(
+    pred: np.ndarray,
+    rep1: np.ndarray,
+    rep2: np.ndarray,
+    utr5: np.ndarray,
+    frames: np.ndarray,
+) -> dict[str, float]:
+    """5'UTR starts: reproducible TIS hit rate vs replicate 1 and CHX frame in their ORFs.
+
+    ``pred``/``rep1``/``rep2`` are TIS site profiles, ``utr5`` marks Ribo-TISH 5'UTR starts and
+    ``frames`` is each site's ORF in-frame CHX share for this source (NaN when not scored).
+    Keys ``utr5_tis_rep_{hit,ref,ratio,n}`` (conditioned on replicate 2, as
+    :func:`rep_summary`) and ``utr5_orf_{frame,framed,n}`` (mean share, share > 0.5).
+    """
+    hit_p, hit_1, hit_2 = site_hits(pred), site_hits(rep1), site_hits(rep2)
+    sel = np.asarray(utr5, bool) & hit_2
+    n = int(sel.sum())
+    hit = float(hit_p[sel].mean()) if n else float("nan")
+    ref = float(hit_1[sel].mean()) if n else float("nan")
+    scored = np.asarray(utr5, bool) & np.isfinite(frames)
+    return {
+        "utr5_tis_rep_hit": hit,
+        "utr5_tis_rep_ref": ref,
+        "utr5_tis_rep_ratio": hit / ref if n and ref > 0 else float("nan"),
+        "utr5_tis_rep_n": n,
+        "utr5_orf_frame": float(frames[scored].mean()) if scored.any() else float("nan"),
+        "utr5_orf_framed": float((frames[scored] > 0.5).mean()) if scored.any() else float("nan"),
+        "utr5_orf_n": int(scored.sum()),
+    }
+
+
 def score_predictions(
     cache: TxCache,
     sources: Mapping[str, Mapping[str, np.ndarray]],
@@ -1184,8 +1267,11 @@ def score_predictions(
         units = val[val[f"expressed_{condition}"].to_numpy(bool)]
         spans = [_Span(r.cds_start, r.cds_end) for r in units.itertuples()]
         reps = {lib: {} for lib in LIBRARIES}
+        seqs = []
         for row in units.itertuples():
             lo, hi = int(row.offset), int(row.offset) + int(row.length)
+            has_seq = cache.has(row.shard, "seq")
+            seqs.append(np.asarray(cache.array(row.shard, "seq")[lo:hi]) if has_seq else None)
             for lib in LIBRARIES:
                 arr = np.asarray(cache.array(row.shard, lib)[k, lo:hi], np.float64)
                 reps[lib].setdefault("rep1", []).append(arr[:, 0])
@@ -1210,8 +1296,30 @@ def score_predictions(
         }
         real, preds, classes = [], {name: [] for name in sources}, []
         rep1, rep2, regions = [], [], []
+        utr5, frames = [], {name: [] for name in ("real", *sources)}
         for tid, group in sites.groupby("transcript_id", sort=False):
             pos = group.tx_pos.to_numpy(int)
+            is_utr5 = group.tistype.astype(str).str.startswith(UTR5_TYPE).to_numpy()
+            utr5.append(is_utr5)
+            seq, chx = seqs[index[tid]], reps["chx"]["pooled"][index[tid]]
+            stops = [
+                orf_stop(seq, p) if u and seq is not None else -1 for p, u in zip(pos, is_utr5)
+            ]
+            ok = [
+                st > p and chx[p:st].sum() >= UTR5_MIN_ORF_READS
+                for p, st in zip(pos, stops, strict=True)
+            ]
+            for name in frames:
+                vec = chx if name == "real" else sources[name][tid][k, :, 1]
+                frames[name].append(
+                    np.array(
+                        [
+                            orf_frame(vec, p, st) if good else np.nan
+                            for p, st, good in zip(pos, stops, ok, strict=True)
+                        ],
+                        np.float64,
+                    )
+                )
             real.append(site_profiles(reps["tis"]["pooled"][index[tid]], pos))
             rep1.append(site_profiles(reps["tis"]["rep1"][index[tid]], pos))
             rep2.append(site_profiles(reps["tis"]["rep2"][index[tid]], pos))
@@ -1226,6 +1334,8 @@ def score_predictions(
         cls = np.concatenate(classes)[keep]
         r1, r2 = np.concatenate(rep1)[keep], np.concatenate(rep2)[keep]
         region = np.concatenate(regions)[keep]
+        is_utr5 = np.concatenate(utr5)[keep]
+        frame = {name: np.concatenate(parts)[keep] for name, parts in frames.items()}
         peaks.append(
             {
                 "condition": condition,
@@ -1233,6 +1343,7 @@ def score_predictions(
                 **peak_summary(real_p[keep]),
                 **class_peak_summary(real_p[keep], cls),
                 **rep_summary(r1, r1, r2, cls, region),
+                **utr5_summary(r1, r1, r2, is_utr5, frame["real"]),
             }
         )
         for name, parts in preds.items():
@@ -1244,6 +1355,7 @@ def score_predictions(
                     **peak_summary(prof),
                     **class_peak_summary(prof, cls),
                     **rep_summary(prof, r1, r2, cls, region),
+                    **utr5_summary(prof, r1, r2, is_utr5, frame[name]),
                 }
             )
     return pd.DataFrame(rows), pd.DataFrame(peaks)
@@ -1300,6 +1412,8 @@ def result_columns(conditions: Sequence[str]) -> list[str]:
                 f"{c}_tis_rep_{stat}_{cls}{region}" for region in EXON_REGIONS for stat in REP_STATS
             ]
             cols.append(f"{c}_tis_rep_both_{cls}")
+    for c in conditions:
+        cols += [f"{c}_utr5_{stat}" for stat in UTR5_STATS]
     return cols
 
 
@@ -1337,6 +1451,13 @@ def results_row(
                 col = f"{r['condition']}_tis_{key}"
                 if key.startswith("rep_") and col in row:
                     row[col] = float(value)
+                if key.startswith("utr5_") and f"{r['condition']}_{key}" in row:
+                    row[f"{r['condition']}_{key}"] = float(value)
+        for r in peaks[peaks.source == "real"].to_dict(orient="records"):
+            for stat in ("orf_frame", "orf_framed"):
+                col = f"{r['condition']}_utr5_{stat}_real"
+                if col in row:
+                    row[col] = float(r.get(f"utr5_{stat}", float("nan")))
     heldout = list(meta.get("heldout_list") or [])
     if heldout:
         values = [row.get(f"{heldout[0]}_tis_{s}", float("nan")) for s in PRIMARY_SCALES]
@@ -1363,12 +1484,19 @@ def primary3(row: Mapping, condition: str) -> float:
 
 
 def append_result(path: str | Path, row: Mapping, columns: Sequence[str]) -> None:
-    """Append ``row`` to a TSV with header ``columns`` (created if absent; must match)."""
+    """Append ``row`` to a TSV with header ``columns`` (created if absent; must match).
+
+    A file whose header is a strict prefix of ``columns`` (columns added since) is first
+    rewritten with the full header, its earlier rows padded with ``nan``.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.stat().st_size:
         with open(path) as handle:
             header = handle.readline().rstrip("\n").split("\t")
+        if len(header) < len(columns) and header == list(columns)[: len(header)]:
+            _extend_header(path, list(columns), len(header))
+            header = list(columns)
         if header != list(columns):
             raise ValueError(f"{path} has a different header; use a new results file")
         prefix = ""
@@ -1382,6 +1510,17 @@ def append_result(path: str | Path, row: Mapping, columns: Sequence[str]) -> Non
 
     with open(path, "a") as handle:
         handle.write(prefix + "\t".join(fmt(row.get(c, float("nan"))) for c in columns) + "\n")
+
+
+def _extend_header(path: Path, columns: list[str], old: int) -> None:
+    """Rewrite ``path`` with header ``columns``, padding each row's last ``len - old`` fields."""
+    pad = "\t".join(["nan"] * (len(columns) - old))
+    with open(path) as handle:
+        lines = handle.read().splitlines()
+    body = [line + "\t" + pad for line in lines[1:] if line]
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text("\n".join(["\t".join(columns), *body]) + "\n")
+    os.replace(tmp, path)
 
 
 def _git_commit() -> str | None:

@@ -312,6 +312,13 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
         {"model": {"strand_heads": False, "trunk": {"layers": 2, "hidden": 16}}},
         {"model": {"split_trunk": True, "chx_contrast": True}},
         {"model": {"chx_trunk": {"kind": "conv", "width": 7, "hidden": 8}}},
+        {
+            "model": {
+                "chx_trunk": {"kind": "conv", "width": 7, "hidden": 8},
+                "chx_onehot": {"width": 5, "channels": 4},
+                "chx_context": {"kind": "dilated", "dilations": [1, 4], "channels": 8},
+            }
+        },
         {"model": {"tis_context": {"kind": "dilated", "dilations": [1, 4], "channels": 8}}},
         {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
         {
@@ -675,7 +682,9 @@ def test_phase3_columns_appended_and_primary3(cache):
     )
     columns = fastloop.result_columns(CONDITIONS)
     start = columns.index("primary3")
-    assert all("_rep_" in c for c in columns[start + 1 :])
+    first_utr5 = next(i for i, c in enumerate(columns) if "_utr5_" in c)
+    assert all("_rep_" in c for c in columns[start + 1 : first_utr5])
+    assert all("_utr5_" in c for c in columns[first_utr5:])
     assert columns.index("primary2") < start and "K562_tis_rep_hit_nc_later" in columns
     meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
     row = fastloop.results_row(meta, table, peaks, CONDITIONS)
@@ -1022,3 +1031,84 @@ def test_predict_cli_requires_the_final_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", [*argv[:3]])
     with pytest.raises(SystemExit):
         fastloop.main()
+
+
+def test_orf_stop_and_frame():
+    # ATG CCC TAA GG: stop codon ends at 9
+    seq = np.array([0, 3, 2, 1, 1, 1, 3, 0, 0, 2, 2], np.int8)
+    assert fastloop.orf_stop(seq, 0) == 9
+    assert fastloop.orf_stop(seq, 1) == 10  # no in-frame stop: last full codon
+    chx = np.array([4.0, 1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.0, 1.0, 9.0, 9.0])
+    assert fastloop.orf_frame(chx, 0, 9) == pytest.approx(7.0 / 10.0)
+    assert math.isnan(fastloop.orf_frame(np.zeros(11), 0, 9))
+
+
+def test_utr5_summary_conditions_on_replicate_2():
+    peak = np.zeros((4, 61))
+    peak[:, 30] = 1.0
+    off = np.zeros((4, 61))
+    off[:, 10] = 1.0
+    rep2 = np.stack([peak[0], peak[1], peak[2], off[3]])
+    rep1 = np.stack([peak[0], off[1], peak[2], peak[3]])
+    pred = np.stack([peak[0], peak[1], off[2], peak[3]])
+    utr5 = np.array([True, True, False, True])
+    frames = np.array([0.6, 0.4, 0.9, np.nan])
+    out = fastloop.utr5_summary(pred, rep1, rep2, utr5, frames)
+    assert out["utr5_tis_rep_n"] == 2  # sites 0, 1 (site 3 misses in rep2; site 2 not 5'UTR)
+    assert out["utr5_tis_rep_hit"] == 1.0 and out["utr5_tis_rep_ref"] == 0.5
+    assert out["utr5_tis_rep_ratio"] == 2.0
+    assert out["utr5_orf_n"] == 2 and out["utr5_orf_frame"] == pytest.approx(0.5)
+    assert out["utr5_orf_framed"] == 0.5
+
+
+def test_utr5_columns_filled_from_cache_with_seq(cache):
+    rows = cache.rows("val")
+    size = int(rows.offset.max() + rows.length.max())
+    seq = np.zeros(size, np.int8)  # all A: no stop codon, the ORF runs to the last codon
+    np.save(cache.path / "shards" / "val_chr1" / "seq.npy", seq)
+    sites = cache.sites.copy()
+    sites.loc[sites.transcript_id == "V2", "tistype"] = "5'UTR"
+    cache.sites = sites
+    rng = np.random.default_rng(7)
+    preds = {
+        r.transcript_id: rng.gamma(1.0, size=(3, r.length, 2)).astype(np.float32)
+        for r in rows.itertuples()
+    }
+    table, peaks = fastloop.score_predictions(
+        cache, {"model": preds}, CONDITIONS, heldout=["K562"], min_reads=5
+    )
+    meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
+    row = fastloop.results_row(meta, table, peaks, CONDITIONS)
+    k562 = peaks[(peaks.condition == "K562")].set_index("source")
+    assert k562.loc["model", "utr5_orf_n"] == 1
+    v2 = rows[rows.transcript_id == "V2"].iloc[0]
+    k = cache.condition_index("K562")
+    lo = int(v2.offset)
+    chx = np.asarray(cache.array("val_chr1", "chx")[k, lo : lo + int(v2.length), 2], np.float64)
+    stop = 25 + (int(v2.length) - 25) // 3 * 3
+    assert row["K562_utr5_orf_frame_real"] == pytest.approx(fastloop.orf_frame(chx, 25, stop))
+    pred = preds["V2"][k, :, 1]
+    assert row["K562_utr5_orf_frame"] == pytest.approx(fastloop.orf_frame(pred, 25, stop))
+    # existing columns are unchanged by the new ones
+    base = fastloop.results_row(
+        meta, table, peaks.drop(columns=[c for c in peaks if c.startswith("utr5_")]), CONDITIONS
+    )
+    for col in fastloop.result_columns(CONDITIONS):
+        if "_utr5_" not in col:
+            assert row[col] == pytest.approx(base[col], nan_ok=True) or row[col] == base[col]
+
+
+def test_append_result_extends_an_older_header(tmp_path):
+    path = tmp_path / "results.tsv"
+    path.write_text("a\tb\n1\t2\n")
+    fastloop.append_result(path, {"a": 3, "b": 4, "c": 5.0}, ["a", "b", "c"])
+    frame = pd.read_csv(path, sep="\t")
+    assert list(frame.columns) == ["a", "b", "c"]
+    assert frame.a.tolist() == [1, 3] and math.isnan(frame.c[0]) and frame.c[1] == 5.0
+    with pytest.raises(ValueError, match="different header"):
+        fastloop.append_result(path, {"a": 1}, ["a", "x", "c", "d"])
+
+
+def test_chx_onehot_needs_chx_trunk():
+    with pytest.raises(ValueError, match="chx_onehot needs"):
+        _config(model={"chx_onehot": {"width": 5}})
