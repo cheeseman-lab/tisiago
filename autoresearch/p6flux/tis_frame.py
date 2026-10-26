@@ -27,6 +27,7 @@ from tisiago.seq2func.txcache import TxCache, spliced_values, unit_of
 EXPORTS = {
     "base": Path("data/p6/fastloop/export_twostage/ts_k562_s0/K562"),
     "flux": Path("data/p6/fastloop/export_flux/f3_replace_s1/K562"),
+    "fixed": Path("data/p6/fastloop/export_flux/g5_replace_fixed_grad/K562"),
 }
 KEEP = 0.978
 
