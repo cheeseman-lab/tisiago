@@ -337,7 +337,7 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
             "inputs": ["embedding", "rna", "onehot"],
             "model": {
                 "chx": {"kind": "factorised", "block": 32},
-                "chx_flux": {"stop_codons": "fixed", "learned_hazard": False},
+                "chx_flux": {"stop_codons": "fixed", "learned_hazard": False, "frame_kernel": 1},
             },
         },
         {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
@@ -1230,6 +1230,7 @@ def test_chx_flux_validation():
         _config(model={"chx": chx, "chx_flux": {"mode": "nope"}})
     with pytest.raises(ValueError, match="frame_kernel"):
         _config(model={"chx": chx, "chx_flux": {"frame_kernel": 4}})
+    assert _config(model={"chx": chx, "chx_flux": {"frame_kernel": 1}})
     with pytest.raises(ValueError, match="chx_contrast"):
         _config(model={"chx": chx, "chx_contrast": True, "chx_flux": {"mode": "logit"}})
 

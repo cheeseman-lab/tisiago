@@ -30,8 +30,9 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   ``model.chx_onehot`` (as ``tis_onehot``; needs ``chx_trunk``) adds a one-hot sequence conv
   branch to the CHX trunk input and ``model.chx_context`` stacks a trunk on the CHX trunk
   (uORF-scale frame context); ``model.chx_flux`` (``mode`` logit / replace,
-  ``stop_gradient_init``, ``frame_kernel`` 3 / 5, ``init_beta``, ``stop_onehot: {channels}`` a
-  learned codon one-hot MLP added to the stop hazard, ``stop_codons: fixed`` terminates at
+  ``stop_gradient_init``, ``frame_kernel`` 1 (none) / 3 / 5, ``init_beta``,
+  ``stop_onehot: {channels}`` a learned codon one-hot MLP added to the stop hazard,
+  ``stop_codons: fixed`` terminates at
   in-frame TAA/TAG/TGA from ``seq.npy`` (the one allowed codon rule), ``learned_hazard: false``
   drops the learned hazard; factorised CHX only) builds CHX from the
   in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`).
@@ -218,8 +219,8 @@ def resolve_config(raw: Mapping) -> dict:
             raise ValueError("model.chx_flux.stop_codons must be learned or fixed")
         if not flux.get("learned_hazard", True) and flux.get("stop_onehot"):
             raise ValueError("model.chx_flux.stop_onehot needs learned_hazard")
-        if int(flux.get("frame_kernel", 3)) not in (3, 5):
-            raise ValueError("model.chx_flux.frame_kernel must be 3 or 5")
+        if int(flux.get("frame_kernel", 3)) not in (1, 3, 5):
+            raise ValueError("model.chx_flux.frame_kernel must be 1, 3 or 5")
     for library in LIBRARIES:
         kind = config["model"][library]["kind"]
         if kind not in OUTPUTS:
