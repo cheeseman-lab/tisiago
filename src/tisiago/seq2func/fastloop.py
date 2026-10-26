@@ -30,8 +30,9 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   ``model.chx_onehot`` (as ``tis_onehot``; needs ``chx_trunk``) adds a one-hot sequence conv
   branch to the CHX trunk input and ``model.chx_context`` stacks a trunk on the CHX trunk
   (uORF-scale frame context); ``model.chx_flux`` (``mode`` logit / replace,
-  ``stop_gradient_init``, ``frame_kernel`` 3 / 5, ``init_beta``; factorised CHX only) builds CHX
-  from the in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`).
+  ``stop_gradient_init``, ``frame_kernel`` 3 / 5, ``init_beta``, ``stop_onehot: {channels}`` a
+  learned codon one-hot MLP added to the stop hazard; factorised CHX only) builds CHX from the
+  in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`).
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
@@ -754,6 +755,17 @@ def frame_blur(x, weights):
     return sum(weights[j] * padded[:, j : j + length] for j in range(taps))
 
 
+def codon_hazard(onehot, valid, channels: int):
+    """Learned ``(B, L)`` logit of the codon starting at each nt (one-hot nt i..i+2 -> MLP)."""
+    import haiku as hk
+    import jax
+
+    zeros = hk.initializers.Constant(0.0)
+    h = hk.Conv1D(channels, 3, padding=((0, 2),), name="chx_flux_codon")(onehot)
+    out = hk.Linear(1, w_init=zeros, b_init=zeros, name="chx_flux_codon_out")(jax.nn.relu(h))
+    return out[..., 0] * valid
+
+
 def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn):
     """CHX rate from the factorised CHX head ``p_chx`` and the in-frame flux of ``tis``.
 
@@ -879,6 +891,10 @@ def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
         log_r = hk.get_parameter("nb_log_r", (2,), init=hk.initializers.Constant(math.log(10.0)))
         if flux_cfg:
             stop_logit = head(h_chx, batch["strand"], 1, "chx_flux_stop")[..., 0]
+            if flux_cfg.get("stop_onehot"):
+                stop_logit = stop_logit + codon_hazard(
+                    _onehot(batch), valid, int(flux_cfg["stop_onehot"].get("channels", 16))
+                )
             chx = flux_chx_output(
                 p_chx, stop_logit, h_chx, tis, valid, flux_cfg, model["chx"], chx_fn
             )

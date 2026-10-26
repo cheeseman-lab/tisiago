@@ -330,7 +330,7 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
         {
             "model": {
                 "chx": {"kind": "factorised", "block": 32},
-                "chx_flux": {"mode": "replace", "frame_kernel": 5},
+                "chx_flux": {"mode": "replace", "frame_kernel": 5, "stop_onehot": {"channels": 4}},
             }
         },
         {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
@@ -1225,3 +1225,18 @@ def test_chx_flux_validation():
         _config(model={"chx": chx, "chx_flux": {"frame_kernel": 4}})
     with pytest.raises(ValueError, match="chx_contrast"):
         _config(model={"chx": chx, "chx_contrast": True, "chx_flux": {"mode": "logit"}})
+
+
+def test_codon_hazard_sees_the_codon_starting_at_each_nt():
+    import haiku as hk
+
+    fn = hk.without_apply_rng(hk.transform(lambda x, v: fastloop.codon_hazard(x, v, 4)))
+    onehot = jax.nn.one_hot(jnp.array([[0, 1, 2, 3, 0, 1, 2, 3]]), 4)
+    valid = jnp.ones((1, 8), bool)
+    params = fn.init(jax.random.PRNGKey(0), onehot, valid)
+    params["chx_flux_codon_out"]["w"] = jnp.ones_like(params["chx_flux_codon_out"]["w"])
+    base = np.asarray(fn.apply(params, onehot, valid))[0]
+    changed = onehot.at[0, 5].set(jnp.array([1.0, 0, 0, 0]))
+    after = np.asarray(fn.apply(params, changed, valid))[0]
+    differs = np.flatnonzero(~np.isclose(base, after))
+    assert set(differs) <= {3, 4, 5} and len(differs) > 0
