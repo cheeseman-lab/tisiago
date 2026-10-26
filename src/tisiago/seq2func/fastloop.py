@@ -29,7 +29,9 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   feeds log ratios of the gradient-stopped CHX prediction to the TIS output;
   ``model.chx_onehot`` (as ``tis_onehot``; needs ``chx_trunk``) adds a one-hot sequence conv
   branch to the CHX trunk input and ``model.chx_context`` stacks a trunk on the CHX trunk
-  (uORF-scale frame context).
+  (uORF-scale frame context); ``model.chx_flux`` (``mode`` logit / replace,
+  ``stop_gradient_init``, ``frame_kernel`` 3 / 5, ``init_beta``; factorised CHX only) builds CHX
+  from the in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`).
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
@@ -201,6 +203,16 @@ def resolve_config(raw: Mapping) -> dict:
         kind = (config["model"].get(key) or {"kind": "mlp"})["kind"]
         if kind not in TRUNKS:
             raise ValueError(f"unknown {key} {kind!r}")
+    flux = config["model"].get("chx_flux")
+    if flux:
+        if config["model"]["chx"]["kind"] != "factorised":
+            raise ValueError("model.chx_flux needs a factorised CHX output (model.chx.kind)")
+        if config["model"].get("chx_contrast"):
+            raise ValueError("model.chx_flux and model.chx_contrast cannot be combined")
+        if flux.get("mode", "logit") not in ("logit", "replace"):
+            raise ValueError(f"unknown model.chx_flux mode {flux.get('mode')!r}")
+        if int(flux.get("frame_kernel", 3)) not in (3, 5):
+            raise ValueError("model.chx_flux.frame_kernel must be 3 or 5")
     for library in LIBRARIES:
         kind = config["model"][library]["kind"]
         if kind not in OUTPUTS:
@@ -706,6 +718,78 @@ def chx_log_ratios(chx, widths=(15, 45, 150), eps: float = 0.01):
     return strand_log_ratios(both, tuple(widths), eps)[..., : len(widths)]
 
 
+FLUX_EPS = 1e-6
+FLUX_STOP_BIAS = -4.0
+
+
+def flux_scan(init, stop, keep, bg, valid):
+    """In-frame ribosome flux ``(B, L)`` by an associative scan over codons, 5'->3'.
+
+    Per frame, ``f[k] = f[k-1] (1 - stop[k]) keep + init[k] + bg`` over codons ``k`` (nt
+    ``3k + frame``). Padding (``~valid``) holds no flux and passes none on.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    batch, length = init.shape
+    pad = [(0, 0), (0, (-length) % 3)]
+    a = jnp.pad(jnp.where(valid, (1.0 - stop) * keep, 0.0), pad).reshape(batch, -1, 3)
+    b = jnp.pad(jnp.where(valid, init + bg, 0.0), pad).reshape(batch, -1, 3)
+
+    def combine(x, y):
+        return x[0] * y[0], y[0] * x[1] + y[1]
+
+    _, flux = jax.lax.associative_scan(combine, (a, b), axis=1)
+    return flux.reshape(batch, -1)[:, :length]
+
+
+def frame_blur(x, weights):
+    """``(B, L)`` convolved with odd-length ``weights`` centred (zero beyond the ends)."""
+    import jax.numpy as jnp
+
+    taps = weights.shape[0]
+    half = taps // 2
+    padded = jnp.pad(x, [(0, 0), (half, half)])
+    length = x.shape[1]
+    return sum(weights[j] * padded[:, j : j + length] for j in range(taps))
+
+
+def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn):
+    """CHX rate from the factorised CHX head ``p_chx`` and the in-frame flux of ``tis``.
+
+    ``mode: logit`` adds ``beta log(flux_dwell + eps)`` to the within-block logits (``beta``
+    learned from ``init_beta``); ``replace`` uses the normalised ``flux_dwell`` as the within-block
+    profile. ``flux_dwell`` = :func:`flux_scan` (stop hazard ``sigmoid(stop_logit)``, learned
+    processivity and background) blurred by a learned ``frame_kernel``-tap kernel, times a learned
+    per-position dwell ``exp(d)``.
+    """
+    import haiku as hk
+    import jax
+    import jax.numpy as jnp
+
+    init = jax.lax.stop_gradient(tis) if cfg.get("stop_gradient_init", True) else tis
+    stop = jax.nn.sigmoid(stop_logit + FLUX_STOP_BIAS)
+    keep = jax.nn.sigmoid(hk.get_parameter("chx_flux_keep", (), init=hk.initializers.Constant(4.0)))
+    bg = jax.nn.softplus(hk.get_parameter("chx_flux_bg", (), init=hk.initializers.Constant(-8.0)))
+    flux = flux_scan(init, stop, keep, bg, valid)
+    taps = int(cfg.get("frame_kernel", 3))
+    centre = jnp.where(jnp.arange(taps) == taps // 2, 0.0, -6.0)
+    kernel = hk.get_parameter("chx_flux_kernel", (taps,), init=lambda *_: centre)
+    flux = frame_blur(flux, jax.nn.softmax(kernel))
+    zeros = hk.initializers.Constant(0.0)
+    dwell = hk.Linear(1, w_init=zeros, b_init=zeros, name="chx_flux_dwell")(h_chx)[..., 0]
+    log_flux = jnp.log(jnp.where(valid, flux * jnp.exp(dwell), 0.0) + FLUX_EPS)
+    mode = cfg.get("mode", "logit")
+    if mode == "logit":
+        beta = hk.get_parameter(
+            "chx_flux_beta", (), init=hk.initializers.Constant(float(cfg.get("init_beta", 0.0)))
+        )
+        logits = p_chx[..., 1] + beta * log_flux
+    else:
+        logits = log_flux * float(chx_cfg.get("temperature", 1.0))
+    return chx_fn(jnp.stack([p_chx[..., 0], logits], axis=-1), valid, chx_cfg)
+
+
 def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
     """Haiku ``forward(batch) -> (rate (B, L, 2) [TIS, CHX], aux)`` of ``config``.
 
@@ -759,7 +843,9 @@ def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
                 cctx = model["chx_context"]
                 h_chx = TRUNKS[cctx["kind"]](h_chx, valid, cctx)
         n_chx, chx_fn = OUTPUTS[model["chx"]["kind"]]
-        chx = chx_fn(head(h_chx, batch["strand"], n_chx, "chx_out"), valid, model["chx"])
+        p_chx = head(h_chx, batch["strand"], n_chx, "chx_out")
+        flux_cfg = model.get("chx_flux")
+        chx = None if flux_cfg else chx_fn(p_chx, valid, model["chx"])
         tis_in = h
         seq_h = None
         if model.get("tis_onehot"):
@@ -791,6 +877,11 @@ def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
         n_tis, tis_fn = OUTPUTS[model["tis"]["kind"]]
         tis = tis_fn(head(tis_in, batch["strand"], n_tis, "tis_out"), valid, model["tis"])
         log_r = hk.get_parameter("nb_log_r", (2,), init=hk.initializers.Constant(math.log(10.0)))
+        if flux_cfg:
+            stop_logit = head(h_chx, batch["strand"], 1, "chx_flux_stop")[..., 0]
+            chx = flux_chx_output(
+                p_chx, stop_logit, h_chx, tis, valid, flux_cfg, model["chx"], chx_fn
+            )
         return jnp.stack([tis, chx], axis=-1), {"nb_log_r": log_r}
 
     return hk.without_apply_rng(hk.transform(forward))

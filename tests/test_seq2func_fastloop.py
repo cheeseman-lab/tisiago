@@ -320,6 +320,19 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
             }
         },
         {"model": {"tis_context": {"kind": "dilated", "dilations": [1, 4], "channels": 8}}},
+        {
+            "model": {
+                "tis": {"kind": "factorised", "block": 32},
+                "chx": {"kind": "factorised", "block": 32},
+                "chx_flux": {"mode": "logit", "init_beta": 0.5, "stop_gradient_init": False},
+            }
+        },
+        {
+            "model": {
+                "chx": {"kind": "factorised", "block": 32},
+                "chx_flux": {"mode": "replace", "frame_kernel": 5},
+            }
+        },
         {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
         {
             "inputs": ["embedding", "rna", "exon", "onehot"],
@@ -1112,3 +1125,103 @@ def test_append_result_extends_an_older_header(tmp_path):
 def test_chx_onehot_needs_chx_trunk():
     with pytest.raises(ValueError, match="chx_onehot needs"):
         _config(model={"chx_onehot": {"width": 5}})
+
+
+def _flux_naive(init, stop, keep, bg, valid):
+    out = np.zeros_like(init)
+    for b in range(init.shape[0]):
+        for i in range(init.shape[1]):
+            if not valid[b, i]:
+                continue
+            prev = out[b, i - 3] if i >= 3 and valid[b, i - 3] else 0.0
+            out[b, i] = prev * (1 - stop[b, i]) * keep + init[b, i] + bg
+    return out
+
+
+def test_flux_scan_equals_a_naive_loop_and_masks_padding():
+    rng = np.random.default_rng(0)
+    init = rng.gamma(0.5, size=(3, 47)).astype(np.float32)
+    stop = rng.uniform(0, 0.5, size=(3, 47)).astype(np.float32)
+    valid = np.ones((3, 47), bool)
+    valid[1, 40:] = False
+    valid[2, 20:] = False
+    got = np.asarray(fastloop.flux_scan(init, stop, 0.9, 0.01, valid))
+    np.testing.assert_allclose(got, _flux_naive(init, stop, 0.9, 0.01, valid), rtol=1e-5)
+    assert (got[~valid] == 0).all()
+    other = init.copy()
+    other[~valid] = 100.0
+    again = np.asarray(fastloop.flux_scan(other, stop, 0.9, 0.01, valid))
+    np.testing.assert_array_equal(again, got)
+
+
+def test_flux_without_stops_is_the_in_frame_cumsum_and_keeps_the_init_frame():
+    rng = np.random.default_rng(1)
+    init = rng.gamma(0.5, size=(1, 30)).astype(np.float32)
+    valid = np.ones((1, 30), bool)
+    got = np.asarray(fastloop.flux_scan(init, np.zeros_like(init), 1.0, 0.0, valid))
+    for frame in range(3):
+        np.testing.assert_allclose(got[0, frame::3], np.cumsum(init[0, frame::3]), rtol=1e-5)
+    spike = np.zeros((1, 30), np.float32)
+    spike[0, 7] = 1.0
+    flux = np.asarray(fastloop.flux_scan(spike, np.full_like(spike, 0.1), 0.95, 0.0, valid))[0]
+    on = np.flatnonzero(flux > 0)
+    assert on[0] == 7 and (on % 3 == 1).all() and len(on) == len(range(7, 30, 3))
+
+
+def test_frame_blur_identity_and_shift():
+    x = jnp.arange(10.0)[None]
+    np.testing.assert_allclose(np.asarray(fastloop.frame_blur(x, jnp.array([0.0, 1.0, 0.0]))), x)
+    shifted = np.asarray(fastloop.frame_blur(x, jnp.array([0.0, 0.0, 1.0])))[0]
+    np.testing.assert_allclose(shifted, [*range(1, 10), 0])
+
+
+def _flux_model_pair(cache, flux):
+    model_cfg = {
+        "tis": {"kind": "factorised", "block": 32},
+        "chx": {"kind": "factorised", "block": 32},
+        "chx_trunk": {"kind": "conv", "width": 7, "hidden": 8},
+    }
+    base = _config(model=model_cfg)
+    with_flux = _config(model={**model_cfg, "chx_flux": flux})
+    ctx = fastloop.context_of(cache)
+    batch = fastloop._device_batch(fastloop.Sampler(cache, base).batch())
+    return [fastloop.make_model(c, ctx) for c in (base, with_flux)], batch
+
+
+def test_chx_flux_logit_at_beta_zero_equals_the_base_model_at_init(cache):
+    (base, flux), batch = _flux_model_pair(cache, {"mode": "logit"})
+    key = jax.random.PRNGKey(3)
+    p_base, p_flux = base.init(key, batch), flux.init(key, batch)
+    assert any(k.startswith("chx_flux") or "chx_flux" in k for k in p_flux)
+    for k, v in p_base.items():
+        for name, leaf in v.items():
+            np.testing.assert_array_equal(np.asarray(leaf), np.asarray(p_flux[k][name]))
+    a, b = base.apply(p_base, batch)[0], flux.apply(p_flux, batch)[0]
+    np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+@pytest.mark.parametrize("stop_gradient", [True, False])
+def test_chx_flux_couples_tis_only_without_stop_gradient(cache, stop_gradient):
+    flux = {"mode": "replace", "stop_gradient_init": stop_gradient}
+    (_, model), batch = _flux_model_pair(cache, flux)
+    params = model.init(jax.random.PRNGKey(0), batch)
+
+    def chx_only(params):
+        pred, _ = model.apply(params, batch)
+        return (pred[..., 1] * jnp.arange(pred.shape[1])).sum()
+
+    grads = jax.grad(chx_only)(params)
+    tis_out = np.abs(np.asarray(grads["tis_out"]["w"])).sum()
+    assert (tis_out == 0) == stop_gradient
+
+
+def test_chx_flux_validation():
+    with pytest.raises(ValueError, match="factorised CHX"):
+        _config(model={"chx_flux": {"mode": "logit"}})
+    chx = {"kind": "factorised", "block": 32}
+    with pytest.raises(ValueError, match="mode"):
+        _config(model={"chx": chx, "chx_flux": {"mode": "nope"}})
+    with pytest.raises(ValueError, match="frame_kernel"):
+        _config(model={"chx": chx, "chx_flux": {"frame_kernel": 4}})
+    with pytest.raises(ValueError, match="chx_contrast"):
+        _config(model={"chx": chx, "chx_contrast": True, "chx_flux": {"mode": "logit"}})
