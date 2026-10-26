@@ -333,6 +333,13 @@ def test_coupling_is_zero_when_tis_matches_the_chx_rise():
                 "chx_flux": {"mode": "replace", "frame_kernel": 5, "stop_onehot": {"channels": 4}},
             }
         },
+        {
+            "inputs": ["embedding", "rna", "onehot"],
+            "model": {
+                "chx": {"kind": "factorised", "block": 32},
+                "chx_flux": {"stop_codons": "fixed", "learned_hazard": False},
+            },
+        },
         {"inputs": ["embedding", "rna", "rna_onset", "rna_relative"]},
         {
             "inputs": ["embedding", "rna", "exon", "onehot"],
@@ -1240,3 +1247,44 @@ def test_codon_hazard_sees_the_codon_starting_at_each_nt():
     after = np.asarray(fn.apply(params, changed, valid))[0]
     differs = np.flatnonzero(~np.isclose(base, after))
     assert set(differs) <= {3, 4, 5} and len(differs) > 0
+
+
+def test_fixed_stop_codons_end_in_frame_flux_and_pass_other_frames():
+    # A C G T = 0 1 2 3, N = 4. TAA at 6 (frame 0), TGA at 13 (frame 1), TAN at 20 (not a stop),
+    # TAG cut by padding at the end.
+    seq = np.full((1, 30), 0, np.int8)
+    seq[0, 6:9] = (3, 0, 0)
+    seq[0, 13:16] = (3, 2, 0)
+    seq[0, 20:23] = (3, 0, 4)
+    seq[0, 26:28] = (3, 0)
+    seq[0, 28] = 2
+    valid = np.ones((1, 30), bool)
+    valid[0, 28:] = False
+    starts = np.asarray(fastloop.stop_codon_starts(jnp.asarray(seq), jnp.asarray(valid)))[0]
+    assert np.flatnonzero(starts).tolist() == [6, 13]
+    ended = fastloop.stop_ended(jnp.asarray(seq), jnp.asarray(valid))
+    assert np.flatnonzero(np.asarray(ended)[0]).tolist() == [9, 16]
+    init = np.zeros((1, 30), np.float32)
+    init[0, [0, 1, 2]] = 1.0  # one ribosome load per frame upstream
+    stop = jnp.where(ended, 1.0, 0.0)
+    flux = np.asarray(fastloop.flux_scan(init, stop, 1.0, 0.0, valid))[0]
+    np.testing.assert_allclose(flux[0:9:3], 1.0)  # frame 0 up to and including the TAA
+    assert (flux[9:28:3] == 0).all()  # frame 0 ends after its stop
+    np.testing.assert_allclose(flux[1:14:3], 1.0)  # frame 1 passes TAA, keeps flux on TGA
+    assert (flux[16:28:3] == 0).all()
+    np.testing.assert_allclose(flux[2:28:3], 1.0)  # frame 2 passes every stop and the TAN
+    assert (flux[28:] == 0).all()
+
+
+def test_fixed_stop_flux_model_without_learned_hazard(cache, tmp_path):
+    flux = {"mode": "replace", "stop_codons": "fixed", "learned_hazard": False}
+    (_, model), batch = _flux_model_pair(cache, flux)
+    params = model.init(jax.random.PRNGKey(0), batch)
+    assert not any("chx_flux_stop" in k for k in params)
+    pred, _ = model.apply(params, batch)
+    assert np.isfinite(np.asarray(pred)).all()
+    with pytest.raises(ValueError, match="stop_codons"):
+        _config(model={"chx": {"kind": "factorised"}, "chx_flux": {"stop_codons": "x"}})
+    with pytest.raises(ValueError, match="needs learned_hazard"):
+        bad = {"learned_hazard": False, "stop_onehot": {"channels": 4}}
+        _config(model={"chx": {"kind": "factorised"}, "chx_flux": bad})

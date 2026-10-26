@@ -31,7 +31,9 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   branch to the CHX trunk input and ``model.chx_context`` stacks a trunk on the CHX trunk
   (uORF-scale frame context); ``model.chx_flux`` (``mode`` logit / replace,
   ``stop_gradient_init``, ``frame_kernel`` 3 / 5, ``init_beta``, ``stop_onehot: {channels}`` a
-  learned codon one-hot MLP added to the stop hazard; factorised CHX only) builds CHX from the
+  learned codon one-hot MLP added to the stop hazard, ``stop_codons: fixed`` terminates at
+  in-frame TAA/TAG/TGA from ``seq.npy`` (the one allowed codon rule), ``learned_hazard: false``
+  drops the learned hazard; factorised CHX only) builds CHX from the
   in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`).
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
@@ -212,6 +214,10 @@ def resolve_config(raw: Mapping) -> dict:
             raise ValueError("model.chx_flux and model.chx_contrast cannot be combined")
         if flux.get("mode", "logit") not in ("logit", "replace"):
             raise ValueError(f"unknown model.chx_flux mode {flux.get('mode')!r}")
+        if flux.get("stop_codons", "learned") not in ("learned", "fixed"):
+            raise ValueError("model.chx_flux.stop_codons must be learned or fixed")
+        if not flux.get("learned_hazard", True) and flux.get("stop_onehot"):
+            raise ValueError("model.chx_flux.stop_onehot needs learned_hazard")
         if int(flux.get("frame_kernel", 3)) not in (3, 5):
             raise ValueError("model.chx_flux.frame_kernel must be 3 or 5")
     for library in LIBRARIES:
@@ -766,21 +772,54 @@ def codon_hazard(onehot, valid, channels: int):
     return out[..., 0] * valid
 
 
-def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn):
+def stop_codon_starts(seq, valid):
+    """``(B, L)`` bool: a sense stop codon (TAA / TAG / TGA) starts at nt ``i`` (N = no stop)."""
+    import jax.numpy as jnp
+
+    seq = seq.astype(jnp.int32)
+    length = seq.shape[1]
+    nxt = [jnp.pad(seq[:, j:], [(0, 0), (0, j)], constant_values=SEQ_N) for j in range(3)]
+    ok = jnp.pad(valid, [(0, 0), (0, 2)])
+    whole = ok[:, :length] & ok[:, 1 : length + 1] & ok[:, 2 : length + 2]
+    hit = jnp.zeros(seq.shape, bool)
+    for a, b, c in STOP_CODES:
+        hit = hit | ((nxt[0] == a) & (nxt[1] == b) & (nxt[2] == c))
+    return hit & whole
+
+
+def stop_ended(seq, valid):
+    """``(B, L)`` bool: the in-frame codon before nt ``i`` (nt ``i - 3``) is a stop codon.
+
+    Used as a fixed termination: the ribosome sits on the stop codon (it keeps its flux) and
+    none carries on to the next codon of that frame; out-of-frame stops are passed.
+    """
+    import jax.numpy as jnp
+
+    starts = stop_codon_starts(seq, valid)
+    return jnp.pad(starts, [(0, 0), (3, 0)])[:, : starts.shape[1]]
+
+
+def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn, ended=None):
     """CHX rate from the factorised CHX head ``p_chx`` and the in-frame flux of ``tis``.
 
     ``mode: logit`` adds ``beta log(flux_dwell + eps)`` to the within-block logits (``beta``
     learned from ``init_beta``); ``replace`` uses the normalised ``flux_dwell`` as the within-block
     profile. ``flux_dwell`` = :func:`flux_scan` (stop hazard ``sigmoid(stop_logit)``, learned
     processivity and background) blurred by a learned ``frame_kernel``-tap kernel, times a learned
-    per-position dwell ``exp(d)``.
+    per-position dwell ``exp(d)``. ``ended`` (:func:`stop_ended`, ``stop_codons: fixed``) sets the
+    hazard to 1 after in-frame stop codons; ``stop_logit`` None = no learned hazard.
     """
     import haiku as hk
     import jax
     import jax.numpy as jnp
 
     init = jax.lax.stop_gradient(tis) if cfg.get("stop_gradient_init", True) else tis
-    stop = jax.nn.sigmoid(stop_logit + FLUX_STOP_BIAS)
+    if stop_logit is None:
+        stop = jnp.zeros_like(tis)
+    else:
+        stop = jax.nn.sigmoid(stop_logit + FLUX_STOP_BIAS)
+    if ended is not None:
+        stop = jnp.where(ended, 1.0, stop)
     keep = jax.nn.sigmoid(hk.get_parameter("chx_flux_keep", (), init=hk.initializers.Constant(4.0)))
     bg = jax.nn.softplus(hk.get_parameter("chx_flux_bg", (), init=hk.initializers.Constant(-8.0)))
     flux = flux_scan(init, stop, keep, bg, valid)
@@ -890,13 +929,18 @@ def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
         tis = tis_fn(head(tis_in, batch["strand"], n_tis, "tis_out"), valid, model["tis"])
         log_r = hk.get_parameter("nb_log_r", (2,), init=hk.initializers.Constant(math.log(10.0)))
         if flux_cfg:
-            stop_logit = head(h_chx, batch["strand"], 1, "chx_flux_stop")[..., 0]
-            if flux_cfg.get("stop_onehot"):
-                stop_logit = stop_logit + codon_hazard(
-                    _onehot(batch), valid, int(flux_cfg["stop_onehot"].get("channels", 16))
-                )
+            stop_logit = None
+            if flux_cfg.get("learned_hazard", True):
+                stop_logit = head(h_chx, batch["strand"], 1, "chx_flux_stop")[..., 0]
+                if flux_cfg.get("stop_onehot"):
+                    stop_logit = stop_logit + codon_hazard(
+                        _onehot(batch), valid, int(flux_cfg["stop_onehot"].get("channels", 16))
+                    )
+            ended = None
+            if flux_cfg.get("stop_codons") == "fixed":
+                ended = stop_ended(batch["seq"], valid)
             chx = flux_chx_output(
-                p_chx, stop_logit, h_chx, tis, valid, flux_cfg, model["chx"], chx_fn
+                p_chx, stop_logit, h_chx, tis, valid, flux_cfg, model["chx"], chx_fn, ended
             )
         return jnp.stack([tis, chx], axis=-1), {"nb_log_r": log_r}
 
