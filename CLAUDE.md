@@ -41,9 +41,9 @@ non-starts. Live status is in [`ROADMAP.md`](ROADMAP.md); results in [`FINDINGS.
   CHX (elongation) Ribo-seq out, via fine-tuned AlphaGenome (alphagenome-ft) + an RNA-conditioned head, evaluated
   leave-one-cell-line-out in percent of replicate agreement (`seq2func/scorecard.py`) and by Ribo-TISH on
   predicted tracks (`predicted_calls.py`). Current best: backbone fine-tuned on spliced mRNA + transcript-space head
-  (`seq2func/txtrain.py`, FINDINGS §15). Results FINDINGS §11-15; status ROADMAP P6. Loss/structure search runs
+  with a ribosome-flux CHX output (`seq2func/txtrain.py`, `fastloop` `model.chx_flux`, FINDINGS §15-16). Results FINDINGS §11-16; status ROADMAP P6. Loss/structure search runs
   in the fast loop (`seq2func/txcache.py` + `fastloop.py`, `autoresearch/p6fast/`); full fine-tunes via
-  `scripts/run_p6_trial.sh` (GPU lanes from `.env` `P6_TRIAL_LANES`). Test chr8/9 have been scored once per model (§14, §15).
+  `scripts/run_p6_trial.sh` (GPU lanes from `.env` `P6_TRIAL_LANES`). Test chr8/9 have been scored once per model (§14-16).
 
 **Evaluation rules** (`docs/INFERENCE_AND_EVALUATION.md`): group splits by transcript/chromosome;
 keep train / calibration / operating-threshold / test disjoint; pick thresholds on validation,

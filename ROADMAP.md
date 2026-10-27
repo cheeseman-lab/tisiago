@@ -11,12 +11,12 @@ floor** (not chance); (2) near-neighbour win-rate @64bp (base resolution); and (
 
 _Last updated: 2026-10-05._
 
-> **Current (2026-10-24): P6 = RNA-seq in -> base-resolution harringtonine + CHX out.** Experiments 1-3, the fast
-> loss/structure search and steps 1-2 are done (FINDINGS §12-15). Best: AlphaGenome fine-tuned on the spliced mRNA +
-> a transcript-space head, each line held out, test chr8/9: harringtonine codon/1 nt 70-105 / 58-114% of replicate
-> (K562 84/83), CHX 30 nt 69-112%, ATG starts at replicate level, near-cognate starts 0.51-0.98 of replicate,
-> Ribo-TISH start-site Jaccard K562 0.35 (genomic model 0.25; replicate vs replicate ~0.47). Open: 5'UTR starts
-> (recall <=0.19), HeLa, start-call precision.
+> **Current (2026-10-27): P6 = RNA-seq in -> base-resolution harringtonine + CHX out.** Best: AlphaGenome fine-tuned
+> on the spliced mRNA + transcript-space head with a ribosome-flux CHX output (in-frame propagation of predicted
+> initiation, terminated at stop codons; FINDINGS §15-16). Each line held out, test chr8/9: harringtonine codon/1 nt
+> 73-106 / 60-115% of replicate (K562 85/84), uORF CHX framing doubled (K562 0.37 vs real 0.71), Ribo-TISH K562
+> Jaccard 0.36 with 5'UTR recall 0.32 (genomic model 0.25 / ~0.1). Open: TIS peak specificity (over-calling, 5'UTR
+> precision ~0.25), HeLa.
 
 ---
 
@@ -189,8 +189,10 @@ on the final backbone lifts Ribo-TISH start-site Jaccard 0.23 -> 0.35 (val, K562
 **Steps 1-2 (2026-10-23/24, FINDINGS §15).** Two-stage model on all four held-out lines, then the same head on a
 backbone fine-tuned on spliced-transcript input (`seq2func/txtrain.py`); both tested once. Step 2 is the current best.
 
-**Next.** 5'UTR / uORF starts (recall <=0.19: non-MANE isoforms, 5'-end precision of the RNA input); HeLa; Ribo-TISH
-fix for U2OS/RPE1 comparisons (ribotish repo).
+**Flux CHX (2026-10-27, FINDINGS §16).** uORF framing doubled on all lines; 5'UTR Ribo-TISH recall 0.10 -> 0.32 (K562 test).
+
+**Next.** TIS peak specificity / sharpness (over-calling; 5'UTR precision ~0.25); call cutoff chosen on validation; HeLa;
+Ribo-TISH grouping fix for U2OS/RPE1 comparisons (ribotish repo).
 
 **Original open questions (2026-10-05):**
 - One model per cell line vs one multi-output model. The working hypothesis is that cross-line

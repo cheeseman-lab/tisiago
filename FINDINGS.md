@@ -565,6 +565,42 @@ recall stays 0.04-0.19. U2OS/RPE1 Ribo-TISH did not run: Ribo-TISH's TIS-backgro
 about equal on test and 5'UTR starts remain unsolved. Step 2 is the current best model (equal or better everywhere
 except HeLa CHX 30 nt, -4).
 
+## 16. P6 — ribosome-flux CHX output with genetic-code termination (2026-10-24 to 10-27)
+
+Why: the 5'UTR diagnosis (`.superpowers/sdd/2026-10-24-p6-utr5-diagnosis/`) found the predicted TIS track hits
+reproducible 5'UTR starts at ~0.9 of replicate, but Ribo-TISH's CHX frame test fails on short uORFs (median 23 aa):
+uORFs with in-frame CHX share > 0.5 were 0.18 predicted vs 0.71 real (K562). Wider CHX context (0.18 -> 0.20) and a
+frame loss did not help.
+
+Model (spec `docs/superpowers/specs/2026-10-26-p6-ribosome-flux-chx-design.md`; `fastloop` `model.chx_flux`): CHX
+within each 1 kb block = in-frame ribosome flux of the model's own predicted TIS, propagated codon by codon (associative
+scan per frame) and terminated at in-frame TAA/TAG/TGA of the mRNA sequence (the only hand-coded rule: the genetic
+code), times a learned dwell factor; block amounts unchanged (`mode: replace`, no frame blur, TIS gradient on; config
+`autoresearch/p6flux/configs/g7_replace_fixed_grad_k1.yaml`). A learned stop hazard alone did not find stops (fast loop
+0.16 -> 0.22); fixed stops + no blur 0.28 (3 seeds), oracle with real TIS 0.69. Trained as step 2 (`txtrain`, spliced
+backbone, max bucket 16 kb), 3 seeds x 4 folds; test chr8/9 scored once.
+
+**Test chr8/9, flux / step 2 (mean of 3 seeds).** uORF framed = share of 5'UTR ORFs with in-frame CHX share > 0.5
+(real in brackets); utr5 hit = reproducible 5'UTR start hit rate relative to rep1 vs rep2.
+
+| Held out | TIS codon / nt | CHX 30 / codon / nt | NC later | utr5 hit | uORF framed (real) |
+|---|---|---|---|---|---|
+| K562 | 85 / 84 vs 84 / 83 | 85 / 75 / 72 vs 86 / 75 / 72 | 0.67 vs 0.63 | 0.85 vs 0.85 | **0.37** vs 0.19 (0.71) |
+| HeLa | 73 / 60 vs 71 / 58 | 71 / 68 / 63 vs 69 / 66 / 61 | 0.31 vs 0.40 | 0.78 vs 0.71 | **0.29** vs 0.12 (0.49) |
+| U2OS | 86 / 85 vs 86 / 85 | 86 / 81 / 81 vs 88 / 83 / 84 | 0.46 vs 0.47 | 1.01 vs 1.01 | **0.33** vs 0.19 (0.66) |
+| RPE1 | 106 / 115 vs 105 / 114 | 112 / 145 / 176 vs 112 / 147 / 179 | 0.92 vs 0.91 | 1.12 vs 1.12 | **0.47** vs 0.29 (0.57) |
+
+Validation agrees (uORF framed K562 .36/.18, HeLa .32/.25, U2OS .37/.19, RPE1 .40/.24). uORF framing roughly doubles
+on every line; tracks within ~1-3 points (U2OS CHX codon/nt -2.6/-3.0, HeLa +1.5-2).
+
+**Ribo-TISH, test, seed 0** (calls on predicted vs real tracks, report filter): K562 flux J 0.356 (R 0.58, P 0.48,
+31.0k calls vs 25.9k real; 5'UTR recall **0.32** vs 0.10) vs step 2 J 0.349 (R 0.53, P 0.51); HeLa flux 0.250 (R
+0.72, P 0.28; 42k calls vs 16k real) vs 0.287. The flux CHX makes Ribo-TISH over-call (its frame test now passes many
+starts). At matched precision on validation (K562, 3 seeds, calls ranked by Ribo-TISH TIS p, precision 0.586;
+`autoresearch/p6flux/matched_calls.py`): Jaccard flux 0.375 vs step 2 0.368, recall 0.51 vs 0.49, 5'UTR recall 0.34
+vs 0.17. Deploy with a TIS-p cutoff chosen on validation (real call count or target precision). 5'UTR precision
+(0.24-0.29 at matched precision) is now the limit: TIS peak specificity, not CHX frame.
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest
