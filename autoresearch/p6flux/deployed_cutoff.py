@@ -14,8 +14,13 @@ magnitude). Test predictions (``export_test``, ``--split test`` Ribo-TISH output
 with that fixed cutoff, by :func:`predicted_calls.overlap` against the filtered real calls,
 overall, ATG / near-cognate (:data:`predicted_calls.ATG`) and Annotated / 5'UTR.
 
+``--source seen`` chooses the cutoff on validation calls of the fold's TRAINING lines (no Ribo-seq
+of the held-out line; :data:`SEEN`, exported with ``txtrain --predict ... --split val
+--export-conditions``): per line and seed by the same rules, deployed = geometric mean over all.
+
 Usage:
     python autoresearch/p6flux/deployed_cutoff.py [--models sb sbflux] [--folds k562 hela]
+        [--source val|seen] [--seeds 0 1 2]
 """
 
 from __future__ import annotations
@@ -36,14 +41,19 @@ CONDITION = {"k562": "K562", "hela": "HeLa", "u2os": "U2OS", "rpe1": "RPE1_Async
 SPLITS = {
     "val": ("data/p6/txtrain/export", "predicted_val_floatresample_s0"),
     "test": ("data/p6/txtrain/export_test", "predicted_test_floatresample_s0"),
+    "seen": ("data/p6/txtrain/export_seen", "predicted_val_floatresample_s0"),
 }
+# training (seen) lines with working Ribo-TISH calls; U2OS / RPE1 hit the ribotish grouping bug
+SEEN = {"k562": ("HeLa",), "hela": ("K562",)}
 OUT = Path("data/p6flux/deployed_cutoff")
 
 
-def tables(model: str, fold: str, seed: int, split: str):
+def tables(model: str, fold: str, seed: int, split: str, condition: str | None = None):
+    """``(predicted_all, real_all)`` of a run's Ribo-TISH output (``None`` if absent)."""
     root, sub = SPLITS[split]
-    d = Path(root) / f"{model}_{fold}_s{seed}" / sub / "calls" / CONDITION[fold]
-    files = [d / k / f"{CONDITION[fold]}_TIS_predict_all.txt" for k in ("predicted", "real")]
+    condition = condition or CONDITION[fold]
+    d = Path(root) / f"{model}_{fold}_s{seed}" / sub / "calls" / condition
+    files = [d / k / f"{condition}_TIS_predict_all.txt" for k in ("predicted", "real")]
     if not all(f.exists() for f in files):
         return None
     pred_all, real_all = (pd.read_csv(f, sep="\t") for f in files)
@@ -89,20 +99,30 @@ def main() -> None:
     ap.add_argument("--folds", nargs="+", default=["k562", "hela"])
     ap.add_argument("--target-precision", type=float, default=0.586)
     ap.add_argument("--val-only", action="store_true", help="choose cutoffs, do not read test")
+    ap.add_argument(
+        "--source",
+        choices=("val", "seen"),
+        default="val",
+        help="val: the held-out line's own val calls; seen: val calls of the training lines "
+        "(SEEN; per line and seed, geometric mean over all) - no held-out Ribo-seq",
+    )
+    ap.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     cut_rows, test_rows = [], []
     for model in args.models:
         for fold in args.folds:
             chosen = []
-            for seed in range(3):
-                t = tables(model, fold, seed, "val")
-                if t is None:
-                    continue
-                pred_all, real_all = t
-                c = choose(pred_all, filter_predictions(real_all), args.target_precision)
-                chosen.append(c)
-                cut_rows.append({"model": model, "fold": fold, "seed": seed, **c})
+            lines = SEEN[fold] if args.source == "seen" else (CONDITION[fold],)
+            for seed in args.seeds:
+                for line in lines:
+                    t = tables(model, fold, seed, args.source, line)
+                    if t is None:
+                        continue
+                    pred_all, real_all = t
+                    c = choose(pred_all, filter_predictions(real_all), args.target_precision)
+                    chosen.append(c)
+                    cut_rows.append({"model": model, "fold": fold, "line": line, "seed": seed, **c})
             if not chosen:
                 continue
             cutoffs = {
@@ -110,8 +130,16 @@ def main() -> None:
                 for rule in ("count", "precision")
             }
             cutoffs["report"] = TIS_P_MAX
-            cut_rows.append({"model": model, "fold": fold, "seed": "geomean", **cutoffs})
-            for seed in range(0 if args.val_only else 3):
+            cut_rows.append(
+                {
+                    "model": model,
+                    "fold": fold,
+                    "line": "+".join(lines),
+                    "seed": "geomean",
+                    **cutoffs,
+                }
+            )
+            for seed in [] if args.val_only else args.seeds:
                 t = tables(model, fold, seed, "test")
                 if t is None:
                     continue
@@ -130,14 +158,15 @@ def main() -> None:
                         }
                     )
     cuts = pd.DataFrame(cut_rows)
-    cuts.to_csv(OUT / "cutoffs_val.tsv", sep="\t", index=False)
+    tag = "" if args.source == "val" else f"_{args.source}"
+    cuts.to_csv(OUT / f"cutoffs_val{tag}.tsv", sep="\t", index=False)
     pd.set_option("display.width", 250)
     print("validation cutoffs (TISPvalue; geomean = deployed)")
     print(cuts.to_string(index=False, float_format=lambda x: f"{x:.3g}"))
     if args.val_only:
         return
     test = pd.DataFrame(test_rows)
-    test.to_csv(OUT / "test_scores.tsv", sep="\t", index=False)
+    test.to_csv(OUT / f"test_scores{tag}.tsv", sep="\t", index=False)
     cols = [
         "overall_J",
         "overall_R",
