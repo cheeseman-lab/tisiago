@@ -704,7 +704,8 @@ def test_phase3_columns_appended_and_primary3(cache):
     start = columns.index("primary3")
     first_utr5 = next(i for i, c in enumerate(columns) if "_utr5_" in c)
     assert all("_rep_" in c for c in columns[start + 1 : first_utr5])
-    assert all("_utr5_" in c for c in columns[first_utr5:])
+    first_sharp = next(i for i, c in enumerate(columns) if "_tis_sharp_" in c)
+    assert all("_utr5_" in c for c in columns[first_utr5:first_sharp])
     assert columns.index("primary2") < start and "K562_tis_rep_hit_nc_later" in columns
     meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
     row = fastloop.results_row(meta, table, peaks, CONDITIONS)
@@ -1289,3 +1290,82 @@ def test_fixed_stop_flux_model_without_learned_hazard(cache, tmp_path):
     with pytest.raises(ValueError, match="needs learned_hazard"):
         bad = {"learned_hazard": False, "stop_onehot": {"channels": 4}}
         _config(model={"chx": {"kind": "factorised"}, "chx_flux": bad})
+
+
+def test_sharp_summary_per_start_class():
+    sharp = np.zeros(61)
+    sharp[30] = 3.0
+    sharp[31] = 1.0
+    broad = np.zeros(61)
+    broad[28:33] = 1.0
+    far = np.zeros(61)
+    far[30] = 1.0
+    far[5] = 9.0  # outside +-15: ignored
+    prof = np.stack([sharp, broad, far, np.zeros(61)])
+    classes = np.array(["atg", "nc", "nc", "atg"], dtype=object)
+    utr5 = np.array([False, True, True, False])
+    out = fastloop.sharp_summary(prof, classes, utr5)
+    assert out["sharp_n_atg"] == 1  # the empty site is dropped
+    assert out["sharp_share15_atg"] == pytest.approx(0.75)
+    assert out["sharp_argmax15_atg"] == 1.0
+    assert out["sharp_n_nc"] == 2 and out["sharp_share15_nc"] == pytest.approx((0.2 + 1.0) / 2)
+    assert out["sharp_argmax15_nc"] == 0.5  # broad's argmax is its first max (28)
+    assert out["sharp_n_utr5"] == 2 and out["sharp_share15_utr5"] == out["sharp_share15_nc"]
+    empty = fastloop.sharp_summary(prof[:0], classes[:0], utr5[:0])
+    assert empty["sharp_n_utr5"] == 0 and math.isnan(empty["sharp_share15_atg"])
+
+
+def test_top_share_and_peakiness():
+    vec = np.zeros(200)
+    vec[[3, 50]] = [6.0, 2.0]
+    vec[100:110] = 0.2
+    assert fastloop.top_share(vec) == pytest.approx((6.0 + 2.0) / 10.0)  # top 2 of 200
+    assert fastloop.top_share(np.ones(10)) == pytest.approx(0.1)  # at least one position
+    assert math.isnan(fastloop.top_share(np.zeros(5)))
+    real = [vec * 10, np.full(200, 0.1)]  # second has 20 reads < 50: skipped
+    flat = [np.ones(200), np.ones(200)]
+    out = fastloop.peakiness_summary(real)
+    assert out["top1_n"] == 1 and out["top1"] == pytest.approx(0.8)
+    assert math.isnan(out["top1_resampled"])
+    pred = fastloop.peakiness_summary(real, flat)
+    assert pred["top1"] == pytest.approx(0.01)
+    assert 0.01 < pred["top1_resampled"] < 0.2  # counting noise at 100 reads
+    again = fastloop.peakiness_summary(real, flat)
+    assert again == pred  # fixed seed
+
+
+def test_sharp_columns_filled_and_existing_unchanged(cache):
+    rows = cache.rows("val")
+    sites = cache.sites.copy()
+    sites.loc[sites.transcript_id == "V2", "tistype"] = "5'UTR"
+    cache.sites = sites
+    rng = np.random.default_rng(3)
+    preds = {
+        r.transcript_id: rng.gamma(1.0, size=(3, r.length, 2)).astype(np.float32)
+        for r in rows.itertuples()
+    }
+    table, peaks = fastloop.score_predictions(
+        cache, {"model": preds}, CONDITIONS, heldout=["K562"], min_reads=5
+    )
+    meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
+    row = fastloop.results_row(meta, table, peaks, CONDITIONS)
+    columns = fastloop.result_columns(CONDITIONS)
+    k562 = peaks[peaks.condition == "K562"].set_index("source")
+    for cls in fastloop.SHARP_CLASSES:
+        assert row[f"K562_tis_sharp_n_{cls}"] == k562.loc["model", f"sharp_n_{cls}"]
+        for stat in fastloop.SHARP_STATS:
+            got = row[f"K562_tis_sharp_{stat}_{cls}_real"]
+            assert got == pytest.approx(k562.loc["real", f"sharp_{stat}_{cls}"], nan_ok=True)
+    assert row["K562_tis_top1_real"] == pytest.approx(k562.loc["real", "top1"], nan_ok=True)
+    assert row["K562_tis_top1"] == pytest.approx(k562.loc["model", "top1"], nan_ok=True)
+    new = [c for c in columns if "_tis_sharp_" in c or "_tis_top1" in c]
+    assert columns[-len(new) :] == new  # appended after every existing column
+    base = fastloop.results_row(
+        meta,
+        table,
+        peaks.drop(columns=[c for c in peaks if c.startswith(("sharp_", "top1"))]),
+        CONDITIONS,
+    )
+    for col in columns:
+        if col not in new:
+            assert row[col] == pytest.approx(base[col], nan_ok=True) or row[col] == base[col]

@@ -63,7 +63,11 @@ whose replicate 2 argmax (+-30 nt) is within 1 nt of the start, ``rep_hit`` = P(
 argmax within 1 nt) and ``rep_ref`` = P(replicate 1 argmax within 1 nt), per start class, overall
 and split by first vs later exon (``_first`` / ``_later``); ``rep_both`` = P(prediction hit |
 both replicates hit); ``primary3`` = mean of held-out TIS nt percent and
-``100 x min(1, rep_hit_nc / rep_ref_nc)``. The checkpoint's own predictions (``ckpt.npy``) are
+``100 x min(1, rep_hit_nc / rep_ref_nc)``. Sharpness columns (appended last) give, per start
+class (``atg`` / ``nc`` / ``utr5``), the per-site share of the +-15 nt window at the start nt and
+argmax at the start, predicted and real (:func:`sharp_summary`), and whole-transcript TIS
+peakiness ``top1`` (share of mass in the top 1% positions; :func:`peakiness_summary`), also on
+the prediction resampled at the real read count. The checkpoint's own predictions (``ckpt.npy``) are
 scored alongside as ``ckpt``. ``--export-dir`` writes each config's val predictions as genomic
 float bigWigs (:func:`export_bigwigs`) plus its parameters. One row per config is appended to
 ``--results`` (:data:`RESULT_COLUMNS`) and the full record written to
@@ -125,6 +129,11 @@ UTR5_STATS = (
     "orf_framed_real",
 )
 UTR5_MIN_ORF_READS = 10.0
+SHARP_FLANK = 15
+SHARP_CLASSES = ("atg", "nc", "utr5")
+SHARP_STATS = ("share15", "argmax15")
+TOP_FRACTION = 0.01
+TOP_MIN_READS = 50.0
 STOP_CODES = frozenset({(3, 0, 0), (3, 0, 2), (3, 2, 0)})  # TAA TAG TGA, A C G T = 0..3
 RNA_HEAD = 129
 DEFAULTS: dict = {
@@ -1399,6 +1408,76 @@ def utr5_summary(
     }
 
 
+def sharp_summary(profiles: np.ndarray, classes: np.ndarray, utr5: np.ndarray) -> dict:
+    """TIS peak sharpness in +-``SHARP_FLANK`` nt per start class (``atg``, ``nc``, ``utr5``).
+
+    Per site with signal in the window: share of the window's mass at the start nt (mean over
+    sites, ``sharp_share15_<cls>``) and argmax at the start (``sharp_argmax15_<cls>``);
+    ``sharp_n_<cls>`` sites. ``utr5`` marks 5'UTR starts (either codon class).
+    """
+    lo = FLANK - SHARP_FLANK
+    window = np.asarray(profiles, np.float64)[:, lo : FLANK + SHARP_FLANK + 1]
+    total = window.sum(1) if len(window) else np.zeros(0)
+    keep = total > 0
+    out = {}
+    for cls in SHARP_CLASSES:
+        sel = keep & (np.asarray(utr5, bool) if cls == "utr5" else classes == cls)
+        n = int(sel.sum())
+        win = window[sel]
+        out[f"sharp_share15_{cls}"] = (
+            float((win[:, SHARP_FLANK] / total[sel]).mean()) if n else float("nan")
+        )
+        out[f"sharp_argmax15_{cls}"] = (
+            float((win.argmax(1) == SHARP_FLANK).mean()) if n else float("nan")
+        )
+        out[f"sharp_n_{cls}"] = n
+    return out
+
+
+def top_share(vector: np.ndarray, fraction: float = TOP_FRACTION) -> float:
+    """Share of ``vector``'s mass in its top ``fraction`` positions (at least one); NaN if 0."""
+    values = np.asarray(vector, np.float64)
+    total = values.sum()
+    if not len(values) or total <= 0:
+        return float("nan")
+    k = max(1, int(math.ceil(fraction * len(values))))
+    return float(np.partition(values, len(values) - k)[len(values) - k :].sum() / total)
+
+
+def peakiness_summary(
+    real: Sequence[np.ndarray],
+    pred: Sequence[np.ndarray] | None = None,
+    min_reads: float = TOP_MIN_READS,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Whole-transcript TIS peakiness: mean share of TIS mass in the top 1% positions.
+
+    Over transcripts with ``>= min_reads`` real TIS reads. ``top1`` is the source's own value
+    (``real`` when ``pred`` is None); ``top1_resampled`` is ``pred`` sampled (multinomial, fixed
+    ``seed``) at each transcript's real read count, so predicted and real peakiness share the
+    counting noise of a real library; ``top1_n`` transcripts.
+    """
+    rng = np.random.default_rng(seed)
+    own, resampled = [], []
+    for i, r in enumerate(real):
+        n = float(np.asarray(r, np.float64).sum())
+        if n < min_reads:
+            continue
+        if pred is None:
+            own.append(top_share(r))
+            continue
+        p = np.clip(np.asarray(pred[i], np.float64), 0.0, None)
+        own.append(top_share(p))
+        if p.sum() > 0:
+            draw = rng.multinomial(int(round(n)), p / p.sum())
+            resampled.append(top_share(draw))
+    return {
+        "top1": float(np.nanmean(own)) if own else float("nan"),
+        "top1_resampled": float(np.nanmean(resampled)) if resampled else float("nan"),
+        "top1_n": len(own),
+    }
+
+
 def score_predictions(
     cache: TxCache,
     sources: Mapping[str, Mapping[str, np.ndarray]],
@@ -1496,6 +1575,8 @@ def score_predictions(
                 **class_peak_summary(real_p[keep], cls),
                 **rep_summary(r1, r1, r2, cls, region),
                 **utr5_summary(r1, r1, r2, is_utr5, frame["real"]),
+                **sharp_summary(real_p[keep], cls, is_utr5),
+                **peakiness_summary(reps["tis"]["pooled"]),
             }
         )
         for name, parts in preds.items():
@@ -1508,6 +1589,11 @@ def score_predictions(
                     **class_peak_summary(prof, cls),
                     **rep_summary(prof, r1, r2, cls, region),
                     **utr5_summary(prof, r1, r2, is_utr5, frame[name]),
+                    **sharp_summary(prof, cls, is_utr5),
+                    **peakiness_summary(
+                        reps["tis"]["pooled"],
+                        [np.asarray(sources[name][t][k, :, 0]) for t in units.transcript_id],
+                    ),
                 }
             )
     return pd.DataFrame(rows), pd.DataFrame(peaks)
@@ -1566,6 +1652,15 @@ def result_columns(conditions: Sequence[str]) -> list[str]:
             cols.append(f"{c}_tis_rep_both_{cls}")
     for c in conditions:
         cols += [f"{c}_utr5_{stat}" for stat in UTR5_STATS]
+    for c in conditions:
+        for cls in SHARP_CLASSES:
+            cols += [
+                f"{c}_tis_sharp_{stat}_{cls}{suffix}"
+                for suffix in ("", "_real")
+                for stat in SHARP_STATS
+            ]
+            cols.append(f"{c}_tis_sharp_n_{cls}")
+        cols += [f"{c}_tis_{stat}" for stat in ("top1", "top1_resampled", "top1_real", "top1_n")]
     return cols
 
 
@@ -1605,6 +1700,21 @@ def results_row(
                     row[col] = float(value)
                 if key.startswith("utr5_") and f"{r['condition']}_{key}" in row:
                     row[f"{r['condition']}_{key}"] = float(value)
+        for src, suffix in ((source, ""), ("real", "_real")):
+            for r in peaks[peaks.source == src].to_dict(orient="records"):
+                for cls in SHARP_CLASSES:
+                    for stat in SHARP_STATS:
+                        col = f"{r['condition']}_tis_sharp_{stat}_{cls}{suffix}"
+                        if col in row:
+                            row[col] = float(r.get(f"sharp_{stat}_{cls}", float("nan")))
+                    col = f"{r['condition']}_tis_sharp_n_{cls}"
+                    if src == source and col in row:
+                        row[col] = float(r.get(f"sharp_n_{cls}", float("nan")))
+                keys = ("top1", "top1_resampled", "top1_n") if src == source else ("top1",)
+                for key in keys:
+                    col = f"{r['condition']}_tis_{key}{suffix}"
+                    if col in row:
+                        row[col] = float(r.get(key, float("nan")))
         for r in peaks[peaks.source == "real"].to_dict(orient="records"):
             for stat in ("orf_frame", "orf_framed"):
                 col = f"{r['condition']}_utr5_{stat}_real"
