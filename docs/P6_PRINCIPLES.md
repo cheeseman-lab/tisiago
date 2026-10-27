@@ -83,7 +83,8 @@ The track model is caller-independent; the numbers above in percent of replicate
 
 - **Run the caller identically on predicted and real tracks** (same synthetic-BAM pipeline, depth-matched), and report
   the real-vs-real (replicate) reference with the same caller. Calls are a property of model + caller together.
-- **Choose the call cutoff on validation** (real call count or a target precision) and apply it once on test.
+- **Choose the call cutoff on validation** (real call count or a target precision) and apply it once on test. For a
+  truly new line the cutoff must come from the training lines' validation calls (the held-out line has no Ribo-seq).
   Structured CHX changes how often a frame test passes (flux CHX made Ribo-TISH over-call 1.2-2.6x); rank by the
   initiation evidence (TIS p) rather than the combined TIS+frame score.
 - **Report per start class** (ATG / near-cognate; annotated / 5'UTR / internal) with precision next to recall.

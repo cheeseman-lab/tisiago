@@ -598,7 +598,12 @@ on every line; tracks within ~1-3 points (U2OS CHX codon/nt -2.6/-3.0, HeLa +1.5
 0.72, P 0.28; 42k calls vs 16k real) vs 0.287. The flux CHX makes Ribo-TISH over-call (its frame test now passes many
 starts). At matched precision on validation (K562, 3 seeds, calls ranked by Ribo-TISH TIS p, precision 0.586;
 `autoresearch/p6flux/matched_calls.py`): Jaccard flux 0.375 vs step 2 0.368, recall 0.51 vs 0.49, 5'UTR recall 0.34
-vs 0.17. Deploy with a TIS-p cutoff chosen on validation (real call count or target precision). 5'UTR precision
+vs 0.17. Deploy with a TIS-p cutoff chosen on validation (real call count or target precision). Deployed test (3 seeds; TIS-p cutoff chosen on the held-out line's val by
+rule (a) call count = real or (b) precision >= 0.586; geometric mean over seeds; `autoresearch/p6flux/deployed_cutoff.py`):
+K562 flux vs step 2 J 0.365 vs 0.357 (count) / **0.393 vs 0.357** (precision; P 0.61 vs 0.53, 5'UTR R 0.32 vs 0.13);
+HeLa 0.314 vs 0.328 (count) / 0.257 vs 0.310 (precision) — HeLa loses on near-cognate calls; both models over-call
+HeLa 2-3x. Caveat: both rules use the held-out line's own val Ribo-seq, which a new line would not have; a deployable
+cutoff must come from the training lines. 5'UTR precision
 (0.24-0.29 at matched precision) is now the limit: TIS peak specificity, not CHX frame.
 
 ## Takeaways for downstream modeling
