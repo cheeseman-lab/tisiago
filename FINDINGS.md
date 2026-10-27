@@ -603,7 +603,11 @@ rule (a) call count = real or (b) precision >= 0.586; geometric mean over seeds;
 K562 flux vs step 2 J 0.365 vs 0.357 (count) / **0.393 vs 0.357** (precision; P 0.61 vs 0.53, 5'UTR R 0.32 vs 0.13);
 HeLa 0.314 vs 0.328 (count) / 0.257 vs 0.310 (precision) — HeLa loses on near-cognate calls; both models over-call
 HeLa 2-3x. Caveat: both rules use the held-out line's own val Ribo-seq, which a new line would not have; a deployable
-cutoff must come from the training lines. 5'UTR precision
+cutoff must come from the training lines. Training-lines cutoff (seed 0; only K562/HeLa have working Ribo-TISH on seen lines, so K562's cutoff comes
+from HeLa val and vice versa): K562 test flux vs step 2 J 0.385 vs 0.345 (count) / 0.355 vs 0.332 (precision), 5'UTR
+recall ~4x; HeLa 0.275 vs 0.287 / 0.281 vs 0.288. A TIS-p cutoff does not transfer between lines (real call counts
+differ ~2x at similar predicted counts); a deployable rule needs a call budget from the held-out line's RNA or a cutoff
+on the model's own TIS track. 5'UTR precision
 (0.24-0.29 at matched precision) is now the limit: TIS peak specificity, not CHX frame.
 
 ## Takeaways for downstream modeling
