@@ -1,4 +1,4 @@
-"""Ribo-TISH start-site agreement (K562 val, predicted vs real calls) for step-2 runs, per seed + mean.
+"""Ribo-TISH start-site agreement (K562 val, predicted vs real calls) of step-2 runs, per seed.
 
 Usage:
     python autoresearch/p6flux/compare_ribotish.py [prefix ...]   # default sb sbctx sbflux
