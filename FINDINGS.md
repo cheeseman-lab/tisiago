@@ -610,6 +610,31 @@ differ ~2x at similar predicted counts); a deployable rule needs a call budget f
 on the model's own TIS track. 5'UTR precision
 (0.24-0.29 at matched precision) is now the limit: TIS peak specificity, not CHX frame.
 
+## 17. P6 — what limits start calls after the flux model: per-library sharpness and elongation pauses (2026-10-28)
+
+Validation only (K562, HeLa; chr7), step-2 flux model (`sbflux_<g>_s0-2`). Notes:
+`.superpowers/sdd/2026-10-28-p6-{sharp,nc-later,pause}/progress.md`; scripts `autoresearch/p6{sharp,nclater,pause}/`.
+
+- **Loss reweighting does not sharpen TIS peaks** in the full model (3-nt / 9-nt / 32-nt TIS terms up to w1000).
+  32-nt w1000 (`h2`) only calibrates: Ribo-TISH default-filter calls K562 18.2k vs 22.3k (real 18.7k), J 0.370 vs 0.346;
+  ties at matched precision or count; uORF framing 0.31 vs 0.36.
+- **Peak concentration is a per-library property.** Replicate-referenced (rep2-selected starts read on rep1, model
+  depth-matched): K562 ATG ±15 nt share rep1 0.435 vs model 0.314, top-1% concentration 0.74 vs 0.55; HeLa already at
+  replicate (0.30 vs 0.31; 0.53 vs 0.51-0.58). Top-1% at 50 reads/transcript, rep1/rep2: K562 0.93/0.92, U2OS 0.90/0.91,
+  RPE1 0.85-0.92, HeLa 0.84/0.82. The model predicts about the training lines' average, so the sharpest line (K562)
+  is under-sharpened when held out. Not predictable from RNA; calibrate calling per line.
+- **Most "later-exon near-cognate starts" are elongation pauses, not initiation.** 83% of reproducible later-exon NC
+  starts are in frame inside the MANE CDS (20% in the first exon); AGG 2.5x enriched, real CHX peaks on the same codon
+  at 7x background, harringtonine/CHX ~4x below annotated starts. Model hit ratio in-CDS 0.47 vs outside the CDS 0.86
+  (alternative TSSs do not explain the gap: hit ratio near alt 5' ends 0.73 vs 0.44 elsewhere). Adding real CHX to the
+  predicted TIS (alpha 0.1-0.2) brings in-CDS sites to replicate level, so the true gap is CHX pause height: the
+  model reaches ~0.34 of replicate at reproducible CHX codon peaks. New columns `tis_rep_*_incds/_outcds`,
+  `chx_pause_*` separate initiation from pausing.
+- **Codon-aware dwell + harringtonine leak** (`chx_flux.dwell_codon`, `tis_leak`) learn plausible codon effects (slow
+  Asp/Gly/Pro, fast Ile/Leu in the P site) but only ±18% vs ~8x real pauses: fast loop in-CDS NC +0.04, pause +0.01;
+  step 2 (K562, 3 seeds) in-CDS NC 0.51 vs 0.47, pause 0.35 vs 0.34, uORF framing 0.42 vs 0.36, Ribo-TISH more
+  over-calling (J 0.332 vs 0.346). Not adopted.
+
 ## Takeaways for downstream modeling
 
 1. **Judge embeddings against the one-hot sequence floor (§4), not chance.** The honest

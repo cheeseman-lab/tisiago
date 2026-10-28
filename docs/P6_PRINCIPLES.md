@@ -15,6 +15,10 @@ separate layer on top, and the last section says what to redo when that layer ch
 - **Measure in percent of replicate agreement** (rep2 vs model as a percent of rep2 vs rep1) at gene / 30 nt / codon
   / nt, plus CHX in-frame share and reproducible-start hit rates (`scorecard.py`, `fastloop.score_predictions`). KL or
   composite scores hide how far from concordance the model is. Lines whose replicates disagree (RPE1) exceed 100%.
+- **Separate initiation from pausing in start metrics.** Harringtonine leaves ribosomes at strong elongation pauses;
+  most in-CDS in-frame "near-cognate starts" are pauses (§17). Report start metrics in-CDS vs outside the CDS.
+- **Peak sharpness is a per-library property** (K562 sharpest, HeLa flattest; §17). A held-out line gets the training
+  lines' average sharpness; compare against a replicate at equal depth, never against the reads that defined the sites.
 - **Count only reproducible starts as truth for start metrics.** Only ~20% of near-cognate and ~46% of 5'UTR
   Ribo-TISH calls reproduce between replicates; report model hit rate on reproducible starts relative to rep1 -> rep2.
 
