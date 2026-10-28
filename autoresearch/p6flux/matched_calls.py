@@ -17,6 +17,7 @@ N = the real call count (``N_real``), and the largest N whose precision is at le
 
 Usage:
     python autoresearch/p6flux/matched_calls.py [--models sb sbctx sbflux] [--target-precision P]
+        [--condition K562] [--out data/p6flux/matched_calls]
 """
 
 from __future__ import annotations
@@ -95,12 +96,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--models", nargs="+", default=["sb", "sbctx", "sbflux"])
     ap.add_argument("--target-precision", type=float, default=None)
+    ap.add_argument("--condition", default="K562")
+    ap.add_argument("--out", type=Path, default=OUT)
     args = ap.parse_args()
+    cond, out = args.condition, args.out
+    table = f"{cond}_TIS_predict_all.txt"
+    calls = CALLS.replace("K562", cond)
     runs = {}
     for model in args.models:
         for s in range(3):
-            d = ROOT / f"{model}_k562_s{s}" / CALLS
-            if (d / "predicted" / "K562_TIS_predict_all.txt").exists():
+            d = ROOT / f"{model}_{cond.lower()}_s{s}" / calls
+            if (d / "predicted" / table).exists():
                 runs[(model, s)] = d
     target = args.target_precision
     if target is None:
@@ -113,11 +119,11 @@ def main() -> None:
                 ]
             )
         )
-    OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     rows = []
     for (model, seed), d in runs.items():
-        pred_all = pd.read_csv(d / "predicted" / "K562_TIS_predict_all.txt", sep="\t")
-        real_all = pd.read_csv(d / "real" / "K562_TIS_predict_all.txt", sep="\t")
+        pred_all = pd.read_csv(d / "predicted" / table, sep="\t")
+        real_all = pd.read_csv(d / "real" / table, sep="\t")
         report = json.loads((d / "report.json").read_text())
         check = call_report(pred_all, real_all)["overall"]
         assert check["n_shared"] == report["overall"]["n_shared"], (model, seed)
@@ -134,7 +140,7 @@ def main() -> None:
             }
             for pool, cands in pools.items():
                 cur = curve(cands, real)
-                cur.to_csv(OUT / f"{model}_s{seed}_{rank}_{pool}_curve.tsv", sep="\t", index=False)
+                cur.to_csv(out / f"{model}_s{seed}_{rank}_{pool}_curve.tsv", sep="\t", index=False)
                 ok = cur[cur.precision >= target]
                 n_star = int(ok.n.max()) if len(ok) else 0
                 for label, n in (("N_real", n_real), ("N_at_P", n_star)):
@@ -148,7 +154,7 @@ def main() -> None:
                         }
                     )
     df = pd.DataFrame(rows)
-    df.to_csv(OUT / "matched_calls.tsv", sep="\t", index=False)
+    df.to_csv(out / "matched_calls.tsv", sep="\t", index=False)
     cols = [
         "overall_J",
         "overall_R",

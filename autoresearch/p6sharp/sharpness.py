@@ -3,13 +3,14 @@
 Reads ``<export>/<run>/<C>/{tis,chx}_pooled.{plus,minus}.bw`` back into transcript space for
 the cache's val transcripts and scores them with the unchanged ``fastloop.score_predictions``
 (held-out condition only; other conditions zero and not scored). One row per run is appended
-to ``--results`` (``fastloop.result_columns``). Positions shared by two transcripts on one strand
-hold the first transcript's prediction (export convention), so values can differ slightly from
-the run's own ``record.json``. CPU only.
+to ``--results`` (``fastloop.result_columns``; default ``sharpness_<condition>.tsv`` next to
+this script). Positions shared by two transcripts on one strand hold the first transcript's
+prediction (export convention), so values can differ slightly from the run's ``record.json``.
+CPU only.
 
 Usage:
     python autoresearch/p6sharp/sharpness.py --cache data/p6/txcache/fc2d_k562 --condition K562 \
-        --runs sbflux_k562_s0 sbflux_k562_s1 --results autoresearch/p6sharp/sharpness.tsv
+        --runs sbflux_k562_s0 sbflux_k562_s1   # -> autoresearch/p6sharp/sharpness_k562.tsv
 """
 
 from __future__ import annotations
@@ -53,8 +54,10 @@ def main() -> None:
     ap.add_argument("--condition", required=True)
     ap.add_argument("--runs", nargs="+", required=True)
     ap.add_argument("--export", type=Path, default=Path("data/p6/txtrain/export"))
-    ap.add_argument("--results", type=Path, default=Path("autoresearch/p6sharp/sharpness.tsv"))
+    ap.add_argument("--results", type=Path, default=None, help="default sharpness_<c>.tsv here")
     args = ap.parse_args()
+    if args.results is None:
+        args.results = Path(__file__).parent / f"sharpness_{args.condition.lower()}.tsv"
     cache = TxCache(args.cache)
     if cache.config.get("split") == "test":
         raise ValueError("validation only")
