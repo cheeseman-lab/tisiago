@@ -1359,7 +1359,8 @@ def test_sharp_columns_filled_and_existing_unchanged(cache):
     assert row["K562_tis_top1_real"] == pytest.approx(k562.loc["real", "top1"], nan_ok=True)
     assert row["K562_tis_top1"] == pytest.approx(k562.loc["model", "top1"], nan_ok=True)
     new = [c for c in columns if "_tis_sharp_" in c or "_tis_top1" in c]
-    assert columns[-len(new) :] == new  # appended after every existing column
+    later = [c for c in columns if c.endswith(fastloop.CDS_PARTS) or "_chx_pause_" in c]
+    assert columns[-len(new) - len(later) : -len(later)] == new  # appended after the earlier ones
     base = fastloop.results_row(
         meta,
         table,
@@ -1369,3 +1370,201 @@ def test_sharp_columns_filled_and_existing_unchanged(cache):
     for col in columns:
         if col not in new:
             assert row[col] == pytest.approx(base[col], nan_ok=True) or row[col] == base[col]
+
+
+def test_rep_summary_splits_in_cds_without_changing_the_unsplit_keys():
+    vec = np.zeros(300)
+
+    def prof(peaks):
+        v = vec.copy()
+        v[peaks] = 1.0
+        return fastloop.site_profiles(v, [50, 150, 250])
+
+    rep2, rep1, pred = prof([50, 150, 250]), prof([50, 150, 250]), prof([51, 160, 250])
+    classes = fastloop.start_classes(["CTG", "GTG", "CTG"])
+    regions = fastloop.exon_regions([50, 150, 250], 100)
+    in_cds = np.array([False, True, True])
+    plain = fastloop.rep_summary(pred, rep1, rep2, classes, regions)
+    split = fastloop.rep_summary(pred, rep1, rep2, classes, regions, in_cds)
+    for key, value in plain.items():
+        assert split[key] == pytest.approx(value, nan_ok=True)
+    assert split["rep_n_nc_incds"] == 2 and split["rep_hit_nc_incds"] == 0.5
+    assert split["rep_n_nc_later_incds"] == 2 and split["rep_ratio_nc_later_incds"] == 0.5
+    assert split["rep_n_nc_outcds"] == 1 and split["rep_hit_nc_first_outcds"] == 1.0
+    assert split["rep_n_nc_later_outcds"] == 0 and math.isnan(split["rep_hit_nc_later_outcds"])
+    assert set(split) - set(plain) == {
+        f"rep_{stat}_{cls}{region}{part}"
+        for stat in fastloop.REP_STATS
+        for cls in fastloop.START_CLASSES
+        for region in fastloop.EXON_REGIONS
+        for part in fastloop.CDS_PARTS
+    }
+
+
+def test_in_cds_frame_and_peak_heights():
+    got = fastloop.in_cds_frame([10, 13, 14, 40, 43, 7], 10, 43)
+    assert got.tolist() == [False, True, False, True, False, False]  # start codon itself excluded
+    x = np.zeros(100)
+    x[50] = 61.0
+    h = fastloop.peak_heights(x)
+    assert h[50] == pytest.approx(61.0) and h[0] == 0.0
+    flat = fastloop.peak_heights(np.ones(100))
+    assert flat[50] == pytest.approx(1.0) and flat[0] == pytest.approx(61 / 31)  # zero past ends
+
+
+def test_chx_pause_summary_depth_matched_heights():
+    length, cds = 300, (40, 260)
+    rep2 = np.zeros(length)
+    rep2[[100, 150]] = 10.0
+    rep2[[20, 255]] = 10.0  # outside the CDS interior: not peaks
+    rep1 = np.ones(length)
+    rep1[100] = 31.0  # height at 100 = 31 / (91 / 61); at 150 = 1
+    ref = (31 * 61 / 91 + 1.0) / 2
+    real = fastloop.chx_pause_summary(None, [rep1], [rep2], [cds])
+    assert real["chx_pause_n"] == 2 and real["chx_pause_ref"] == pytest.approx(ref)
+    assert real["chx_pause_ratio"] == pytest.approx(1.0)
+    spike = np.zeros(length)
+    spike[100] = 1.0  # every drawn read on one nt: height 61 there, 0 at 150
+    out = fastloop.chx_pause_summary([spike], [rep1], [rep2], [cds])
+    assert out["chx_pause_pred"] == pytest.approx(61 / 2)
+    assert out["chx_pause_ratio"] == pytest.approx(61 / 2 / ref)
+    flat = fastloop.chx_pause_summary([np.ones(length)], [rep1], [rep2], [cds])
+    assert flat == fastloop.chx_pause_summary([np.ones(length)], [rep1], [rep2], [cds])  # seeded
+    assert flat["chx_pause_pred"] < 3.0
+    none = fastloop.chx_pause_summary([spike], [rep1], [np.zeros(length)], [cds])
+    assert none["chx_pause_n"] == 0 and math.isnan(none["chx_pause_ratio"])
+
+
+def test_pause_columns_filled_and_existing_unchanged(cache, monkeypatch):
+    monkeypatch.setattr(fastloop, "PAUSE_MIN_HEIGHT", 2.0)  # the synthetic CHX is Poisson(2)
+    monkeypatch.setattr(fastloop, "PAUSE_MIN_READS", 4.0)
+    rows = cache.rows("val")
+    rng = np.random.default_rng(4)
+    preds = {
+        r.transcript_id: rng.gamma(1.0, size=(3, r.length, 2)).astype(np.float32)
+        for r in rows.itertuples()
+    }
+    table, peaks = fastloop.score_predictions(
+        cache, {"model": preds}, CONDITIONS, heldout=["K562"], min_reads=5
+    )
+    meta = {"config_hash": "abc", "name": "x", "heldout_list": ["K562"], "steps": 3}
+    row = fastloop.results_row(meta, table, peaks, CONDITIONS)
+    columns = fastloop.result_columns(CONDITIONS)
+    new = [c for c in columns if c.endswith(fastloop.CDS_PARTS) or "_chx_pause_" in c]
+    assert columns[-len(new) :] == new  # appended after every existing column
+    k562 = peaks[peaks.condition == "K562"].set_index("source")
+    for stat in fastloop.PAUSE_STATS:
+        got, want = row[f"K562_chx_pause_{stat}"], k562.loc["model", f"chx_pause_{stat}"]
+        assert got == pytest.approx(want, nan_ok=True)
+    assert k562.loc["real", "chx_pause_n"] > 0
+    assert k562.loc["real", "chx_pause_ratio"] == pytest.approx(1.0)
+    for key in ("rep_n_nc_incds", "rep_n_atg_outcds", "rep_hit_atg_first_outcds"):
+        assert row[f"K562_tis_{key}"] == pytest.approx(k562.loc["model", key], nan_ok=True)
+    base = fastloop.results_row(
+        meta,
+        table,
+        peaks.drop(
+            columns=[
+                c for c in peaks if c.startswith("chx_pause_") or c.endswith(fastloop.CDS_PARTS)
+            ]
+        ),
+        CONDITIONS,
+    )
+    for col in columns:
+        if col not in new:
+            assert row[col] == pytest.approx(base[col], nan_ok=True) or row[col] == base[col]
+
+
+def _pair(cache, a: dict, b: dict):
+    model_cfg = {
+        "tis": {"kind": "factorised", "block": 32},
+        "chx": {"kind": "factorised", "block": 32},
+        "chx_trunk": {"kind": "conv", "width": 7, "hidden": 8},
+    }
+    configs = [_config(model={**model_cfg, **extra}) for extra in (a, b)]
+    ctx = fastloop.context_of(cache)
+    batch = fastloop._device_batch(fastloop.Sampler(cache, configs[0]).batch())
+    return [fastloop.make_model(c, ctx) for c in configs], batch
+
+
+def _shared_params_equal(p_base, p_new):
+    for k, v in p_base.items():
+        for name, leaf in v.items():
+            np.testing.assert_array_equal(np.asarray(leaf), np.asarray(p_new[k][name]))
+
+
+G7_HASH = "ec13b3768a88"  # autoresearch/p6flux/results.tsv, before dwell_codon / tis_leak
+FLUX = {"mode": "replace", "stop_codons": "fixed", "learned_hazard": False, "frame_kernel": 1}
+
+
+def test_dwell_codon_starts_equal_to_the_flux_model_and_learns(cache):
+    dwell = {**FLUX, "dwell_codon": {"channels": 4}}
+    (base, model), batch = _pair(cache, {"chx_flux": FLUX}, {"chx_flux": dwell})
+    key = jax.random.PRNGKey(1)
+    p_base, p_new = base.init(key, batch), model.init(key, batch)
+    assert {k for k in p_new if "dwell_codon" in k} == {
+        "chx_flux_dwell_codon",
+        "chx_flux_dwell_codon_out",
+    }
+    _shared_params_equal(p_base, p_new)
+    np.testing.assert_array_equal(
+        np.asarray(base.apply(p_base, batch)[0]), np.asarray(model.apply(p_new, batch)[0])
+    )
+
+    def chx_loss(params):
+        pred, _ = model.apply(params, batch)
+        return (pred[..., 1] * jnp.arange(pred.shape[1])).sum()
+
+    grads = jax.grad(chx_loss)(p_new)
+    assert np.abs(np.asarray(grads["chx_flux_dwell_codon_out"]["b"])).sum() > 0  # no seq: N
+    with pytest.raises(ValueError, match="dwell_codon"):
+        _config(model={"chx": {"kind": "factorised"}, "chx_flux": {**FLUX, "dwell_codon": 4}})
+
+
+def test_codon_dwell_sees_the_p_and_a_site_codons():
+    import haiku as hk
+
+    fn = hk.without_apply_rng(hk.transform(lambda x, v: fastloop.codon_dwell(x, v, 4)))
+    onehot = jax.nn.one_hot(jnp.array([[0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]]), 4)
+    valid = jnp.ones((1, 12), bool)
+    params = fn.init(jax.random.PRNGKey(0), onehot, valid)
+    assert np.allclose(np.asarray(fn.apply(params, onehot, valid)), 0.0)  # zero init
+    params["chx_flux_dwell_codon_out"]["w"] = jnp.ones_like(params["chx_flux_dwell_codon_out"]["w"])
+    params["chx_flux_dwell_codon"]["b"] = jnp.ones_like(params["chx_flux_dwell_codon"]["b"])
+    base = np.asarray(fn.apply(params, onehot, valid))[0]
+    changed = onehot.at[0, 8].set(jnp.array([0.0, 0, 0, 1]))
+    after = np.asarray(fn.apply(params, changed, valid))[0]
+    differs = np.flatnonzero(~np.isclose(base, after))
+    assert set(differs) <= {3, 4, 5, 6, 7, 8} and len(differs) > 0
+
+
+@pytest.mark.parametrize("flux", [None, FLUX])
+def test_tis_leak_adds_scaled_model_chx_to_tis(cache, flux):
+    extra = {"chx_flux": flux} if flux else {}
+    (base, model), batch = _pair(cache, extra, {**extra, "tis_leak": {"init": 0.0}})
+    key = jax.random.PRNGKey(2)
+    p_base, p_new = base.init(key, batch), model.init(key, batch)
+    assert set(p_new) - set(p_base) == {"~"} or "tis_leak" in p_new.get("~", {})
+    _shared_params_equal({k: v for k, v in p_base.items() if k != "~"}, p_new)
+    a, b = np.asarray(base.apply(p_base, batch)[0]), np.asarray(model.apply(p_new, batch)[0])
+    np.testing.assert_array_equal(a[..., 1], b[..., 1])  # CHX unchanged
+    valid = np.asarray(batch["valid"])
+    lam = np.log1p(np.exp(fastloop.TIS_LEAK_BIAS))
+    tis, chx = np.where(valid, a[..., 0], 0), np.where(valid, a[..., 1], 0)
+    scale = tis.sum(-1, keepdims=True) / (chx.sum(-1, keepdims=True) + fastloop.EPS)
+    np.testing.assert_allclose(b[..., 0], np.where(valid, tis + lam * scale * chx, 0), rtol=1e-5)
+
+    def tis_loss(params):
+        pred, _ = model.apply(params, batch)
+        return (pred[..., 0] * jnp.arange(pred.shape[1])).sum()
+
+    grads = jax.grad(tis_loss)(p_new)
+    assert float(grads["~"]["tis_leak"]) != 0.0
+    assert np.abs(np.asarray(grads["chx_out"]["w"])).sum() > 0  # TIS data trains the CHX path
+    with pytest.raises(ValueError, match="tis_leak"):
+        _config(model={"tis_leak": 0.1})
+
+
+def test_new_options_leave_existing_config_hashes_unchanged():
+    raw = fastloop.load_config("autoresearch/p6flux/configs/g7_replace_fixed_grad_k1.yaml")
+    assert fastloop.config_hash(raw) == G7_HASH

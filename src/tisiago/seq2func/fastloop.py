@@ -34,8 +34,11 @@ A config (YAML or JSON) is merged into :data:`DEFAULTS` and composes registered 
   ``stop_onehot: {channels}`` a learned codon one-hot MLP added to the stop hazard,
   ``stop_codons: fixed`` terminates at
   in-frame TAA/TAG/TGA from ``seq.npy`` (the one allowed codon rule), ``learned_hazard: false``
-  drops the learned hazard; factorised CHX only) builds CHX from the
-  in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`).
+  drops the learned hazard; ``dwell_codon: {channels}`` makes the dwell also a learned function
+  of the P- and A-site codons from the one-hot sequence, :func:`codon_dwell`; factorised CHX
+  only) builds CHX from the in-frame ribosome flux of the predicted TIS (:func:`flux_chx_output`);
+  ``model.tis_leak`` (``init``) adds a learned share of the model's own CHX to its TIS output
+  (:func:`tis_leak`; harringtonine leaves ribosomes stalled at pauses).
 - ``losses``: list of ``{kind, weight, ...}`` from :data:`LOSSES`: ``poisson`` (deviance of
   totals; ``scope`` sample / global), ``multinomial`` (``scope`` global = the batch, one
   condition, like a genomic window; sample = the transcript crop; local = blocks of ``block``,
@@ -67,7 +70,11 @@ both replicates hit); ``primary3`` = mean of held-out TIS nt percent and
 class (``atg`` / ``nc`` / ``utr5``), the per-site share of the +-15 nt window at the start nt and
 argmax at the start, predicted and real (:func:`sharp_summary`), and whole-transcript TIS
 peakiness ``top1`` (share of mass in the top 1% positions; :func:`peakiness_summary`), also on
-the prediction resampled at the real read count. The checkpoint's own predictions (``ckpt.npy``) are
+the prediction resampled at the real read count. Pause columns (appended after them) split every
+``rep_*`` start column into ``_incds`` (in frame inside the annotated CDS past its start: pause-like
+sites; annotation used for metrics only) and ``_outcds``, and give ``chx_pause_{pred,ref,ratio,n}``,
+the depth-matched predicted vs replicate-1 CHX peak height at replicate-2 codon peaks in the CDS
+(:func:`chx_pause_summary`). The checkpoint's own predictions (``ckpt.npy``) are
 scored alongside as ``ckpt``. ``--export-dir`` writes each config's val predictions as genomic
 float bigWigs (:func:`export_bigwigs`) plus its parameters. One row per config is appended to
 ``--results`` (:data:`RESULT_COLUMNS`) and the full record written to
@@ -133,6 +140,11 @@ SHARP_FLANK = 15
 SHARP_CLASSES = ("atg", "nc", "utr5")
 SHARP_STATS = ("share15", "argmax15")
 TOP_FRACTION = 0.01
+CDS_PARTS = ("_incds", "_outcds")
+PAUSE_FLANK = 30
+PAUSE_MIN_HEIGHT = 5.0
+PAUSE_MIN_READS = 5.0
+PAUSE_STATS = ("pred", "ref", "ratio", "n")
 TOP_MIN_READS = 50.0
 STOP_CODES = frozenset({(3, 0, 0), (3, 0, 2), (3, 2, 0)})  # TAA TAG TGA, A C G T = 0..3
 RNA_HEAD = 129
@@ -230,6 +242,11 @@ def resolve_config(raw: Mapping) -> dict:
             raise ValueError("model.chx_flux.stop_onehot needs learned_hazard")
         if int(flux.get("frame_kernel", 3)) not in (1, 3, 5):
             raise ValueError("model.chx_flux.frame_kernel must be 1, 3 or 5")
+        if flux.get("dwell_codon") is not None and not isinstance(flux["dwell_codon"], Mapping):
+            raise ValueError("model.chx_flux.dwell_codon must be a mapping ({channels: N})")
+    leak = config["model"].get("tis_leak")
+    if leak is not None and not isinstance(leak, Mapping):
+        raise ValueError("model.tis_leak must be a mapping ({init: float})")
     for library in LIBRARIES:
         kind = config["model"][library]["kind"]
         if kind not in OUTPUTS:
@@ -737,6 +754,8 @@ def chx_log_ratios(chx, widths=(15, 45, 150), eps: float = 0.01):
 
 FLUX_EPS = 1e-6
 FLUX_STOP_BIAS = -4.0
+DWELL_CODON_WIDTH = 6
+TIS_LEAK_BIAS = -2.0
 
 
 def flux_scan(init, stop, keep, bg, valid):
@@ -782,6 +801,40 @@ def codon_hazard(onehot, valid, channels: int):
     return out[..., 0] * valid
 
 
+def codon_dwell(onehot, valid, channels: int):
+    """Learned ``(B, L)`` log dwell of the P- and A-site codons at each nt (nt i..i+5 -> MLP).
+
+    Zero-initialised output, so a model with it starts equal to one without it.
+    """
+    import haiku as hk
+    import jax
+
+    zeros = hk.initializers.Constant(0.0)
+    pad = ((0, DWELL_CODON_WIDTH - 1),)
+    h = hk.Conv1D(channels, DWELL_CODON_WIDTH, padding=pad, name="chx_flux_dwell_codon")(onehot)
+    out = hk.Linear(1, w_init=zeros, b_init=zeros, name="chx_flux_dwell_codon_out")(jax.nn.relu(h))
+    return out[..., 0] * valid
+
+
+def tis_leak(tis, chx, valid, init: float = 0.0):
+    """``tis + lambda * chx * sum(tis) / sum(chx)`` per sample (the ratio gradient-stopped).
+
+    ``lambda = softplus(r + TIS_LEAK_BIAS)``, ``r`` learned from ``init`` (0 -> 0.13): a share
+    of the predicted elongation profile leaks into the initiation library, as ribosomes stalled
+    at strong pauses that harringtonine does not release.
+    """
+    import haiku as hk
+    import jax
+    import jax.numpy as jnp
+
+    raw = hk.get_parameter("tis_leak", (), init=hk.initializers.Constant(float(init)))
+    lam = jax.nn.softplus(raw + TIS_LEAK_BIAS)
+    tis_sum = jnp.where(valid, tis, 0.0).sum(-1, keepdims=True)
+    chx_sum = jnp.where(valid, chx, 0.0).sum(-1, keepdims=True)
+    scale = jax.lax.stop_gradient(tis_sum / (chx_sum + EPS))
+    return jnp.where(valid, tis + lam * scale * chx, 0.0)
+
+
 def stop_codon_starts(seq, valid):
     """``(B, L)`` bool: a sense stop codon (TAA / TAG / TGA) starts at nt ``i`` (N = no stop)."""
     import jax.numpy as jnp
@@ -809,7 +862,9 @@ def stop_ended(seq, valid):
     return jnp.pad(starts, [(0, 0), (3, 0)])[:, : starts.shape[1]]
 
 
-def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn, ended=None):
+def flux_chx_output(
+    p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn, ended=None, onehot=None
+):
     """CHX rate from the factorised CHX head ``p_chx`` and the in-frame flux of ``tis``.
 
     ``mode: logit`` adds ``beta log(flux_dwell + eps)`` to the within-block logits (``beta``
@@ -818,6 +873,7 @@ def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn, 
     processivity and background) blurred by a learned ``frame_kernel``-tap kernel, times a learned
     per-position dwell ``exp(d)``. ``ended`` (:func:`stop_ended`, ``stop_codons: fixed``) sets the
     hazard to 1 after in-frame stop codons; ``stop_logit`` None = no learned hazard.
+    ``dwell_codon: {channels}`` adds :func:`codon_dwell` of ``onehot`` to the dwell ``d``.
     """
     import haiku as hk
     import jax
@@ -839,6 +895,8 @@ def flux_chx_output(p_chx, stop_logit, h_chx, tis, valid, cfg, chx_cfg, chx_fn, 
     flux = frame_blur(flux, jax.nn.softmax(kernel))
     zeros = hk.initializers.Constant(0.0)
     dwell = hk.Linear(1, w_init=zeros, b_init=zeros, name="chx_flux_dwell")(h_chx)[..., 0]
+    if cfg.get("dwell_codon"):
+        dwell = dwell + codon_dwell(onehot, valid, int(cfg["dwell_codon"].get("channels", 32)))
     log_flux = jnp.log(jnp.where(valid, flux * jnp.exp(dwell), 0.0) + FLUX_EPS)
     mode = cfg.get("mode", "logit")
     if mode == "logit":
@@ -950,8 +1008,19 @@ def make_model(config: Mapping, ctx: Mapping, embed_proj: int | None = None):
             if flux_cfg.get("stop_codons") == "fixed":
                 ended = stop_ended(batch["seq"], valid)
             chx = flux_chx_output(
-                p_chx, stop_logit, h_chx, tis, valid, flux_cfg, model["chx"], chx_fn, ended
+                p_chx,
+                stop_logit,
+                h_chx,
+                tis,
+                valid,
+                flux_cfg,
+                model["chx"],
+                chx_fn,
+                ended,
+                _onehot(batch) if flux_cfg.get("dwell_codon") else None,
             )
+        if model.get("tis_leak"):
+            tis = tis_leak(tis, chx, valid, float(model["tis_leak"].get("init", 0.0)))
         return jnp.stack([tis, chx], axis=-1), {"nb_log_r": log_r}
 
     return hk.without_apply_rng(hk.transform(forward))
@@ -1336,29 +1405,103 @@ def rep_summary(
     rep2: np.ndarray,
     classes: np.ndarray,
     regions: np.ndarray,
+    in_cds: np.ndarray | None = None,
 ) -> dict[str, float]:
     """Reproducible-start hit rates of ``pred`` vs replicate 1, conditioned on replicate 2.
 
     Keys ``rep_{hit,ref,ratio,n}_<cls><region>`` (region ``""``, ``_first``, ``_later``) and
-    ``rep_both_<cls>`` (P(pred hit | both replicates hit)).
+    ``rep_both_<cls>`` (P(pred hit | both replicates hit)). With ``in_cds`` (per site: in frame
+    inside the annotated CDS, past its start; metrics only), the same keys with suffix
+    ``_incds`` (pause-like sites) and ``_outcds`` (the rest).
     """
     hit_p, hit_1, hit_2 = site_hits(pred), site_hits(rep1), site_hits(rep2)
+    parts = [("", None)]
+    if in_cds is not None:
+        cds = np.asarray(in_cds, bool)
+        parts += [(CDS_PARTS[0], cds), (CDS_PARTS[1], ~cds)]
     out = {}
     for cls in START_CLASSES:
-        for region in EXON_REGIONS:
-            sel = (classes == cls) & hit_2
-            if region:
-                sel &= regions == region[1:]
-            n = int(sel.sum())
-            hit = float(hit_p[sel].mean()) if n else float("nan")
-            ref = float(hit_1[sel].mean()) if n else float("nan")
-            out[f"rep_hit_{cls}{region}"] = hit
-            out[f"rep_ref_{cls}{region}"] = ref
-            out[f"rep_ratio_{cls}{region}"] = hit / ref if n and ref > 0 else float("nan")
-            out[f"rep_n_{cls}{region}"] = n
+        for part, mask in parts:
+            for region in EXON_REGIONS:
+                sel = (classes == cls) & hit_2
+                if region:
+                    sel &= regions == region[1:]
+                if mask is not None:
+                    sel &= mask
+                n = int(sel.sum())
+                hit = float(hit_p[sel].mean()) if n else float("nan")
+                ref = float(hit_1[sel].mean()) if n else float("nan")
+                key = f"{cls}{region}{part}"
+                out[f"rep_hit_{key}"] = hit
+                out[f"rep_ref_{key}"] = ref
+                out[f"rep_ratio_{key}"] = hit / ref if n and ref > 0 else float("nan")
+                out[f"rep_n_{key}"] = n
         both = (classes == cls) & hit_1 & hit_2
         out[f"rep_both_{cls}"] = float(hit_p[both].mean()) if both.any() else float("nan")
     return out
+
+
+def in_cds_frame(positions: Sequence[int], cds_start: int, cds_end: int) -> np.ndarray:
+    """Per mRNA position: in frame with the annotated CDS and inside it past its start codon."""
+    pos = np.asarray(positions, int)
+    return (pos > int(cds_start)) & (pos < int(cds_end)) & ((pos - int(cds_start)) % 3 == 0)
+
+
+def peak_heights(vector: np.ndarray, flank: int = PAUSE_FLANK) -> np.ndarray:
+    """Per nt: value over the mean of its ``+-flank`` nt window (zero past the ends; 0 if empty)."""
+    x = np.asarray(vector, np.float64)
+    width = 2 * flank + 1
+    csum = np.concatenate([[0.0], np.cumsum(np.concatenate([np.zeros(flank), x, np.zeros(flank)]))])
+    mean = (csum[width:] - csum[:-width]) / width
+    return np.divide(x, mean, out=np.zeros_like(x), where=mean > 0)
+
+
+def chx_pause_summary(
+    preds: Sequence[np.ndarray] | None,
+    rep1: Sequence[np.ndarray],
+    rep2: Sequence[np.ndarray],
+    cds: Sequence[tuple[int, int]],
+    seed: int = 0,
+) -> dict[str, float]:
+    """CHX pause peaks: predicted vs replicate peak height at replicate-2 codon peaks.
+
+    Peaks: nt inside each annotated CDS, more than ``PAUSE_FLANK`` nt from its start and end,
+    where replicate 2 has ``>= PAUSE_MIN_READS`` reads and a peak height (:func:`peak_heights`)
+    ``>= PAUSE_MIN_HEIGHT``. ``chx_pause_ref`` = mean replicate-1 height there (the replicate
+    level, selected on replicate 2 only); ``chx_pause_pred`` = mean height of the prediction
+    drawn multinomially at each transcript's replicate-1 read count (fixed ``seed``; depth
+    matched; ``preds`` None = replicate 1 itself); ``chx_pause_ratio`` = pred / ref;
+    ``chx_pause_n`` peaks.
+    """
+    rng = np.random.default_rng(seed)
+    pred_sum = ref_sum = 0.0
+    n = 0
+    for i, (r1, r2) in enumerate(zip(rep1, rep2, strict=True)):
+        lo, hi = int(cds[i][0]) + PAUSE_FLANK, int(cds[i][1]) - PAUSE_FLANK
+        if hi <= lo:
+            continue
+        r2 = np.asarray(r2, np.float64)
+        peak = (r2[lo:hi] >= PAUSE_MIN_READS) & (peak_heights(r2)[lo:hi] >= PAUSE_MIN_HEIGHT)
+        if not peak.any():
+            continue
+        r1 = np.asarray(r1, np.float64)
+        if preds is None:
+            draw = r1
+        else:
+            p = np.clip(np.asarray(preds[i], np.float64), 0.0, None)
+            reads = int(round(r1.sum()))
+            draw = rng.multinomial(reads, p / p.sum()) if reads and p.sum() > 0 else 0.0 * p
+        pred_sum += float(peak_heights(draw)[lo:hi][peak].sum())
+        ref_sum += float(peak_heights(r1)[lo:hi][peak].sum())
+        n += int(peak.sum())
+    pred = pred_sum / n if n else float("nan")
+    ref = ref_sum / n if n else float("nan")
+    return {
+        "chx_pause_pred": pred,
+        "chx_pause_ref": ref,
+        "chx_pause_ratio": pred / ref if n and ref > 0 else float("nan"),
+        "chx_pause_n": n,
+    }
 
 
 def orf_stop(seq: np.ndarray, start: int) -> int:
@@ -1518,6 +1661,19 @@ def score_predictions(
                 rows.append({"condition": condition, "heldout": condition in heldout, **item})
         if cache.sites is None:
             continue
+        cds_of = {r.transcript_id: (int(r.cds_start), int(r.cds_end)) for r in units.itertuples()}
+        cds_spans = [cds_of[t] for t in units.transcript_id]
+        pause = {
+            name: chx_pause_summary(
+                None
+                if name == "real"
+                else [np.asarray(sources[name][t][k, :, 1]) for t in units.transcript_id],
+                reps["chx"]["rep1"],
+                reps["chx"]["rep2"],
+                cds_spans,
+            )
+            for name in ("real", *sources)
+        }
         sites = cache.sites[cache.sites.condition == condition]
         sites = sites[sites.transcript_id.isin(set(units.transcript_id))]
         index = {t: i for i, t in enumerate(units.transcript_id)}
@@ -1526,7 +1682,7 @@ def score_predictions(
             for r in units.itertuples()
         }
         real, preds, classes = [], {name: [] for name in sources}, []
-        rep1, rep2, regions = [], [], []
+        rep1, rep2, regions, in_cds = [], [], [], []
         utr5, frames = [], {name: [] for name in ("real", *sources)}
         for tid, group in sites.groupby("transcript_id", sort=False):
             pos = group.tx_pos.to_numpy(int)
@@ -1555,6 +1711,7 @@ def score_predictions(
             rep1.append(site_profiles(reps["tis"]["rep1"][index[tid]], pos))
             rep2.append(site_profiles(reps["tis"]["rep2"][index[tid]], pos))
             regions.append(exon_regions(pos, first_junction[tid]))
+            in_cds.append(in_cds_frame(pos, *cds_of[tid]))
             classes.append(start_classes(group.codon))
             for name, src in sources.items():
                 preds[name].append(site_profiles(src[tid][k, :, 0], pos))
@@ -1565,6 +1722,7 @@ def score_predictions(
         cls = np.concatenate(classes)[keep]
         r1, r2 = np.concatenate(rep1)[keep], np.concatenate(rep2)[keep]
         region = np.concatenate(regions)[keep]
+        cds_site = np.concatenate(in_cds)[keep]
         is_utr5 = np.concatenate(utr5)[keep]
         frame = {name: np.concatenate(parts)[keep] for name, parts in frames.items()}
         peaks.append(
@@ -1573,10 +1731,11 @@ def score_predictions(
                 "source": "real",
                 **peak_summary(real_p[keep]),
                 **class_peak_summary(real_p[keep], cls),
-                **rep_summary(r1, r1, r2, cls, region),
+                **rep_summary(r1, r1, r2, cls, region, cds_site),
                 **utr5_summary(r1, r1, r2, is_utr5, frame["real"]),
                 **sharp_summary(real_p[keep], cls, is_utr5),
                 **peakiness_summary(reps["tis"]["pooled"]),
+                **pause["real"],
             }
         )
         for name, parts in preds.items():
@@ -1587,13 +1746,14 @@ def score_predictions(
                     "source": name,
                     **peak_summary(prof),
                     **class_peak_summary(prof, cls),
-                    **rep_summary(prof, r1, r2, cls, region),
+                    **rep_summary(prof, r1, r2, cls, region, cds_site),
                     **utr5_summary(prof, r1, r2, is_utr5, frame[name]),
                     **sharp_summary(prof, cls, is_utr5),
                     **peakiness_summary(
                         reps["tis"]["pooled"],
                         [np.asarray(sources[name][t][k, :, 0]) for t in units.transcript_id],
                     ),
+                    **pause[name],
                 }
             )
     return pd.DataFrame(rows), pd.DataFrame(peaks)
@@ -1661,6 +1821,15 @@ def result_columns(conditions: Sequence[str]) -> list[str]:
             ]
             cols.append(f"{c}_tis_sharp_n_{cls}")
         cols += [f"{c}_tis_{stat}" for stat in ("top1", "top1_resampled", "top1_real", "top1_n")]
+    for c in conditions:
+        for cls in START_CLASSES:
+            cols += [
+                f"{c}_tis_rep_{stat}_{cls}{region}{part}"
+                for part in CDS_PARTS
+                for region in EXON_REGIONS
+                for stat in REP_STATS
+            ]
+        cols += [f"{c}_chx_pause_{stat}" for stat in PAUSE_STATS]
     return cols
 
 
@@ -1698,7 +1867,7 @@ def results_row(
                 col = f"{r['condition']}_tis_{key}"
                 if key.startswith("rep_") and col in row:
                     row[col] = float(value)
-                if key.startswith("utr5_") and f"{r['condition']}_{key}" in row:
+                if key.startswith(("utr5_", "chx_pause_")) and f"{r['condition']}_{key}" in row:
                     row[f"{r['condition']}_{key}"] = float(value)
         for src, suffix in ((source, ""), ("real", "_real")):
             for r in peaks[peaks.source == src].to_dict(orient="records"):
