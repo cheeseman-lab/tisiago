@@ -12,6 +12,35 @@ Reference point for everything below: step-2 flux model, leave-one-cell-line-out
 
 ---
 
+## 0. Where we are — three classes of experiment
+
+The work so far falls into three classes. They are easy to conflate because FINDINGS numbers them
+by experiment rather than by class, so this spec states them once and refers to them by number.
+
+| Class | What | Sections | Status |
+|---|---|---|---|
+| **1** | **Frozen embeddings -> direct start calls.** AlphaGenome + Evo2 frozen, logistic or tree head, one binary label per codon. | §1-10 | **Closed. This is the baseline.** recall 0.306 @ 0.99 FP/transcript, AUPRC 0.304 (5 seeds, clean protocol); AUG 0.58 vs near-cognate 0.07. |
+| **2** | **Fine-tuned AlphaGenome -> tracks, one model per condition, DNA only.** 6 channels (TIS/CHX/RNA x strand). | §11-12 | **Abandoned.** Tracks fit and periodicity was recovered, but starts read off the tracks scored 0.035-0.099 against the class-1 baseline's 0.306, and the per-condition models do not transfer to a new line. |
+| **3** | **Fine-tuned AlphaGenome -> tracks, one shared RNA-conditioned model, leave-one-cell-line-out.** Plus the transcript-space head, spliced-input backbone and flux CHX output. | §13-17 | **Live. Build from here.** TIS codon 70-106% of replicate by line; Ribo-TISH Jaccard 0.39 (K562, deployed cutoff). |
+
+**What actually changed between class 2 and class 3** was not the prediction target — both predict
+tracks. It was (a) one shared model instead of one per condition, (b) the cell line's RNA track as
+input, and (c) leave-one-cell-line-out as the evaluation axis. Gene level went 89% -> 98% of
+replicate. There has never been a P6 run that predicted starts directly; that is class 1.
+
+**The gap this spec exists to close.** Class 3 is better than class 2 on *track* metrics, which are
+well measured. Whether class 3 beats class 1 **at calling starts** is unknown: the only
+apples-to-apples measurement is class 2's (0.035-0.099 vs 0.306), and it has not been rerun since.
+Everything after class 2 was judged by Ribo-TISH Jaccard on synthetic BAMs, a different metric on a
+different substrate. Note also that in class 2, *real* tracks scored 0.254 on that protocol -- below
+the class-1 baseline -- so the deficit is partly in reading starts off tracks at all, not only in
+model quality. One caveat in class 3's favour: `track_tis_eval.py` scores a hand-specified statistic
+(peak over local background), whereas class 1 is a fitted classifier, so that comparison understates
+what a *trained* caller on tracks could do. Phase 3 below supplies exactly that, and Phase 1
+measures the number.
+
+---
+
 ## 1. Why re-scope before the next hill climb
 
 Three findings, all from our own data, say the current objective does not measure what we want.
@@ -153,8 +182,8 @@ predicted and real tracks") applied to a new caller.
 the frozen baseline's protocol with no caller at all. That is the clean comparison against frozen
 `ag7`, and it needs no new code. The two routes answer different questions — caller-free for "did
 P6 beat the frozen baseline", native caller for "do our calls match canonical calls" — and both
-should be reported. **The caller-free number for the current best model has never been run**
-(FINDINGS reports it only for Experiment 1, at 0.035-0.099); it is the first thing to measure.
+should be reported. **The caller-free number for class 3 has never been run**
+(FINDINGS reports it only for class 2, at 0.035-0.099); it is the first thing to measure.
 
 *Done when:* M1 on a held-out line beats both the frozen `ag7` baseline and Ribo-TISH-on-predicted,
 using a threshold fit only on training lines, with arm 2 reproducing canonical calls.
@@ -247,7 +276,7 @@ Both found while verifying against the fork; both currently misleading.
 | Phase | What | Cost |
 |---|---|---|
 | 0 | Data contract, truth set, P-site convention assertion, differential-start counts | small, CPU |
-| 1 | Re-baseline the current recipe unchanged on clean data; **run `track_tis_eval` on it** (the blank number); rerun frozen `ag7` on clean labels | 4 folds x 3 seeds, GPU |
+| 1 | Re-baseline **class 3** unchanged on clean data; **run `track_tis_eval` on it** (the blank number from §0); rerun the **class-1** baseline on clean labels | 4 folds x 3 seeds, GPU |
 | 2 | M1/M2/M3 into the scorecard | small, CPU |
 | 3 | Native caller + learned threshold; three-way decomposition | small, fast loop |
 | 4 | Architecture work, driven by whatever M1/M2 diagnosis says limits them | the bulk |
