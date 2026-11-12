@@ -3,8 +3,8 @@
 What the `tracks` line learned (2026-10-05 to 10-28) about turning a cell line's RNA-seq into base-resolution harringtonine (TIS) and
 cycloheximide (CHX) Ribo-seq. The principles are about the **track model**. Start calling (Ribo-TISH today) is a
 separate layer on top (`calling`), and §7 says what to redo when that layer changes. Evidence: FINDINGS §11-17,
-the fast-loop ledger and SDD notes (`autoresearch/p6fast/ledger.md`, `.superpowers/sdd/2026-10-2*-p6-*/` in tag
-`archive/pre-cleanup-2026-11-12`).
+the fast-loop ledger `autoresearch/p6fast/ledger.md` (preserved in tag `archive/pre-cleanup-2026-11-12`) and the SDD
+notes `.superpowers/sdd/2026-10-2*-p6-*/` (never tracked in git; local working copy only).
 
 ## 1. Problem framing
 
@@ -25,8 +25,10 @@ the fast-loop ledger and SDD notes (`autoresearch/p6fast/ledger.md`, `.superpowe
 
 ## 2. Inputs
 
-- **RNA: depth-scaled pooled 5'-end coverage** (scaled to a 5e7-read library) into the head, not the backbone. CPM made
-  the signal too small; transcript-relative RNA, one-sided/antisense RNA, and 5'-end sharpness features did not help.
+- **RNA: depth-scaled pooled 5'-end coverage** (scaled to a 5e7-read library) into the head. CPM made the signal too
+  small; transcript-relative RNA, one-sided/antisense RNA, and 5'-end sharpness features did not help. *Backbone
+  conditioning was never tested*: every variant here is a head-side feature, and the fast loop cannot express it (§6);
+  see `PLAN.md` decision 4.
 - **DNA/mRNA sequence into the backbone.** Base AlphaGenome has little local near-cognate start information (local NC
   AUROC 0.65, below a one-hot ±20 nt floor of 0.76); fine-tuning under the track loss creates it (0.81).
 - **Transcript (spliced, cap -> poly-A) coordinates are the largest single structural gain.** A head in transcript

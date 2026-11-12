@@ -2,7 +2,8 @@
 
 > **Reading guide (2026-11-12).** Section numbers are stable; the names in their titles are historical.
 > Current names are in [`docs/PLAN.md`](docs/PLAN.md) §1. Code and paths cited below are as of the
-> tag `archive/pre-cleanup-2026-11-12` (`seq2func/` is now `src/tisiago/tracks/`, `autoresearch/` is gone).
+> tag `archive/pre-cleanup-2026-11-12` (`seq2func/` is now `src/tisiago/tracks/`; `autoresearch/` paths are preserved
+> in that tag). `.superpowers/sdd/` notes were never tracked in git and exist only in the local working copy.
 >
 > | § | Line (current name) | Status |
 > |---|---|---|

@@ -38,7 +38,7 @@ apples-to-apples measurement is class 2's (0.035-0.099 vs 0.306), and it has not
 Everything after class 2 was judged by Ribo-TISH Jaccard on synthetic BAMs, a different metric on a
 different substrate. Note also that in class 2, *real* tracks scored 0.254 on that protocol -- below
 the class-1 baseline -- so the deficit is partly in reading starts off tracks at all, not only in
-model quality. One caveat in class 3's favour: `track_tis_eval.py` scores a hand-specified statistic
+model quality. One caveat in class 3's favour: `calling/track_score.py` (was `track_tis_eval.py`) scores a hand-specified statistic
 (peak over local background), whereas class 1 is a fitted classifier, so that comparison understates
 what a *trained* caller on tracks could do. Phase 3 below supplies exactly that, and Phase 1
 measures the number.
@@ -50,7 +50,7 @@ measures the number.
 Three findings, all from our own data, say the current objective does not measure what we want.
 
 **1a. The synthetic-BAM adapter is lossy in principle, not just in practice.**
-`seq2func/synthetic_bam.py` turns each track count into a **2-bp read** with the para table
+`tests/synthetic_bam.py` (was `seq2func/synthetic_bam.py`; now a test helper) turns each track count into a **2-bp read** with the para table
 `{2: 1}`, chosen so Ribo-TISH's P-site lands on the right base and "a 2-bp read always passes its
 splice-compatibility check, so no transcript model is needed". Real RPFs are 20-38 nt with
 per-length offsets. So Ribo-TISH's read-length filters, its periodicity statistics and its
@@ -107,7 +107,7 @@ On the regenerated sequencing data and the ribotish-fork `results/v50` release.
    - region: 5'UTR / annotated / in-CDS in-frame / in-CDS out-of-frame / other;
    - a pause flag from the `chx_pause_*` columns (§17).
 4. **Resolve the P-site convention mismatch between the two repos.** This is a live off-by-one:
-   - `tisiago/seq2func/psite.py` mirrors **Ribo-TISH 0.2.7** and keeps the minus-strand P-site at
+   - `tisiago/tracks/psite.py` mirrors **Ribo-TISH 0.2.7** and keeps the minus-strand P-site at
      `canonical + RIBOTISH_MINUS_SHIFT` (= +1), carried through `data.py` and `predict_tracks.py`;
    - the fork's `pipeline/tracks/make_tracks.py:psite_coord` **corrects** it — "on - the returned
      coordinate is one past the base ... so the base is `coord - 1`" — and the fork is
@@ -182,7 +182,7 @@ Arm 2 is the gate: if the native caller on real tracks does not reproduce the ca
 caller is wrong and arm 3 means nothing. This is Principles §7 ("run the caller identically on
 predicted and real tracks") applied to a new caller.
 
-**Keep the caller-free route too.** `seq2func/track_tis_eval.py` already scores predicted tracks on
+**Keep the caller-free route too.** `calling/track_score.py` already scores predicted tracks on
 the frozen baseline's protocol with no caller at all. That is the clean comparison against frozen
 `ag7`, and it needs no new code. The two routes answer different questions — caller-free for "did
 P6 beat the frozen baseline", native caller for "do our calls match canonical calls" — and both
@@ -280,7 +280,7 @@ Both found while verifying against the fork; both currently misleading.
 | Phase | What | Cost |
 |---|---|---|
 | 0 | Data contract, truth set, P-site convention assertion, differential-start counts | small, CPU |
-| 1 | Re-baseline **class 3** unchanged on clean data; **run `track_tis_eval` on it** (the blank number from §0); rerun the **class-1** baseline on clean labels | 4 folds x 3 seeds, GPU |
+| 1 | Re-baseline **class 3** unchanged on clean data; **run `calling.track_score` on it** (the blank number from §0); rerun the **class-1** baseline on clean labels | 4 folds x 3 seeds, GPU |
 | 2 | M1/M2/M3 into the scorecard | small, CPU |
 | 3 | Native caller + learned threshold; three-way decomposition | small, fast loop |
 | 4 | Architecture work, driven by whatever M1/M2 diagnosis says limits them | the bulk |
@@ -303,4 +303,4 @@ is needed at all.
 - **A custom caller can flatter the model.** Arm 2 of the three-way decomposition is the only thing
   preventing that; it is not optional.
 - **The native caller breaks comparability with the literature.** Mitigated by keeping Ribo-TISH on
-  real BAMs as truth and reporting the caller-free `track_tis_eval` route alongside.
+  real BAMs as truth and reporting the caller-free `calling.track_score` route alongside.
