@@ -13,7 +13,7 @@ Conditions: K562, HeLa, U2OS, RPE1_Async, RPE1_Que, RPE1_Sen. RPE1's three state
   `<C>_{TIS,CHX}[_rep<N>]_{plus,minus}.bw`. Pooled is the training target; replicates define truth (spec §6).
   Each track's read total (`<C>.tracks.json` `total_psites`), so counts can be recovered from CPM.
 - **Matched RNA-input, same lysate**, stranded, per replicate if it exists. What the model consumes is the RNA
-  5'-end count track (`seq2func/psite.py` `rna_end5`), not coverage.
+  5'-end count track (`tracks/psite.py` `rna_end5`), not coverage.
 - **Truth table** (§2), all conditions in one file.
 - **Transcript annotation** the calls were made on: exon blocks and genomic CDS per transcript (release `transcripts`).
 - **Per-library P-site offsets** (`para` files) and BAM paths, so tracks can be rebuilt here if needed.
@@ -53,7 +53,7 @@ annotation, and duplicate (condition, chrom, strand, gpos). `summarize_truth` gi
 Harringtonine peaks at a start codon's first base. A track in the right convention peaks at offset 0 on **both**
 strands around annotated AUG starts.
 
-- tisiago tracks (`seq2func/psite.py`) mirror Ribo-TISH 0.2.7 and keep the minus-strand P-site at canonical + 1
+- tisiago tracks (`tracks/psite.py`) mirror Ribo-TISH 0.2.7 and keep the minus-strand P-site at canonical + 1
   (`RIBOTISH_MINUS_SHIFT`). The fork's `make_tracks.psite_coord` subtracts it. So the two differ by 1 nt on -.
 - Check: `truth.psite_check.psite_offsets(bigwig_reader(...), annotated AUG starts)` then `check_psite_convention`
   on each artifact, and `check_same_convention(model, release)`. A minus-strand offset one below plus is the 0.2.7
@@ -68,7 +68,7 @@ once per model behind `--i-am-final`. The release carries no split column; tisia
 ## 6. Unknowns to settle on hand-off
 
 1. **Which table is truth.** Raw `starts` with replicate flags, or the cross-line-filtered strong-start set
-   (P6_PROJECT_PLAN §2)? If filtered, does it keep per-line `rep1`/`rep2`, and are dropped starts kept somewhere as
+   (PLAN §3)? If filtered, does it keep per-line `rep1`/`rep2`, and are dropped starts kept somewhere as
    known negatives or as "not evaluated"?
 2. **Replicate support semantics.** `rep{1,2}_called` = the replicate's clean table calls the site, i.e. passed the
    full cascade in that replicate. Is that the intended bar, or is read support (TIS counts above background) wanted?

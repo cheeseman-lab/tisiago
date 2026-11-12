@@ -1,159 +1,133 @@
-# P6 project plan — from RNA-seq of an unprofiled cell line to a sequence model of alternative initiation
+# tisiago — plan and status
 
-**Date:** 2026-11-12 · **Status:** proposed · Single entry point for the next phase of work.
+**Updated:** 2026-11-12 · Single entry point for what we are doing and why.
 
-Method detail lives in [`superpowers/specs/2026-11-11-p6-rescope-native-caller-design.md`](superpowers/specs/2026-11-11-p6-rescope-native-caller-design.md)
-(the re-scope spec) and [`P6_PRINCIPLES.md`](P6_PRINCIPLES.md) (what transfers). Results are in
-[`../FINDINGS.md`](../FINDINGS.md); live status in [`../ROADMAP.md`](../ROADMAP.md). This document holds the
-**arc and the sequencing** — what we are trying to establish, in what order, and what counts as done.
+Method detail for the next phases: [`specs/2026-11-11-rescope-native-caller.md`](specs/2026-11-11-rescope-native-caller.md)
+(the re-scope spec). What transfers to a new recipe: [`PRINCIPLES.md`](PRINCIPLES.md). Results:
+[`../FINDINGS.md`](../FINDINGS.md). Hand-off from the label pipeline: [`DATA_CONTRACT.md`](DATA_CONTRACT.md).
 
 ---
 
-## 1. Where we are
+## 1. Naming
 
-Three classes of experiment (spec §0 states this in full):
+Names say what a thing is, not when it was tried. Retired names (P1-P6, Option B, AR, experiments 1-3,
+steps 1-2, classes 1-3, `seq2func`, `rnacond`, `sbflux_<g>`) survive only in FINDINGS § titles and the
+`archive/pre-cleanup-2026-11-12` tag.
 
-| Class | What | Status |
+### Lines of work
+
+| Name | What | Was |
 |---|---|---|
-| **1** | Frozen embeddings -> direct start calls (FINDINGS §1-10) | **Closed. The baseline.** recall 0.306 @ 0.99 FP/transcript; AUG 0.58 vs near-cognate 0.07 |
-| **2** | Fine-tuned AlphaGenome -> tracks, per condition, DNA only (§11-12) | **Abandoned.** Starts 0.035-0.099 vs the baseline's 0.306; no cross-line transfer |
-| **3** | Fine-tuned AlphaGenome -> tracks, one shared RNA-conditioned model, leave-one-cell-line-out (§13-17) | **Live. Build from here.** TIS codon 70-106% of replicate by line |
+| **tracks** | Fine-tuned AlphaGenome, RNA-conditioned, predicting harringtonine (TIS) and CHX P-site tracks; one line held out per fold | P6, seq2func, class 3 |
+| **calling** | Tracks -> start calls: the caller-free score (`calling.track_score`), the native caller (Phase 3) | Ribo-TISH on synthetic BAMs, `track_tis_eval` |
+| **truth** | Reproducible starts from the label pipeline, tagged by codon class, region, pause | (new) |
+| **baseline** | Frozen AlphaGenome embeddings + logistic head, one label per codon — the comparator | class 1, P1/P2/Option B |
+| **floor** | One-hot codon / ±20 nt Kozak + the same head — the bar every model must clear | "one-hot ±20 bp floor" |
 
-Class 3's advantage over class 1 is established on **track** metrics. Whether it wins at **calling starts** is
-unmeasured — that is the first thing Phase 1 of the spec does.
+Retired lines, recoverable from the tag: Evo2 (all arms), per-condition track models (class 2), the
+synthetic-BAM round trip, tree heads, the P4 efficiency regression.
 
----
+### Tracks runs
 
-## 2. Upstream input (owned outside this plan)
+Four axes, always in this order: `tracks.<stage>.<chx>.<cond>.ho-<line>.s<seed>`.
 
-The label pipeline is being finalised separately and is **not a deliverable here**. In outline, so that
-downstream work can be written against it:
-
-- Ribo-TISH is the caller, over the matched short-read mRNA it uses.
-- Long-read data plus the RNA and the replicates refine the call set.
-- Long-read and CAGE data (in-house where it exists, ENCODE otherwise) then filter down to a set of
-  **strong starts, mostly replicated between cell lines**.
-- That filtered set is the hand-off to **swissisoform**, which characterises the protein products of these
-  transcripts and maps them to mutation and disease.
-
-**Consequence for us:** the truth set in spec Phase 0 is this filtered, cross-line-replicated set, not raw
-Ribo-TISH output. That is a stronger truth set than the one FINDINGS §11-17 used, and it changes the
-denominators. Phase 0 starts when it lands; nothing before then depends on it.
-
----
-
-## 3. Objective ladder
-
-Ordered. Each rung needs the one before it to hold.
-
-### O1 — primary: decent starts in a cell line we never trained on
-
-Given only RNA-seq from a held-out line, produce a start set comparable to what the label pipeline produces
-for that line.
-
-- **Needs:** spec Phases 0-3 (data contract, re-baseline, re-scoped metrics, native caller with a learned
-  threshold), plus the conditioning work in [#1](https://github.com/cheeseman-lab/tisiago/issues/1).
-- **Done when:** M1 (precision/recall against reproducible starts at a fixed per-transcript call budget, on a
-  held-out line, split AUG vs near-cognate and in-CDS vs outside) beats the class-1 baseline, with the
-  threshold fitted only on training lines.
-- **This is the whole preliminary objective.** Everything below waits on it.
-
-### O2 — transfer to a further cell line
-
-The same model on a line outside the current four. Tests whether O1 generalised or fitted our four backgrounds.
-
-- **Needs:** O1, plus RNA-seq for the new line. No new Ribo-seq.
-- **Done when:** M1 on the new line is within noise of the held-out-line result in O1.
-
-### O3 — variant effects (cheap; can start early)
-
-A mutation that introduces a stop codon upstream should suppress use of a downstream start. Predicted
-direction should match.
-
-- **Needs:** nothing new. This is in-silico mutagenesis on an existing model.
-- **Worth doing on the class-1 baseline too**, as the user noted — it gives a comparator. Note the cost
-  asymmetry: the fine-tuned track model yields gradients directly, whereas the frozen pipeline needs
-  embedding re-extraction per variant, so keep the frozen arm to a small curated variant set.
-- **Start with variants of known effect** — Kozak-context changes, uORF start gain/loss, 5'UTR variants
-  creating a uAUG — before anything novel. If predicted direction does not match there, attribution on this
-  model cannot be trusted.
-- **Done when:** predicted direction matches on a curated known-effect set, reported per variant class.
-
-### O4 — what drives differential start use between lines
-
-Attribution and ablation on the conditioning pathway: which sequence features, and which trans-regulatory
-context, explain a start being used in one line and not another.
-
-- **Needs:** O1 and O3's sanity check. Also M2 from the spec (does the model get the *direction* of
-  reproducible between-condition changes right?) — without M2, attribution explains predictions that may not
-  track reality.
-- **Cleanest substrate:** the RPE1 async/quiescent/senescent triplet — three cell states, one genotype.
-
-### O5 — novel starts in an unprofiled line, validated off-sequencing
-
-Predict starts in a line with no initiation profiling, then confirm some experimentally.
-
-- **Needs:** O1, O2.
-- **Validation signal:** N-terminal proteomics, which establishes a start as real because it produced a
-  protein with that N-terminus — independent of Ribo-seq and of any caller. This is the discriminator
-  FINDINGS §17 needs, since most in-CDS in-frame near-cognate "starts" there are elongation pauses. Public
-  HeLa/K562 N-terminomics suffices to start; other cell lines extend it.
-- **Done when:** a predicted-novel set in an unprofiled line has proteomic support above a matched control
-  set.
-
-### O6 — synthesis: how alternative initiation is encoded in sequence
-
-The claim the ladder is built to support, in two parts:
-
-1. **Sequence:** what in the genomic sequence determines alternative and non-canonical initiation, from
-   ablation of a model strong enough to interrogate.
-2. **RNA biology:** how which transcripts exist alters the ratio of canonical to alternative to
-   non-canonical starts — i.e. the transcriptional layer feeding the initiation layer.
-
-- **Needs:** O1-O5.
-- Likely beyond the current scope and worth treating as the publication frame rather than a work item.
-
----
-
-## 4. Scope for the next month
-
-**In:** spec Phases 0-3 (O1), the conditioning experiments in #1, and O3's known-effect variant check, which
-is cheap and de-risks O4 early.
-
-**Out:** O2, O4, O5, O6. O5 needs a proteomics search pipeline that does not exist yet; O4 needs M2 to be
-measurable, which Phase 0 item 5 checks.
-
-**Critical path:** label pipeline lands -> Phase 0 -> Phase 1 (including the unmeasured class-3 start number)
--> Phase 2 metrics -> Phase 3 caller. The conditioning work runs in parallel from the start, since it needs
-no new data.
-
----
-
-## 5. Open decisions
-
-| # | Decision | Why it matters |
+| Axis | Values | Was |
 |---|---|---|
-| 1 | Does the clean-data class-1 baseline stay `ag7`, or drop to AG-only? | Dropping Evo2 weakens the comparator 0.300 -> 0.225, so class 3 looks better without improving. Evo2 appears in **zero** files under `src/tisiago/seq2func/` — dropping it simplifies only the baseline, not class 3. Changes spec Phase 1. |
-| 2 | Which calibration target do the clean-cascade cutoffs have to respect? | Raised in [ribotish#14](https://github.com/cheeseman-lab/ribotish/issues/14): the cutoffs are global constants over libraries that differ in depth and periodicity. Needs the assay and the quantity named. |
-| 3 | AlphaGenome 2 as a backbone | Conditional on weights shipping; a Phase 4 controlled swap, never a drop-in (AG2 emits no ribosome-profiling track). See #1. |
+| stage | `genomic` — fine-tuned on genomic windows, head in genome space · `spliced` — warm-started from `genomic`, fine-tuned on the spliced mRNA, head in transcript space | step 1 / `rnacond_fc2d` · step 2 / `txtrain` |
+| chx | `free` — CHX per position · `flux` — predicted initiation propagated in frame, stopped at stop codons | (default) · `chx_flux` replace |
+| cond | `pos` — positional RNA into the head · `film` — global regulator vector, FiLM, learned · `corgi` — Corgi's pretrained pathway, frozen · suffix `@head` / `@trunk` | only `pos` exists |
+| holdout | `K562`, `HeLa`, `U2OS`, `RPE1` (RPE1 async / quiescent / senescent are one group) | `rnacond:<G>`, `<g>` |
 
-**Resolved 2026-11-12:** whether `P6_PRINCIPLES.md` §2's "RNA into the head, not the backbone" was tested.
-It was **not**. The cited negatives (CPM, transcript-relative, one-sided/antisense, 5'-end sharpness) are all
-head-side *feature* variants, and the fast loop runs on a frozen embedding cache, so backbone conditioning is
-not expressible in it (`autoresearch/p6fast/ledger.md`; principles §6 says as much). Trunk conditioning is new
-ground, not a repeat.
+**Reference recipe:** `tracks.spliced.flux.pos` — `configs/tracks/genomic_fc2d.args` for stage 1,
+`configs/tracks/spliced_flux_pos.yaml` for stage 2. Phase 1 re-baselines exactly this on the clean data.
+
+Baseline arms: `baseline.ag` (AlphaGenome 16 kb + 131 kb + Kozak ±20), `floor.kozak20`, `floor.codon12`.
 
 ---
 
-## 6. Pitfalls carried forward
+## 2. Where we are
 
-- **Do not climb percent-of-replicate or synthetic-BAM Jaccard.** The first inflates when replicates disagree
-  (RPE1 reads 179%); the second measures a lossy adapter whose own ceiling is 0.85-0.89 with no model involved.
+| Line | Status | Headline |
+|---|---|---|
+| baseline | Closed; rerun once on clean labels as the comparator | AG + Evo2 recall 0.306 @ 0.99 FP/transcript, clean protocol (§10). AG-only: 0.225 @ ≤1 FP/transcript (§7), single seed with a test-chosen threshold — no clean-protocol AG-only number exists; Phase 1 produces it |
+| tracks | Live | `tracks.spliced.flux.pos`: TIS codon 70-106% of replicate by line; uORF framing doubled (§15-16) |
+| calling | Only through Ribo-TISH on synthetic BAMs, now retired | Jaccard 0.39 K562 (deployed cutoff, §16); caller-free score never run on tracks |
+| truth | Lands 2026-11-13 | — |
+
+Tracks beats per-condition models on track metrics. **Whether it beats the baseline at calling starts is
+unmeasured** — Phase 1 measures it.
+
+Not adopted after §16: TIS loss reweighting, codon-aware dwell, harringtonine leak (§17).
+
+---
+
+## 3. Upstream input (owned outside this plan)
+
+- Ribo-TISH (fork) calls starts over the matched short-read mRNA.
+- Long-read data, RNA and the replicates refine the call set.
+- Long-read and CAGE data filter to **strong starts, mostly replicated between cell lines**.
+- That set is also the hand-off to swissisoform (protein products, mutation and disease).
+
+The truth set in Phase 0 is that filtered, cross-line-replicated set, not raw Ribo-TISH output. It changes
+the denominators of every start metric in FINDINGS §11-17.
+
+---
+
+## 4. Objectives
+
+Ordered; each rung needs the one before it.
+
+- **O1 — decent starts in a line never trained on.** Given only RNA-seq, a start set comparable to the
+  label pipeline's for that line. *Done when* M1 on a held-out line beats `baseline.ag` with the threshold
+  fit only on training lines. **The preliminary objective.**
+- **O2 — transfer to a further line.** RNA-seq only. *Done when* M1 there is within noise of O1.
+- **O3 — variant effects (cheap, start early).** An upstream stop should suppress a downstream start.
+  Known-effect variants first (Kozak, uORF start gain/loss, uAUG-creating 5'UTR variants); a small curated
+  set on the baseline too, since it needs re-extraction per variant.
+- **O4 — what drives differential start use between lines.** Attribution on the conditioning pathway; needs
+  O1, O3's sanity check and M2. Cleanest substrate: the RPE1 triplet.
+- **O5 — novel starts in an unprofiled line, validated by N-terminal proteomics.** Needs O1, O2 and a search
+  pipeline.
+- **O6 — synthesis.** How alternative initiation is sequence-encoded, and how the transcript layer shifts the
+  canonical : alternative : non-canonical ratio. The publication frame, not a work item.
+
+---
+
+## 5. Phases (spec §10)
+
+| Phase | What | Cost |
+|---|---|---|
+| 0 | Data contract, truth set, P-site convention assertion, differential-start counts | small, CPU |
+| 1 | Re-baseline `tracks.spliced.flux.pos` unchanged on clean data; run `calling.track_score` on it (never run); rerun `baseline.ag` and the floors on clean labels | 4 folds x 3 seeds, GPU |
+| 2 | M1 / M2 / M3 into the scorecard | small, CPU |
+| 3 | Native caller + learned threshold; three-way decomposition (Ribo-TISH on real BAMs / native on real tracks / native on predicted) | small, fast loop |
+| 4 | Architecture work driven by what M1/M2 say limits them; conditioning (`film`, `corgi`, `@trunk`) per issue #1 | the bulk |
+| 5 | Proteomics validation | small, needs a search pipeline |
+| 6 | Attribution and in-silico mutagenesis, known-effect variants first | moderate |
+
+**Next month:** Phases 0-3, the conditioning experiments (#1, no new data needed), O3's known-effect check.
+
+**Critical path:** truth lands -> Phase 0 -> Phase 1 -> Phase 2 -> Phase 3.
+
+---
+
+## 6. Decisions
+
+| # | Decision | Status |
+|---|---|---|
+| 1 | Baseline: AG + Evo2 (`ag7`) or AG-only | **Resolved 2026-11-12: AG-only.** The comparator drops from ~0.30 to ~0.225 recall (§7, oracle threshold); say so wherever it is quoted, so `tracks` is not credited for a weaker bar. |
+| 2 | Calibration target for the clean-cascade cutoffs ([ribotish#14](https://github.com/cheeseman-lab/ribotish/issues/14)) | Open |
+| 3 | AlphaGenome 2 as a backbone | Conditional on weights; a Phase 4 controlled swap (AG2 has no Ribo-seq output) |
+| 4 | Was "RNA into the head, not the backbone" tested? | **Resolved 2026-11-12: no** — only head-side feature variants were; `@trunk` is new ground |
+
+---
+
+## 7. Pitfalls carried forward
+
+- **Do not climb percent-of-replicate or synthetic-BAM Jaccard.** The first inflates when replicates
+  disagree (RPE1 reads 179%); the second has a no-model ceiling of 0.85-0.89.
 - **Separate initiation from pausing.** 83% of reproducible later-exon near-cognate sites are in-frame inside
-  the CDS, AGG 2.5x enriched — elongation pauses, corroborated independently by the inhibitor-free TISCA2 data
-  in Ichihara et al. 2026. Never count them as plain positives.
-- **Peak sharpness is a per-library property** and is not predictable from RNA. A held-out line gets the
-  training lines' average; compare against a replicate at equal depth.
-- **Three training lines.** Every published cell-state-conditioning model trains across many cell types; we
-  have 4 genetic backgrounds. Prefer borrowing a pretrained conditioning pathway over fitting one here (#1).
-- **Score test once**, after validation decisions, behind the `--i-am-final` gate.
+  the CDS, AGG 2.5x enriched (§17), corroborated by inhibitor-free TISCA2 (Ichihara et al. 2026).
+- **Peak sharpness is a per-library property**, not predictable from RNA.
+- **Three training lines.** Prefer a pretrained conditioning pathway over fitting one here (#1).
+- **Score test once**, after validation decisions, behind `--i-am-final`.

@@ -1,151 +1,81 @@
 # Work plan — AlphaGenome-only cleanup and readiness for the clean data
 
-**Date:** 2026-11-12 · **Status:** proposed, awaiting sign-off on §1 (names) before any file moves.
-
-Goal: by the time the regenerated tracks and the final start set land, the repo holds one AlphaGenome-only
-baseline, one track model, one evaluation layer, and the Phase 0/2 code from the
-[re-scope spec](superpowers/specs/2026-11-11-p6-rescope-native-caller-design.md), with every name saying what
-the thing is. Nothing in this plan submits a Slurm job.
-
-Decisions already taken (2026-11-12): AlphaGenome only, so open decision #1 in
-[`P6_PROJECT_PLAN.md`](P6_PROJECT_PLAN.md) resolves to an **AG-only baseline** (recall 0.225, FINDINGS §7), stated
-as such wherever the baseline is quoted. Removed code is deleted, not archived in-tree; the pre-cleanup state is
-kept as the tag `archive/pre-cleanup-2026-11-12`. On-disk data is inventoried only.
+**Date:** 2026-11-12 · **Status:** cleanup done on branch `cleanup/alphagenome-only`; clean-data work starts
+2026-11-13. Names are defined in [`PLAN.md`](PLAN.md) §1. The pre-cleanup tree is tag
+`archive/pre-cleanup-2026-11-12`.
 
 ---
 
-## 1. Names
+## 1. What changed
 
-The current names come from the order things were tried (P1-P6, Option B, AR, experiments 1-3, steps 1-2,
-classes 1-3, `rnacond`, `sbflux_<g>`). They are retired in code, configs, run IDs and docs. FINDINGS keeps its
-§ numbers because issues and specs cite them; a header table maps sections to the names below.
+| Step | Result |
+|---|---|
+| Evo2 removed | Extraction, transcript-input (TXP) and projection code, configs, env lock, scripts. Baseline evaluator compares `baseline.ag` against `floor.kozak20` / `floor.codon12`. |
+| Retired baseline code removed | Tree heads, P4 efficiency regression, curated-vs-dense caller, PoC eval/resolution, head comparison, report, Option B handoff. |
+| Synthetic-BAM path removed | `roundtrip`, `predicted_calls`, trial scorer, overfit gate. `synthetic_bam` kept as a test helper for P-site tests. |
+| Packages renamed | `seq2func` -> `tracks` (`train` -> `train_genomic`, `txtrain` -> `train_spliced`, `tracks` -> `track_io`); `calling/` (`track_score`, `ribotish`); `baseline/` (every frozen-embedding module; `representation_eval` -> `evaluate`). Scripts `run_tracks_*`, `run_calling_*`, `run_baseline_*`. Default data root `data/p6` -> `data/tracks`. |
+| Reference recipe in configs | `configs/tracks/genomic_fc2d.args` (stage 1, from the §15 run.json) and `configs/tracks/spliced_flux_pos.yaml` (stage 2, the §16 config; resolved config identical apart from name and cache path). `train_spliced` now defaults to it (was the §15 head `p3r02_onehot41_l3`). |
+| Tools moved out of `autoresearch/` | `baseline.onehot` (floor features), `tracks.cache_seq` (mRNA sequence into transcript caches, needed by the ±20 nt one-hot branch). |
+| `autoresearch/`, `.superpowers/`, historical specs/plans, ROADMAP, ARCHITECTURE deleted | Recoverable from the tag. Re-scope spec kept at `specs/2026-11-11-rescope-native-caller.md`. |
+| New: Phase 0/2 code | `truth/` (schema, release-table loader, P-site check, differential starts), `evaluation/start_metrics` (M1, M2), `DATA_CONTRACT.md`. 65 tests, synthetic data only. |
 
-### Lines of work
+Tests: CPU suite (`tisiago` env) and JAX suite (`agft` env, on a CPU node) green; the JAX suite matched the
+pre-cleanup tag before the rename (the only errors are pysam imports missing in `agft`, identical in both).
 
-| New name | Was | What |
+## 2. Deliberately not done (debt)
+
+- **Per-condition arms** (`shared`, `condition:<C>`) still live in `train_genomic`, `tracks.evaluate`,
+  `predict_tracks`, `periodicity`, and `model` keeps the explored head kinds (`mlp` ... `rnacond_fc2`). They are
+  woven through ~40 tests and the live code paths; remove after Phase 1 has re-trained the reference recipe on GPU,
+  so numeric identity can be checked rather than assumed.
+- **Registered head names** inside checkpoints stay `p6_rnacond_<line>`: renaming them breaks loading of existing
+  checkpoints. Internal identifier only.
+- **CLI flags** keep `--arm rnacond:<line>`; the run-ID axes (`stage`, `chx`, `cond`, `holdout`) are encoded in
+  `--out` names for now.
+- `txcache` defaults still name an old run (`ar_rnacond_k562_v2`); always pass `--name` / `--checkpoint`.
+
+## 3. Tomorrow (Phase 0, then Phase 1)
+
+1. Load the release into `truth.load_truth`; write `summarize_truth` counts per line x codon class x region.
+2. P-site check (`truth.psite_check`) on one release bigWig per strand vs the model's track convention. The fork
+   corrects the 0.2.7 minus-strand +1 (`make_tracks.psite_coord`); expect a 1-nt minus shift until reconciled.
+3. Differential-start counts per condition pair (`truth.count_differential`) — decides whether M2 is measurable.
+4. Settle the open hand-off questions below with the label-pipeline owner.
+5. Phase 1: rebuild targets/windows on the clean tracks, re-run `tracks.spliced.flux.pos` (4 folds x 3 seeds),
+   `calling.track_score` on it, and `baseline.ag` + floors on the clean labels.
+
+### Open hand-off questions (DATA_CONTRACT §6)
+
+1. Truth = raw `starts` with replicate flags, or the cross-line-filtered strong set (and does it keep rep1/rep2)?
+2. Is `rep{1,2}_called` (full cascade per replicate) the reproducibility bar?
+3. No `chx_pause_*` in v50: pause flag stays NA until a source is chosen.
+4. In-CDS by the row transcript's CDS, the gene's canonical CDS (`RecatTISType`), or MANE (§17)?
+5. Release P-site bigWigs are CPM; counts via `total_psites` in `<C>.tracks.json`.
+6. Release RNA is pooled full-read coverage (CPM); the model uses per-library 5'-end counts.
+7. Minus-strand convention (item 2 above).
+8. Chromosome naming and GENCODE version must match the transcript cache.
+9. iPSC / CM have no replicates — excluded from truth?
+10. M2 shares: derived here from replicate TIS tracks or supplied; per gene or per transcript?
+
+## 4. Disk inventory (nothing deleted)
+
+| Path | Size | Status |
 |---|---|---|
-| **baseline** | class 1, P1/P2/Option B, "frozen embeddings" | Frozen AlphaGenome embeddings + logistic head, one label per codon. The comparator. |
-| **floor** | "one-hot ±20 bp floor" | One-hot codon / Kozak ±20 nt features + logistic head. The sequence-only floor every model is judged against. |
-| **tracks** | P6, seq2func, class 3 | Fine-tuned AlphaGenome, RNA-conditioned, predicting harringtonine (TIS) and CHX tracks. |
-| **calling** | Ribo-TISH on synthetic BAMs, `track_tis_eval` | Turning tracks into start calls: the caller-free score, the native caller (Phase 3), Ribo-TISH on real BAMs as reference. |
-| **truth** | (new) | The reproducible-start truth set from the label pipeline, with codon / region / pause tags (Phase 0). |
+| `data/p6/runs` | 715G | pre-cleanup checkpoints; keep `ar_rnacond_*_fc2d_l2w300` (stage-1 warm starts of §15-16); rest superseded |
+| `data/p6/txtrain` | 303G | §15-17 stage-2 runs; keep `sbflux_*` (reference) |
+| `data/p6/txcache` | 224G | `fc2d_*` caches for the reference; rebuilt on clean data |
+| `data/p6/roundtrip*` | 33G | synthetic-BAM round trip — superseded |
+| `data/p6/fastloop` | 13G | fast-loop runs — superseded |
+| `data/scan_parts_allsplits` | 1.8T | dense scan shards, AG + Evo2 keys — Evo2 keys superseded |
+| `data/scan_store_allsplits` | 361G | dense scan store — superseded by Regime A stores |
+| `data/dense_exp_store` | 292G | baseline experiment store (AG + Evo2 keys) — Evo2 arrays superseded |
+| `data/dense_txp_parts`, `data/txp_parts`, `data/*txp_representation` | 108G | Evo2 TXP — superseded |
+| `data/scan_parts` | 50G | earlier scan shards — superseded |
+| `data/store` | 25G | curated store (AG + Evo2) — Evo2 arrays superseded |
+| `data/parts` | 15G | curated extraction shards — superseded |
+| `data/preds_*.npz`, `data/head_comparison.tsv` | 230M | tree-head comparison — superseded |
+| `.venv/evo2-next` | 6.2G | Evo2 env — superseded |
+| `$TISIAGO_DENSE_STORE` (`.../tisiago_store/dense_ag7`) | not sized | SSD baseline store; AG keys reusable until clean labels change rows |
 
-Removed lines: Evo2 (all), class 2 (per-condition `shared` / `condition:<C>` arms), P4 efficiency regression,
-tree heads (XGBoost/LightGBM/RF, which tied logistic in §9), the synthetic-BAM round trip.
-
-### Inside `tracks`: stages, outputs, conditioning
-
-A tracks run is named by four axes, always in this order:
-
-| Axis | Values | Was |
-|---|---|---|
-| **stage** | `genomic` — fine-tuned on genomic windows, head in genome space · `spliced` — warm-started from `genomic`, fine-tuned on the spliced mRNA, head in transcript space | step 1 / `rnacond` · step 2 / `txtrain` |
-| **chx** | `free` — CHX predicted per position · `flux` — CHX = predicted initiation propagated in frame, stopped at stop codons | (default) · `chx_flux` replace mode |
-| **cond** | `pos` — positional RNA into the head (today) · `film` — global regulator vector, FiLM, learned · `corgi` — Corgi's pretrained pathway frozen (issue #1) · suffix `@head` / `@trunk` for placement | (only `pos` exists) |
-| **holdout** | `K562` · `HeLa` · `U2OS` · `RPE1` (RPE1 async/quiescent/senescent are one group) | `rnacond:<G>`, `<g>` |
-
-Run ID: `tracks.<stage>.<chx>.<cond>.ho-<line>.s<seed>`, e.g. `tracks.spliced.flux.pos.ho-K562.s0` (was
-`sbflux_k562_s0`). The **reference recipe** — what Phase 1 re-baselines unchanged — is
-`tracks.spliced.flux.pos`.
-
-The fast loop keeps its name (`fastloop`): it is a tool for screening head-side changes on a frozen embedding
-cache, not a line of work. Its configs move under `configs/tracks/fastloop/`.
-
-### Baseline arms
-
-`baseline.ag16k` (AlphaGenome 16 kb decoder 1 bp), `baseline.ag131k`, `floor.codon12`, `floor.kozak20`. The
-headline comparator is `baseline.ag16k` unless §7's 131k number says otherwise — to check when re-baselining.
-
-### Package layout after the move
-
-```
-src/tisiago/
-  baseline/    extract, tiling, sequence, extraction_io, store, shard_io, dataset_config, manifest,
-               enumerate_codons, backend_contract, caller, head (was dense_caller, logistic only), linear_head
-  tracks/      (was seq2func) samples, psite, tracks, targets, data, augment, masking, rna_features,
-               expression, model, loss, checkpoint, windows, train (genomic stage), txcache, fastloop,
-               txtrain -> spliced, predict_tracks, orf_features, tx_features
-  calling/     track_score (was track_tis_eval), native caller (Phase 3), ribotish (parsing real calls)
-  truth/       schema + loader + tagging (Phase 0)
-  evaluation/  scorecard (M3 guardrails), start_metrics (M1, M2), bootstrap + near-neighbour helpers
-```
-
----
-
-## 2. Cleanup steps, in order
-
-Each step ends with `python -m pytest` green and `ruff check` clean; nothing moves on until it is.
-
-1. **Tag and branch.** Tag `archive/pre-cleanup-2026-11-12` at `b7996fb`, push the tag, branch
-   `cleanup/alphagenome-only` from `p6-0-tracks`.
-2. **Remove Evo2.** `extract_transcript`, `transcript_inference`, `transcript_projection`, `projected_score`,
-   `representation_eval` (after moving `_bootstrap` and `near_neighbor_pairs` into `evaluation/`),
-   `store_overlap`, `compare_extractions`; `configs/tis_evo2_*`, `configs/dataset_dense_ag7*` (replaced by an
-   AG-only dataset config); `requirements-evo2.lock`, `scripts/run_tis_evo2_*`, `_probe_evo2_layers.py`,
-   `run_tis_extract_transcript.sh`, `run_tis_txp_overlap_contract.sh`, `run_tis_representation_eval.sh`,
-   `run_tis_dense_representation_eval.sh`; their tests; Evo2 keys in `.env.example`. Gruyerenome's Evo2 support
-   is untouched — it lives in that repo.
-3. **Remove the other retired baseline code.** `head_xgb` (and the `--head` switch in `dense_caller`),
-   `efficiency_head`, `eval.py` + `resolution.py` (PoC, superseded by `caller`), `scan_eval` / `scan_score` /
-   `compare_heads` unless the AG-only re-baseline needs dense scoring (check `run_tis_scan.sh` usage first),
-   `saerens_control.py`, `build_report.py`, `kozak_onehot_scan.py` if superseded by `floor`.
-4. **Remove class 2 and the synthetic-BAM path.** The `shared` and `condition:<C>` arms in `train` /
-   `evaluate` / `predict_tracks` / `periodicity`; `synthetic_bam`, `roundtrip`, `predicted_calls`,
-   `trial_score`, `run_p6_trial.sh`, `run_p6_roundtrip.sh`, `run_p6_predicted_calls.sh`. `overfit.py` is
-   imported by the live trainer only for constants (`HEAD_CHOICES`, `CHX_KINDS`, …) and `finite_or_none`: move
-   those into `model` / `checkpoint`, then delete the overfit loop. `periodicity` keeps only the functions
-   `scorecard` uses. Check whether the RNA-conditioned genomic stage still needs `evaluate.py`'s per-condition
-   code paths before cutting.
-5. **Rename.** `seq2func` -> `tracks`, then the moves in §1's layout, then CLI flags and run IDs
-   (`--arm rnacond:K562` -> `--holdout K562`; `--stage`, `--chx`, `--cond`). Scripts `run_p6_*.sh` ->
-   `run_tracks_*.sh`, `run_tis_*.sh` -> `run_baseline_*.sh`. Old checkpoints carry head names like
-   `p6_rnacond_hela` in `run.json`; they are not loaded again (Phase 1 retrains), so no compatibility shim —
-   the loader rejects them with a message naming the tag.
-6. **Move the reference recipe into configs.** `autoresearch/p6flux/configs/g7_replace_fixed_grad_k1.yaml` ->
-   `configs/tracks/spliced_flux_pos.yaml`; the genomic-stage arguments that produced the warm start written out
-   as `configs/tracks/genomic_free_pos.yaml` (from the run.json of the §15 checkpoints). After this, the
-   reference recipe is reproducible from `configs/` alone.
-7. **Remove `autoresearch/`.** The results it holds are already in FINDINGS §6-17; ledgers stay recoverable
-   from the tag. Before deleting, grep FINDINGS / PRINCIPLES / specs for `autoresearch/` paths and replace each
-   with the tag-qualified path.
-8. **Docs.** One entry point per question:
-   - `README.md` — what the repo does, the five lines, how to run each. Absorbs `ARCHITECTURE.md`.
-   - `docs/P6_PROJECT_PLAN.md` -> `docs/PLAN.md`, absorbs `ROADMAP.md`'s live status; ROADMAP deleted.
-   - `docs/P6_PRINCIPLES.md` -> `docs/PRINCIPLES.md`; `INFERENCE_AND_EVALUATION.md` stays, AG-only.
-   - `FINDINGS.md` — header table mapping § to the new names; Evo2 numbers stay as history, marked so.
-   - Delete `HANDOFF_OPTION_B.md`, `docs/tisiago_report.html`, `.superpowers/sdd/briefs/`, and the
-     superpowers specs/plans except the re-scope spec (moved to `docs/specs/`).
-   - `CLAUDE.md` rewritten against the new layout.
-9. **Disk inventory** (no deletion): sizes of `data/`, stores, checkpoints, caches, `logs/`, `.venv/`, with
-   each item marked keep / superseded, for review.
-
----
-
-## 3. Readiness for the clean data (built today, run tomorrow)
-
-Written against synthetic fixtures, tested, not run on real data.
-
-1. **`truth/`** — schema and loader for the reproducible-start set: one row per start with transcript,
-   genomic and transcript coordinate, codon, `codon_class` (AUG / AAG / AGG / other near-cognate / non-cognate),
-   `region` (5'UTR / annotated / in-CDS in-frame / in-CDS out-of-frame / other), `pause` flag, per-replicate
-   support, per-line presence. Region and codon tags computed here from the annotation, not trusted from the
-   input. Validation reports counts per class per line (Phase 0 "done when").
-2. **P-site convention check.** One function that reads a track at a set of known annotated AUG starts on
-   each strand and reports the offset of the peak; a test that fails if model tracks and release bigWigs differ
-   on the minus strand. Run tomorrow on the first release bigWig — this is Phase 0 item 4.
-3. **`evaluation/start_metrics`** — M1 (precision / recall against truth at a fixed calls-per-transcript
-   budget, split by `codon_class` and in-CDS vs outside) and M2 (direction accuracy on reproducibly
-   differential starts, with the count of such starts reported first). M3 stays in `scorecard`.
-4. **Differential-start counter** — per condition pair, the number of starts whose share reproducibly differs
-   (Phase 0 item 5).
-5. **Data contract** — `docs/DATA_CONTRACT.md`: the files the label pipeline must hand over (per-replicate and
-   pooled tracks, matched RNA, truth set, splits), with the fields above. Unknowns about the hand-off format
-   listed explicitly, to settle when it lands.
-
----
-
-## 4. Tomorrow
-
-Data lands -> load into `truth/`, record counts -> P-site check on the first bigWig -> differential-start
-counts -> Phase 0 done. Then Phase 1: re-baseline `baseline.ag16k` and `tracks.spliced.flux.pos` on clean
-labels, and score `calling.track_score` on the tracks model for the first time.
+Clean labels change the manifest, so every store and cache above is rebuilt in Phase 1; the inventory is for a
+deletion decision, not a dependency.

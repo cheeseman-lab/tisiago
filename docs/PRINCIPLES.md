@@ -1,9 +1,10 @@
-# P6 principles — fine-tuning AlphaGenome for Ribo-seq tracks and training the head
+# Principles — fine-tuning AlphaGenome for Ribo-seq tracks and training the head
 
-What P6 learned (2026-10-05 to 10-27) about turning a cell line's RNA-seq into base-resolution harringtonine (TIS) and
+What the `tracks` line learned (2026-10-05 to 10-28) about turning a cell line's RNA-seq into base-resolution harringtonine (TIS) and
 cycloheximide (CHX) Ribo-seq. The principles are about the **track model**. Start calling (Ribo-TISH today) is a
-separate layer on top, and the last section says what to redo when that layer changes. Evidence: FINDINGS §11-16,
-`autoresearch/p6fast/ledger.md` (phases 1-3), `.superpowers/sdd/2026-10-2*-p6-*/`.
+separate layer on top (`calling`), and §7 says what to redo when that layer changes. Evidence: FINDINGS §11-17,
+the fast-loop ledger and SDD notes (`autoresearch/p6fast/ledger.md`, `.superpowers/sdd/2026-10-2*-p6-*/` in tag
+`archive/pre-cleanup-2026-11-12`).
 
 ## 1. Problem framing
 
@@ -85,22 +86,25 @@ separate layer on top, and the last section says what to redo when that layer ch
 
 The track model is caller-independent; the numbers above in percent of replicate do not depend on Ribo-TISH. What does:
 
-- **Run the caller identically on predicted and real tracks** (same synthetic-BAM pipeline, depth-matched), and report
-  the real-vs-real (replicate) reference with the same caller. Calls are a property of model + caller together.
-- **Choose the call cutoff on validation** (real call count or a target precision) and apply it once on test. For a
-  truly new line the cutoff must come from the training lines' validation calls (the held-out line has no Ribo-seq).
+- **Run the caller identically on predicted and real tracks** (depth-matched), and report the real-vs-real
+  (replicate) reference with the same caller. Calls are a property of model + caller together. The synthetic-BAM
+  route into Ribo-TISH is retired: it is lossy in principle (2-bp reads, no read lengths; no-model ceiling Jaccard
+  0.85-0.89). The native caller reads tracks directly, gated on reproducing canonical calls from real tracks (spec §5).
+- **The cutoff is a model parameter fit on the training lines** (a learned threshold), never on the held-out line's
+  Ribo-seq: a Ribo-TISH TIS-p cutoff does not transfer between lines (§16).
   Structured CHX changes how often a frame test passes (flux CHX made Ribo-TISH over-call 1.2-2.6x); rank by the
   initiation evidence (TIS p) rather than the combined TIS+frame score.
 - **Report per start class** (ATG / near-cognate; annotated / 5'UTR / internal) with precision next to recall.
-- **When the caller changes:** rerun only `predicted_calls` (and the replicate reference) on the saved exports
-  (`data/p6/txtrain/export*/`), re-choose the cutoff on validation, score test once. Retrain the model only if a
+- **When the caller changes:** rerun only the caller (and the replicate reference) on the saved exports
+  (`data/p6/txtrain/export*/` for the pre-cleanup models), re-choose the cutoff on validation, score test once. Retrain the model only if a
   diagnosis shows the caller needs a track feature the model does not produce (as CHX frame on uORFs did).
-- Known caller issue: Ribo-TISH's TIS-background grouping (`zbio/ribo.py`, `if s >= ctotal*parts[ip]`) leaves the
-  last group `None` when one transcript holds >10% of TIS reads (U2OS/RPE1 chr7); fix with `while`.
+- Ribo-TISH's TIS-background grouping (`zbio/ribo.py`) fails only on the chr7 synthetic-BAM path, where one
+  transcript can hold >~15% of TIS reads; the fork's real-BAM runs are unaffected. A `while` does not fix it — the
+  fix is to deduplicate boundaries and merge empty groups (spec §9). Moot once the synthetic-BAM path is retired.
 
-## Current recipe (2026-10-27)
+## Reference recipe `tracks.spliced.flux.pos` (2026-10-27)
 
-Fold-specific genomic fine-tune `rnacond_fc2d` (local 1 kb multinomial both tracks w100, 32-nt TIS w300) -> warm-start
-`txtrain` on spliced mRNA with head `autoresearch/p6flux/configs/g7_replace_fixed_grad_k1.yaml` (conv trunks, TIS
+Fold-specific genomic fine-tune `rnacond_fc2d` (`configs/tracks/genomic_fc2d.args`) (local 1 kb multinomial both tracks w100, 32-nt TIS w300) -> warm-start
+`train_spliced` on spliced mRNA with head `configs/tracks/spliced_flux_pos.yaml` (conv trunks, TIS
 dilated context to 256, ±20 nt one-hot TIS branch, factorised outputs, 1 kb / 32 / 3-nt local multinomials, flux CHX
 with fixed stops). Open: TIS peak specificity (peaks ~0.7x as sharp as real; 5'UTR call precision ~0.25) and HeLa.

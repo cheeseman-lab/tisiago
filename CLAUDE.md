@@ -4,171 +4,89 @@ Instructions for Claude Code when working in this repository.
 
 ## Project
 
-**tisiago** v0.1.0 — the TIS-prediction orchestrator. The third repo in the
-fry-python-tools translation-initiation pipeline:
+**tisiago** — translation-initiation site (TIS) prediction from sequence and a cell line's RNA-seq.
+Live work: fine-tuned AlphaGenome predicting base-resolution harringtonine (TIS) and CHX Ribo-seq
+tracks, held out one cell line at a time, and start calls read from those tracks.
 
-```
-swissisoform → manifest.parquet → tisiago (input construction) → gruyerenome forward → tisiago (store + heads)
- makes labels    candidates       genomic or spliced sequence     per-candidate vectors   training/eval
-```
+**Start here:** [`docs/PLAN.md`](docs/PLAN.md) (naming, status, objectives, phases, decisions).
+Results in [`FINDINGS.md`](FINDINGS.md) (§ numbers are stable; issues and specs cite them).
+What transfers to a new recipe: [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md). Label hand-off:
+[`docs/DATA_CONTRACT.md`](docs/DATA_CONTRACT.md).
 
-- **swissisoform** makes the table: `manifest.parquet`, one row per candidate
-  translation-initiation codon (called TIS = positives + matched in-transcript
-  negatives, with labels, expression flags, region class, chromosome split).
-- **gruyerenome** owns foundation-model loading and forward passes: generic
-  `embed_positions(sequences, positions)` over AlphaGenome / Evo2. No TIS knowledge. Do not
-  duplicate a model implementation here.
-- **tisiago** (this repo) is the task orchestrator: reads the table, constructs genomic windows
-  or exon-spliced transcript inputs, asks gruyerenome for the hidden rows at each candidate,
-  assembles a row-aligned vector store, and trains/evaluates lightweight downstream heads.
+### Names (docs/PLAN.md §1)
 
-Design principle: **decouple the forward-pass input from what's persisted** — embed a generous
-genomic window or the complete mature transcript, store only the candidate states. Evo2 is
-autoregressive, but the installed Vortex intermediate states are not exactly suffix-invariant;
-never assume padding or candidate-dependent truncation leaves a state unchanged. Run
-`python -m tisiago.backend_contract` after any gruyerenome/model dependency change.
+| Line | Package | What |
+|---|---|---|
+| tracks | `tisiago.tracks` | fine-tuned, RNA-conditioned AlphaGenome -> TIS + CHX tracks |
+| calling | `tisiago.calling` | tracks -> start calls (caller-free score; native caller next) |
+| truth | `tisiago.truth` | reproducible-start truth set + tagging + P-site check |
+| evaluation | `tisiago.evaluation` | M1 / M2 start metrics |
+| baseline / floor | `tisiago.baseline` | frozen AlphaGenome + logistic head; one-hot floors |
 
-## Direction
+Tracks run IDs: `tracks.<stage>.<chx>.<cond>.ho-<line>.s<seed>` — stage `genomic|spliced`, chx
+`free|flux`, cond `pos|film|corgi` (`@head|@trunk`), holdout `K562|HeLa|U2OS|RPE1`. Reference recipe:
+`tracks.spliced.flux.pos`. Do not reintroduce P-numbers, step numbers or class numbers in code,
+configs or new docs.
 
-The goal is a **general codon → P(initiation) predictor** that also confidently rejects
-non-starts. Live status is in [`ROADMAP.md`](ROADMAP.md); results in [`FINDINGS.md`](FINDINGS.md).
+AlphaGenome only. Evo2 was removed 2026-11-12; the pre-cleanup tree is tag
+`archive/pre-cleanup-2026-11-12`.
 
-- **Frozen-embedding line — done.** AlphaGenome + Evo2 embeddings with a logistic head, trained
-  on dense in-transcript negatives at true imbalance: clean-protocol recall **0.306 @ 0.99
-  FP/transcript**, AUPRC 0.304 (5 seeds, FINDINGS §10). Richer heads tie (§9). Recall is driven
-  by AUG (0.58); near-cognate starts are mostly missed (0.07). This head is the **baseline**.
-- **P6, seq2func (current).** RNA-seq of a cell line in -> base-resolution harringtonine (initiation) and
-  CHX (elongation) Ribo-seq out, via fine-tuned AlphaGenome (alphagenome-ft) + an RNA-conditioned head, evaluated
-  leave-one-cell-line-out in percent of replicate agreement (`seq2func/scorecard.py`) and by Ribo-TISH on
-  predicted tracks (`predicted_calls.py`). Current best: backbone fine-tuned on spliced mRNA + transcript-space head
-  with a ribosome-flux CHX output (`seq2func/txtrain.py`, `fastloop` `model.chx_flux`, FINDINGS §15-16). Principles (what transfers to a new caller/recipe): `docs/P6_PRINCIPLES.md`. Results FINDINGS §11-16; status ROADMAP P6. Loss/structure search runs
-  in the fast loop (`seq2func/txcache.py` + `fastloop.py`, `autoresearch/p6fast/`); full fine-tunes via
-  `scripts/run_p6_trial.sh` (GPU lanes from `.env` `P6_TRIAL_LANES`). Test chr8/9 have been scored once per model (§14-16).
+## Evaluation rules
 
-**Evaluation rules** (`docs/INFERENCE_AND_EVALUATION.md`): group splits by transcript/chromosome;
-keep train / calibration / operating-threshold / test disjoint; pick thresholds on validation,
-never on test; judge against the one-hot ±20 bp sequence floor, not chance. Headline metrics:
-recall at a validation-selected FP/transcript budget at true imbalance (stratified AUG vs
-near-cognate), and non-cognate grounding ≈0.
+`docs/INFERENCE_AND_EVALUATION.md`. Splits: val chr7, test chr8/9; leave-one-cell-line-out with RPE1's
+three states as one group. Decide on val with 3 seeds (differences under ~1.5 points are noise); score test
+once behind `--i-am-final`. Judge against `floor.*` and `baseline.ag`, never chance. Start metrics
+against reproducible starts only, split AUG / AAG / AGG / other near-cognate and in-CDS vs outside — most
+in-CDS in-frame near-cognate sites are elongation pauses (FINDINGS §17). Do not climb percent-of-replicate
+or synthetic-BAM Jaccard (guardrails only).
 
-## Pipeline & commands
-
-Site paths, per-stage Python, and partitions come from the gitignored `.env` (keys in
-`.env.example`). Every Slurm script sources `scripts/_common.sh`, which loads `.env` and writes
-logs to `logs/`. Submit from the repo root.
-
-```bash
-# 1. table comes from swissisoform (separate repo) -> data/manifest.parquet
-# 2. extract per-candidate embeddings (GPU) + assemble store
-bash scripts/run_tis_pipeline.sh 20
-sbatch --array=0-19%2 --partition=nvidia-A100-20 scripts/run_tis_extract_transcript.sh \
-    configs/tis_evo2_8k_blk28.yaml 20          # exon-spliced Evo2 arm (evo2/TXP keys)
-# 3. evaluate heads (CPU, tisiago env)
-python -m tisiago.eval --store data/store --keys alphagenome_jax/L16k/decoder_1bp/off0.npy
-sbatch scripts/run_tis_dense_representation_eval.sh   # clean multi-seed dense protocol (§10)
-```
-
-For interactive `python -m` calls that need site paths: `set -a; source .env; set +a`.
-
-## Code Structure
+## Code structure
 
 ```
 src/tisiago/
-  # input construction + extraction (GPU)
-  tiling.py                grid-snap genomic windowing (nearby candidates share a forward pass)
-  extract.py               genome fetch + gruyerenome embed_positions -> per-shard parts
-  transcript_inference.py  pure construction of exon-spliced, transcript-oriented Evo2 requests
-  extract_transcript.py    complete exon-spliced Evo2 extraction (evo2/TXP namespace)
-  sequence.py              strand-aware DNA / transcript helpers
-  backend_contract.py      sparse/batch/indexing semantic checks against gruyerenome
-  compare_extractions.py   drift check between aligned shard artifacts across environments
-  # stores
-  extraction_io.py         memory-bounded, atomic shard output
-  store.py                 assemble curated parts into row-aligned [N, D] .npy arrays
-  shard_io.py              streaming shard reader (Regime A gather + Regime B scoring)
-  dataset_config.py        declarative dense-store build config + provenance
-  store_overlap.py         exact-identity check at sites shared by two stores
-  manifest.py              manifest validation + unique-site selection
-  enumerate_codons.py      GTF -> dense scan manifest (every codon)
-  # heads + evaluation (CPU)
-  eval.py, resolution.py   PoC: AUROC by start type; near-neighbour win-rate
-  caller.py                calibration, reliability, recall @ FP/transcript budget
-  dense_caller.py          curated vs dense-trained heads at true imbalance (--head switch)
-  head_xgb.py              XGBoost / LightGBM / RF heads
-  efficiency_head.py       Ridge regression on max_norm_HeLa (P4)
-  representation_eval.py   clean multi-seed W8k vs TXP comparison with bootstrap CIs
-  call_starts.py           discrete calls from the frozen 5-seed ensemble (held-out chr only)
-  linear_head.py           portable calibrated linear-head artifact
-  projected_score.py, transcript_projection.py   partial-logit scoring without full features
-  scan_eval.py, scan_score.py                     dense-scan scoring (Regime B streaming)
-  # P6 seq2func (fine-tune AlphaGenome on Ribo-seq tracks)
-  seq2func/
-    samples.py, psite.py, tracks.py   per-sample P-site tracks from BAMs
-    synthetic_bam.py                  synthetic BAMs for tests
-    ribotish.py, roundtrip.py         Ribo-TISH call parsing + P6.0 round trip
-    predict_tracks.py                 predicted TIS/CHX tracks -> per-replicate bigWigs (GPU)
-    predicted_calls.py                Ribo-TISH on predicted vs real tracks, same pipeline
-    qc.py                             replicate / frame QC
-    targets.py, augment.py, masking.py   window targets, augmentation, loss masks
-    loss.py, model.py                 profile loss, agft model + 6-channel heads
-    overfit.py                        single-window overfit gate (own training loop)
-    rna_features.py, expression.py    RNA input features (depth-scaled), expression masks
-    train.py, evaluate.py             full fine-tune (rnacond arms) + per-channel evaluation
-    scorecard.py                      percent-of-replicate concordance at gene/30-nt/codon/nt + frame
-    track_tis_eval.py                 predicted-track TIS score on the frozen baseline's protocol
-    txcache.py, fastloop.py           transcript-space embedding cache + fast loss/structure trainer
-    txtrain.py                        AlphaGenome fine-tuned on spliced-transcript input + transcript-space head
-scripts/        Slurm wrappers (_common.sh shared header), store builders, compare_heads, report
-configs/        gruyerenome backend configs + dense dataset configs
-autoresearch/   head-search harness (done); p6/ (TIS search tools), p6fast/ (fast loop: program, ledger, results), p6nc/ (near-cognate diagnosis)
-docs/           INFERENCE_AND_EVALUATION.md; superpowers/ specs + plans (historical record)
-logs/           Slurm output (gitignored)
-data/           manifest + stores (gitignored)
+  tracks/      samples, psite, track_io, targets, data, augment, masking, rna_features, expression,
+               windows, qc                                  data: BAMs -> P-site tracks -> windows
+               model, loss, head_kinds, checkpoint, orf_features, tx_features
+               train_genomic     stage 1: genomic windows, genome-space head (--arm rnacond:<line>)
+               txcache, cache_seq  transcript-space embedding cache (+ mRNA sequence)
+               fastloop          head/loss/structure screening on the cache (~4 min/config)
+               train_spliced     stage 2: backbone on spliced mRNA + transcript-space head
+               predict_tracks, evaluate, periodicity, scorecard, metrics   prediction + M3 guardrails
+  calling/     track_score (caller-free start score on the baseline protocol), ribotish (call parsing)
+  truth/       schema, load, psite_check, differential
+  evaluation/  start_metrics (M1, M2)
+  baseline/    manifest, enumerate_codons, sequence, tiling, extract, extraction_io, store,
+               shard_io, dataset_config, backend_contract, onehot, caller, linear_head,
+               evaluate (multi-seed baseline vs floors), call_starts, scan_score
+scripts/   run_tracks_*.sh, run_calling_*.sh, run_baseline_*.sh (Slurm; source _common.sh)
+configs/   tracks/ (reference recipe), tracks/fastloop/, tis_alphagenome_*.yaml, dataset_dense_ag.yaml
+docs/      PLAN, PRINCIPLES, INFERENCE_AND_EVALUATION, DATA_CONTRACT, WORKPLAN, specs/
 ```
+
+Known debt: `train_genomic`, `evaluate`, `predict_tracks` and `periodicity` still carry the retired
+per-condition arms (`shared`, `condition:<C>`) and `model` carries unused head kinds; remove once Phase 1
+has re-baselined the reference recipe on GPU (docs/WORKPLAN.md).
 
 ## Environments
 
-Conda + uv, per stage (paths set in `.env`):
-
-| Stage | Environment | Notes |
-|---|---|---|
-| Eval / training / assembly (CPU) | conda `tisiago` | `uv pip install -e ".[dev]"` |
-| AlphaGenome extraction (GPU) | conda `alphagenome` | tisiago + gruyerenome editable, pyfaidx |
-| Evo2 extraction (GPU) | uv `.venv/evo2-next` | built by `scripts/run_tis_evo2_env_setup.sh` from `requirements-evo2.lock` (Evo2 0.6 / Vortex 1.1, source-built FlashAttention) |
-| P6 seq2func (GPU) | uv `.venv/agft` | built by `scripts/run_p6_agft_env_setup.sh` from `requirements-agft.lock` |
+| Stage | Environment |
+|---|---|
+| CPU: baseline evaluation, truth, metrics, non-JAX tests | conda `tisiago` (`uv pip install -e ".[dev,extract,tracks]"`) |
+| GPU: baseline extraction | conda `alphagenome` |
+| GPU: tracks training/prediction; JAX tests | uv `.venv/agft` (`scripts/run_tracks_env_setup.sh`, `requirements-agft.lock`) |
 
 ```bash
-eval "$(conda shell.bash hook)" && conda activate tisiago
-python -m pytest
+eval "$(conda shell.bash hook)" && conda activate tisiago && python -m pytest     # CPU suite
+srun -p 20 -c 8 --mem=32G -t 1:00:00 bash -c \
+  'JAX_PLATFORMS=cpu PYTHONPATH=src .venv/agft/bin/python -m pytest tests/test_tracks_*.py \
+   tests/test_calling_*.py --continue-on-collection-errors'   # JAX suite (no pysam there)
 ```
 
-Never commit `.env` or gated-model credentials.
+Site paths and partitions come from the gitignored `.env` (keys in `.env.example`); every Slurm script
+sources `scripts/_common.sh`. For interactive `python -m` calls: `set -a; source .env; set +a`. Never
+commit `.env` or model credentials.
 
-## Store layout
+## Code style
 
-Row-aligned to `manifest.row_idx` (row i = candidate with row_idx == i):
-
-```
-data/store/
-  manifest.parquet
-  config.yaml                                   # provenance: dims, coverage
-  embeddings/
-    alphagenome_jax/L16k/decoder_1bp/off0.npy   # [N, 1536] fp16
-    alphagenome_jax/L131k/decoder_1bp/off0.npy
-    evo2/W8k/blocks.28.mlp.l3/off{0,3,6,9}.npy  # [N, 4096] fp16, genomic 8 kb windows
-    evo2/TXP/blocks.28.mlp.l3/off{0,3,6,9}.npy  # exon-spliced transcript input
-    onehot/{codon12,kozakW20}.npy               # sequence floors
-```
-
-A head experiment = load a few `.npy`, `np.concatenate(axis=1)`, filter rows by `split`.
-
-Dense data (~62.7 M codons) is never assembled into one matrix. Regime A
-(`scripts/build_store.py`) gathers candidate rows into a compact store — `data/dense_exp_store`
-(4.33 M rows; SSD twin at `$TISIAGO_DENSE_STORE`). Regime B (`tisiago.scan_score`) streams shards
-to score every codon. See `docs/superpowers/specs/2026-06-18-embedding-dataset-architecture-decision.md`.
-
-## Code Style
-
-- Build: hatchling · Linter: ruff (line-length 100) · Docstrings: Google · Python >=3.11
-- Library code (`src/`, `configs/`) must not embed site paths — `tests/test_portability.py`
-  enforces it; site values belong in `.env`.
+hatchling · ruff (line-length 100) · Google docstrings · Python >= 3.11. Library code (`src/`,
+`configs/`) must not embed site paths — `tests/test_portability.py` enforces it.

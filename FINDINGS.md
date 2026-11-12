@@ -1,5 +1,19 @@
 # tisiago — findings
 
+> **Reading guide (2026-11-12).** Section numbers are stable; the names in their titles are historical.
+> Current names are in [`docs/PLAN.md`](docs/PLAN.md) §1. Code and paths cited below are as of the
+> tag `archive/pre-cleanup-2026-11-12` (`seq2func/` is now `src/tisiago/tracks/`, `autoresearch/` is gone).
+>
+> | § | Line (current name) | Status |
+> |---|---|---|
+> | 1-4 | `baseline` / `floor` on the curated 3:1 set | history |
+> | 5-10 | `baseline` at true imbalance; Evo2 arms (removed) | history; comparator is now AG-only (`baseline.ag`) |
+> | 11-12 | per-condition track models (retired) | history |
+> | 13-14 | `tracks.genomic.free.pos` and the fast-loop search | superseded by §15-16 |
+> | 15 | `tracks.spliced.free.pos` | superseded by §16 |
+> | 16 | `tracks.spliced.flux.pos` — **reference recipe** | current |
+> | 17 | what limits start calls after §16 | current |
+
 Proof-of-concept results for predicting translation-initiation sites (TIS) from
 **frozen** genome-foundation-model embeddings with lightweight downstream heads. All
 numbers are on **held-out chromosomes** (test = chr8/chr9, val = chr7) with a simple
@@ -678,8 +692,5 @@ Validation only (K562, HeLa; chr7), step-2 flux model (`sbflux_<g>_s0-2`). Notes
 
 ## Reproduce
 
-```bash
-eval "$(conda shell.bash hook)" && conda activate tisiago
-python -m tisiago.eval        --store data/store        # tables 1 + 2
-python -m tisiago.resolution  --store data/store        # table 3
-```
+§1-10 ran on code in tag `archive/pre-cleanup-2026-11-12` (`python -m tisiago.eval`, `tisiago.resolution`,
+`tisiago.representation_eval`). The AlphaGenome-only protocol today: `docs/INFERENCE_AND_EVALUATION.md`.

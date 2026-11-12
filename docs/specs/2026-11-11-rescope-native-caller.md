@@ -2,7 +2,11 @@
 
 **Date:** 2026-11-11 · **Status:** proposed · **Author:** session review with Ichihara et al. 2026
 
-Supersedes the "Next" items in [`ROADMAP.md`](../../../ROADMAP.md) P6 and the call-cutoff plan at
+> **Names changed 2026-11-12** ([`../PLAN.md`](../PLAN.md) §1): class 1 = `baseline`, class 3 = `tracks`,
+> `seq2func/` = `src/tisiago/tracks/`, `track_tis_eval` = `calling.track_score`, `txtrain` = `train_spliced`.
+> The baseline is AlphaGenome-only (`baseline.ag`), not `ag7`. Text below is as approved.
+
+Supersedes the "Next" items of the former `ROADMAP.md` P6 section and the call-cutoff plan at
 the end of [`FINDINGS.md`](../../../FINDINGS.md) §16. It changes **what we climb** and **how calls
 are made**; it does not change the track model's architecture, which is deferred until the
 objective is fixed.
