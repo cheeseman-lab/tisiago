@@ -75,43 +75,93 @@ the denominators of every start metric in FINDINGS §11-17.
 
 ## 4. Objectives
 
-Ordered; each rung needs the one before it.
+Two primary objectives, then a break. Everything after the break needs a model that already works.
+
+### Primary — a model that works out of distribution
 
 - **O1 — decent starts in a line never trained on.** Given only RNA-seq, a start set comparable to the
-  label pipeline's for that line. *Done when* M1 on a held-out line beats `baseline.ag` with the threshold
-  fit only on training lines. **The preliminary objective.**
-- **O2 — transfer to a further line.** RNA-seq only. *Done when* M1 there is within noise of O1.
-- **O3 — variant effects (cheap, start early).** An upstream stop should suppress a downstream start.
-  Known-effect variants first (Kozak, uORF start gain/loss, uAUG-creating 5'UTR variants); a small curated
-  set on the baseline too, since it needs re-extraction per variant.
+  label pipeline's for that line. *Done when* M1 on a held-out line beats `baseline.ag`, with the threshold
+  fit only on training lines.
+- **O2 — a line outside the four.** Leave-one-line-out across four backgrounds can still be fitting to our
+  own four lines as we prepare them; a fifth line is the real out-of-distribution test, and it needs RNA-seq
+  only. Treat this as part of the primary result, not a follow-up. *Done when* M1 there is within noise of O1.
+
+### Interpretation and validation — after O1 holds
+
+Deferred deliberately. Interpreting a model that does not yet work spends effort explaining predictions that
+may not track reality.
+
+- **O3 — variant effects.** An upstream stop should suppress a downstream start. **This is a sanity check at
+  the interpretation stage, not evidence of model quality:** a human can write that rule from first
+  principles, so the model agreeing tells us little about whether the model is good. Its value is guarding
+  attribution once there is something worth attributing. Known-effect variants first (Kozak context, uORF
+  start gain/loss, uAUG-creating 5'UTR variants).
 - **O4 — what drives differential start use between lines.** Attribution on the conditioning pathway; needs
-  O1, O3's sanity check and M2. Cleanest substrate: the RPE1 triplet.
+  O1 and M2. Cleanest substrate: the RPE1 triplet (three cell states, one genotype).
 - **O5 — novel starts in an unprofiled line, validated by N-terminal proteomics.** Needs O1, O2 and a search
-  pipeline.
+  pipeline. The one validation signal independent of Ribo-seq and of any caller, and so the only clean way to
+  separate a real alternative start from an elongation pause (§17).
 - **O6 — synthesis.** How alternative initiation is sequence-encoded, and how the transcript layer shifts the
   canonical : alternative : non-canonical ratio. The publication frame, not a work item.
 
----
+## 5. Phases
 
-## 5. Phases (spec §10)
+Two tracks. The **data track** waits on the truth set; the **conditioning track** needs no new data and runs
+from day one.
+
+### Now, before the data lands
+
+| Phase | What | Cost |
+|---|---|---|
+| **0a** | Run `calling.track_score` on the current `tracks.spliced.flux.pos` exports against `baseline.ag`, on the **existing** labels. Both arms are already measured on those labels, so the comparison is internally consistent and available today. Answers whether `tracks` is ahead of or behind the baseline at calling starts — open since §12. | hours, CPU |
+| **0b** | Assert the protocol guardrails before any agent-driven hill climb: that `--i-am-final` is *enforced* and not merely a flag; that no fold warm-starts from a checkpoint that saw its held-out line (a two-stage provenance chain, not one check); that percent-of-replicate uses the identical transcript set for model and replicate. An optimiser will reach test data if a path exists. | small, CPU |
+
+### Data track
 
 | Phase | What | Cost |
 |---|---|---|
 | 0 | Data contract, truth set, P-site convention assertion, differential-start counts | small, CPU |
-| 1 | Re-baseline `tracks.spliced.flux.pos` unchanged on clean data; run `calling.track_score` on it (never run); rerun `baseline.ag` and the floors on clean labels | 4 folds x 3 seeds, GPU |
+| 1 | Re-baseline `tracks.spliced.flux.pos` unchanged on clean data; rerun `calling.track_score`, `baseline.ag` and the floors on clean labels | 4 folds x 3 seeds, GPU |
 | 2 | M1 / M2 / M3 into the scorecard | small, CPU |
 | 3 | Native caller + learned threshold; three-way decomposition (Ribo-TISH on real BAMs / native on real tracks / native on predicted) | small, fast loop |
-| 4 | Architecture work driven by what M1/M2 say limits them; conditioning (`film`, `corgi`, `@trunk`) per issue #1 | the bulk |
-| 5 | Proteomics validation | small, needs a search pipeline |
-| 6 | Attribution and in-silico mutagenesis, known-effect variants first | moderate |
+| 4 | Architecture work, driven by what M1 / M2 say limits O1 | the bulk |
 
-**Next month:** Phases 0-3, the conditioning experiments (#1, no new data needed), O3's known-effect check.
+### Conditioning track — parallel, no new data
 
-**Critical path:** truth lands -> Phase 0 -> Phase 1 -> Phase 2 -> Phase 3.
+`film`, `corgi` and `@trunk`, per [issue #1](https://github.com/cheeseman-lab/tisiago/issues/1). Moved out of
+Phase 4: decision 4 establishes that backbone conditioning was never tested, so this is unexplored ground on
+O1's critical path rather than late-stage architecture work. Note that the fast loop **cannot** judge
+`@trunk` — it runs on a frozen embedding cache — so schedule those as full fine-tunes from the start instead
+of discovering the gap later.
 
----
+### Deferred
 
-## 6. Decisions
+Proteomics validation (O5) and attribution / in-silico mutagenesis (O3, O4) follow O1. See §4.
+
+**Next month:** 0a, 0b, 0, 1, 2, 3 and the conditioning track. Not O3, not attribution.
+
+**Critical path:** 0a and 0b now -> truth lands -> 0 -> 1 -> 2 -> 3, with conditioning alongside throughout.
+
+## 6. How the next month runs
+
+- **Measure before modelling.** Phase 0a is first because it can change the plan. If `tracks` loses to the
+  baseline at calling starts, that is the most important finding available and it should be known in week one,
+  not week four.
+- **Freeze the metric before looking at output.** M1, M2 and the truth set are committed and tested before the
+  first training run. What cost the last stretch was climbing metrics chosen for convenience —
+  percent-of-replicate and synthetic-BAM Jaccard — rather than metrics that matched the objective.
+- **Keep a ledger with an explicit stop rule.** One row per config: what changed, the validation number, the
+  decision. The retired `p6fast` ledger used "no gain > 2 across 3 consecutive families -> STOP"; keep that
+  shape. Without it, a month of iteration yields many configs and no conclusion — and that ledger is the only
+  reason decision 4 could be answered at all.
+- **Mark untested claims as untested.** "RNA into the head, not the backbone" read as a finding for months
+  while being a plumbing decision, and it closed off a direction nobody revisited. Write what was measured.
+- **Decision gate at the halfway point.** If M1 on a held-out line has not beaten `baseline.ag`, stop adding
+  architecture and go back to diagnosis (PRINCIPLES §6, "diagnose before building").
+- **If the data slips, cut Phase 4 — never Phase 0a.** The measurement is what says whether the rest is worth
+  doing, and it does not depend on the new data.
+
+## 7. Decisions
 
 | # | Decision | Status |
 |---|---|---|
@@ -122,7 +172,7 @@ Ordered; each rung needs the one before it.
 
 ---
 
-## 7. Pitfalls carried forward
+## 8. Pitfalls carried forward
 
 - **Do not climb percent-of-replicate or synthetic-BAM Jaccard.** The first inflates when replicates
   disagree (RPE1 reads 179%); the second has a no-model ceiling of 0.85-0.89.
