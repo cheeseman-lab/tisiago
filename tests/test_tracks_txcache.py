@@ -355,7 +355,8 @@ def test_cli_refuses_test_without_the_final_flag_and_pca_source(tmp_path):
 
     def check(argv):
         args = ap.parse_args(argv)
-        args.cache = args.cache or tmp_path / args.name
+        if args.cache is None and args.name is not None:
+            args.cache = tmp_path / args.name
         txcache.check_args(ap, args)
         return args
 
@@ -428,6 +429,7 @@ def test_test_cache_build_reuses_pca_and_writes_val_like_shards(tmp_path, tracks
             "--windows-dir", str(windows), "--tracks-dir", str(tracks), "--gtf",
             str(_gtf(tmp_path)), "--genome", str(genome), "--base-checkpoint", "x",
             "--arm", "rnacond:K562", "--head", "rnacond", "--calls-run", "",
+            "--checkpoint", str(tmp_path / "ckpt"),
             "--expression", str(tmp_path / "genes.parquet"),
         ]
     )  # fmt: skip

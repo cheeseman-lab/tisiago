@@ -852,7 +852,7 @@ def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("stage", choices=("index", "tracks", "embed", "build", "size"))
-    ap.add_argument("--name", required=True, help="cache name, e.g. genomic_fc2d_k562")
+    ap.add_argument("--name", default=None, help="cache name, e.g. genomic_fc2d_k562")
     ap.add_argument("--cache", type=Path, help="default: data/tracks/txcache/<name>")
     ap.add_argument(
         "--checkpoint", type=Path, default=None, help="stage-1 run best/ (embed, build)"
@@ -887,7 +887,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def check_args(ap: argparse.ArgumentParser, args) -> None:
-    """CLI guards: a test cache needs ``--i-am-final``, ``--pca-from`` and its own name."""
+    """CLI guards: a cache path; a test cache needs ``--i-am-final``, ``--pca-from``, a new name."""
+    if args.cache is None:
+        ap.error("give --name or --cache")
     if args.test:
         if not args.i_am_final:
             ap.error("--test reads the held-out test chromosomes; pass --i-am-final to confirm")
@@ -912,7 +914,8 @@ def main() -> None:
     """CLI: build (a stage of) the transcript cache."""
     ap = build_parser()
     args = ap.parse_args()
-    args.cache = args.cache or DEFAULT_ROOT / args.name
+    if args.cache is None and args.name is not None:
+        args.cache = DEFAULT_ROOT / args.name
     check_args(ap, args)
     if args.stage in ("index", "build") and not args.gtf:
         ap.error("--gtf is required (or set TISIAGO_GTF in .env)")
