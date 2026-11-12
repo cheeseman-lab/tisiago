@@ -1,8 +1,17 @@
 # Work plan — AlphaGenome-only cleanup and readiness for the clean data
 
-**Date:** 2026-11-12 · **Status:** cleanup done on branch `cleanup/alphagenome-only`; clean-data work starts
-2026-11-13. Names are defined in [`PLAN.md`](PLAN.md) §1. The pre-cleanup tree is tag
-`archive/pre-cleanup-2026-11-12`.
+**Date:** 2026-11-12 · **Status:** cleanup merged to `main` (PR #2); clean-data work starts 2026-11-13. Names
+are defined in [`PLAN.md`](PLAN.md) §1.
+
+**Archive tags** (all on GitHub; `main` is the only branch):
+
+| Tag | Holds |
+|---|---|
+| `archive/pre-cleanup-2026-11-12` | The whole pre-cleanup tree: Evo2, retired baseline heads, synthetic-BAM path, `autoresearch/` (every loop's program, results and ledger) |
+| `archive/ar-auprc`, `archive/ar-auroc`, `archive/ar-recall1fp`, `archive/ar-winrate64` | The four baseline autoresearch loops, one commit per iteration |
+
+The loops' untracked run logs (`agent.log`, `loop.log`, `run.log`, `preds.npz`) are on disk only, in
+`data/archive/autoresearch_ar_logs/<objective>/`.
 
 ---
 
