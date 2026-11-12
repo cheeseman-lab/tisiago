@@ -268,7 +268,6 @@ def test_predicted_float_tracks_score_like_the_real_tracks_they_reproduce(tmp_pa
         tracks_dir=tracks,
         genes=genes,
         condition="K562",
-        conditions=("K562",),
         out_dir=out,
         mode="float",
     )

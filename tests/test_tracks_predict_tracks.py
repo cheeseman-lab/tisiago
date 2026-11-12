@@ -18,7 +18,7 @@ from tisiago.tracks.predict_tracks import (
 )
 from tisiago.tracks.psite import RIBOTISH_MINUS_SHIFT, psite
 from tisiago.tracks.samples import parse_para
-from tisiago.tracks.targets import channel_layout
+from tisiago.tracks.targets import rnacond_layout
 from tisiago.tracks.track_io import read_bigwig_counts, track_prefix, write_bigwigs
 
 SIZES = [("chr1", 300), ("chr7", 400)]
@@ -124,7 +124,6 @@ def test_oracle_expected_tracks_reproduce_real_replicates(world):
         tracks_dir=world["tracks"],
         genes=_genes(),
         condition="K562",
-        conditions=("K562",),
         out_dir=world["out"],
         mode="expected",
     )
@@ -159,7 +158,7 @@ def test_oracle_expected_tracks_reproduce_real_replicates(world):
 
 def test_minus_strand_prediction_written_at_ribotish_position(world):
     _write_reps(world["tracks"], {"chr7": {10: 1}}, {}, reps=(1, 2, "pooled"))
-    layout = channel_layout(["K562"])
+    layout = rnacond_layout("K562")
     minus_tis = layout.index(("K562", "tis", "-"))
 
     calls = []
@@ -179,7 +178,6 @@ def test_minus_strand_prediction_written_at_ribotish_position(world):
         tracks_dir=world["tracks"],
         genes=_genes(),
         condition="K562",
-        conditions=("K562",),
         out_dir=world["out"],
         mode="expected",
     )
@@ -203,7 +201,6 @@ def test_replicate_scaling_follows_real_depth(world):
         tracks_dir=world["tracks"],
         genes=_genes(),
         condition="K562",
-        conditions=("K562",),
         out_dir=world["out"],
         mode="expected",
     )
@@ -227,7 +224,6 @@ def _sampled(world, out, seed, copies=1):
         tracks_dir=world["tracks"],
         genes=_genes(),
         condition="K562",
-        conditions=("K562",),
         out_dir=out,
         mode="sample",
         seed=seed,
@@ -274,7 +270,7 @@ def test_manifest_written(world):
 
 
 def test_test_split_refuses_without_final_flag(monkeypatch, capsys):
-    argv = ["predict_tracks", "--checkpoint", "x/best", "--arm", "condition:K562"]
+    argv = ["predict_tracks", "--checkpoint", "x/best", "--arm", "rnacond:K562"]
     monkeypatch.setattr(sys, "argv", [*argv, "--split", "test"])
     with pytest.raises(SystemExit):
         predict_tracks.main()
@@ -296,7 +292,6 @@ def _run(world, out, predict_fn=None, **kwargs):
         tracks_dir=world["tracks"],
         genes=_genes(),
         condition="K562",
-        conditions=("K562",),
         out_dir=out,
         **kwargs,
     )
@@ -418,7 +413,7 @@ def test_real_resample_cli_runs_without_checkpoint(world, monkeypatch, tmp_path)
 
 def test_float_mode_writes_pooled_expectation_unrounded(world):
     _write_reps(world["tracks"], {"chr7": {10: 1}}, {}, reps=(1, 2, "pooled"))
-    layout = channel_layout(["K562"])
+    layout = rnacond_layout("K562")
     plus_tis, minus_chx = layout.index(("K562", "tis", "+")), layout.index(("K562", "chx", "-"))
 
     def ramp(batch):
@@ -517,10 +512,8 @@ def test_rnacond_float_mode_matches_oracle_and_feeds_rna(world):
         tracks_dir=world["tracks"],
         genes=_genes(),
         condition="K562",
-        conditions=("K562",),
         out_dir=world["out"],
         mode="float",
-        rna_conditioned=True,
     )
     widths = [x.shape[-1] for x in seen]
     # pooled RNA scaled to 5e7 reads: 6 + 2 (+) and 4 (-) in the window, plus 2 x 2 end reads
@@ -546,7 +539,7 @@ def test_rnacond_channels_map_to_tis_and_chx(world):
         pred[0, :, 0], pred[0, :, 3] = 0.5, 0.25  # TIS+ and CHX-
         return pred
 
-    _run(world, world["out"], by_channel, mode="float", rna_conditioned=True)
+    _run(world, world["out"], by_channel, mode="float")
     tis = predict_tracks.pooled_prefix(world["out"], "K562", "tis")
     chx = predict_tracks.pooled_prefix(world["out"], "K562", "chx")
     assert set(read_bigwig_counts(f"{tis}.plus.bw")["chr7"].values()) == {0.5}
@@ -561,7 +554,7 @@ def test_rnacond_cli_any_condition(monkeypatch, tmp_path, capsys):
         seen.update(kwargs)
         return {}
 
-    def fake_load(checkpoint, arm, *, base_checkpoint, head_kind="mlp", device=None):
+    def fake_load(checkpoint, arm, *, base_checkpoint, head_kind="rnacond_fc2d", device=None):
         seen["loaded"] = (arm, head_kind)
         return "predict"
 
@@ -591,13 +584,12 @@ def test_rnacond_cli_any_condition(monkeypatch, tmp_path, capsys):
         "--base-checkpoint",
         "w",
         "--head",
-        "rnacond",
+        "rnacond_fc2d",
     ]
     monkeypatch.setattr(sys, "argv", [*base, "--condition", "K562"])
     predict_tracks.main()
-    assert seen["loaded"] == ("rnacond:K562", "rnacond")
-    assert seen["condition"] == "K562" and seen["conditions"] == ("K562",)
-    assert seen["rna_conditioned"] is True and set(seen["genes"].condition) == {"K562"}
+    assert seen["loaded"] == ("rnacond:K562", "rnacond_fc2d")
+    assert seen["condition"] == "K562" and set(seen["genes"].condition) == {"K562"}
     assert seen["meta"]["heldout"] is True
     assert seen["out_dir"] == tmp_path / "run" / "predicted_val"
     monkeypatch.setattr(sys, "argv", [*base, "--condition", "HeLa"])

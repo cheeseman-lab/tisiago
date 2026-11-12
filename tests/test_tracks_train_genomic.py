@@ -10,7 +10,6 @@ from tisiago.tracks import train_genomic as train
 from tisiago.tracks.samples import CONDITIONS
 from tisiago.tracks.train_genomic import (
     mean_window_kl,
-    parse_arm,
     save_dir_atomic,
     train_loop,
     window_profile_kl,
@@ -185,15 +184,6 @@ def test_train_loop_rejects_bad_intervals(tmp_path):
         train_loop(fake_step, 1, None, 0, batches(), steps=5, eval_every=0, **kwargs)
 
 
-def test_parse_arm():
-    assert parse_arm("shared") == ("p6_shared", tuple(CONDITIONS))
-    assert parse_arm("condition:HeLa") == ("p6_hela", ("HeLa",))
-    assert parse_arm("condition:RPE1_Que") == ("p6_rpe1_que", ("RPE1_Que",))
-    for bad in ("condition:Nope", "condition:", "hela", "shared:HeLa"):
-        with pytest.raises(ValueError):
-            parse_arm(bad)
-
-
 def test_window_profile_kl_averages_channels_and_windows():
     target = np.array([[1.0, 0.0], [1.0, 0.0]])
     pred = np.array([[1.0, 1.0], [1.0, 1.0]])
@@ -242,19 +232,26 @@ def test_train_module_never_reads_test_split():
 
 
 def test_cli_defaults_are_primary_config():
-    args = train.build_parser().parse_args(["--arm", "shared"])
+    args = train.build_parser().parse_args(["--arm", "rnacond:HeLa"])
     assert args.train_backbone is True
     assert args.learning_rate == 1e-3
     assert args.backbone_learning_rate == 1e-4
     assert args.warmup_steps == 300
     assert args.clip_norm == 1.0
-    assert args.head == "mlp"
+    assert args.head == "rnacond_fc2d"
+    assert args.eval_windows == 20
     assert args.workers == 4
     assert str(args.tracks_dir) == "data/tracks/tracks"
     assert args.frame_weight == 0.0
     assert args.frame_block == 10
-    frozen = train.build_parser().parse_args(["--arm", "shared", "--heads-only"])
+    frozen = train.build_parser().parse_args(["--arm", "rnacond:HeLa", "--heads-only"])
     assert frozen.train_backbone is False
+
+
+def test_cli_head_choices_are_the_reference_head_only():
+    for retired in ("mlp", "rnacond", "rnacond_fc2", "resid_chx"):
+        with pytest.raises(SystemExit):
+            train.build_parser().parse_args(["--arm", "rnacond:HeLa", "--head", retired])
 
 
 def test_save_dir_atomic_rolls_back_when_swap_fails(tmp_path, monkeypatch):
@@ -291,12 +288,14 @@ def test_existing_run_records_detected(tmp_path, record):
     assert target.exists()
 
 
+ARGV = ["train", "--arm", "rnacond:HeLa", "--checkpoint", "x", "--genome", "y"]
+
+
 def test_cli_refuses_existing_run_and_deletes_nothing(tmp_path, monkeypatch):
     out = tmp_path / "run"
     out.mkdir()
     (out / "log.jsonl").write_text('{"step": 1}\n')
-    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-    monkeypatch.setattr("sys.argv", [*argv, "--out", str(out)])
+    monkeypatch.setattr("sys.argv", [*ARGV, "--out", str(out)])
     with pytest.raises(SystemExit) as exc:
         train.main()
     assert exc.value.code != 0
@@ -306,75 +305,74 @@ def test_cli_refuses_existing_run_and_deletes_nothing(tmp_path, monkeypatch):
 
 def test_cli_frame_options_parse():
     args = train.build_parser().parse_args(
-        ["--arm", "shared", "--frame-weight", "0.5", "--frame-block", "4"]
+        ["--arm", "rnacond:HeLa", "--frame-weight", "0.5", "--frame-block", "4"]
     )
     assert (args.frame_weight, args.frame_block) == (0.5, 4)
 
 
 def test_cli_rejects_bad_frame_options(tmp_path, monkeypatch):
     for bad in (["--frame-weight", "-1"], ["--frame-block", "0"]):
-        argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-        monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), *bad])
+        monkeypatch.setattr("sys.argv", [*ARGV, "--out", str(tmp_path / "r"), *bad])
         with pytest.raises(SystemExit) as exc:
             train.main()
         assert exc.value.code != 0
     assert not (tmp_path / "r").exists()
 
 
+@pytest.mark.parametrize("arm", ["shared", "condition:HeLa", "rnacond:Nope"])
+def test_cli_rejects_retired_and_bad_arms(tmp_path, monkeypatch, arm):
+    argv = ["train", "--arm", arm, "--checkpoint", "x", "--genome", "y"]
+    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r")])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code != 0
+    assert not (tmp_path / "r").exists()
+
+
 def test_default_out_separates_frozen_baseline():
-    assert train.default_out("condition:HeLa", train_backbone=True) == Path(
-        "data/tracks/runs/condition_hela"
+    assert train.default_out("rnacond:U2OS", train_backbone=True) == Path(
+        "data/tracks/runs/rnacond_u2os"
     )
-    assert train.default_out("condition:HeLa", train_backbone=False) == Path(
-        "data/tracks/runs/condition_hela_frozen"
+    assert train.default_out("rnacond:U2OS", train_backbone=False) == Path(
+        "data/tracks/runs/rnacond_u2os_frozen"
     )
-    assert train.default_out("shared", True) != train.default_out("shared", False)
 
 
-def _fake_run(tmp_path, head_name="p6_k562", kind=None):
+def _fake_run(tmp_path, head_name="p6_rnacond_k562", kind=None):
     best = tmp_path / "src" / "best"
     (best / "checkpoint").mkdir(parents=True)
-    args = {"arm": "condition:K562"} | ({"head": kind} if kind else {})
+    args = {"arm": "rnacond:K562"} | ({"head": kind} if kind else {})
     run = {"args": args, "head_name": head_name, "best": {"step": 2000}}
     (best.parent / "run.json").write_text(json.dumps(run))
     return best
 
 
 @pytest.mark.parametrize(
-    ("source_kind", "kind", "source_head", "reuse"),
+    ("source_kind", "source_head", "reuse"),
     [
-        ("mlp", "mlp", "p6_k562", "all"),
-        (None, "mlp", "p6_k562", "all"),  # runs before --head recorded mlp implicitly
-        ("mlp", "seqconv", "p6_k562", "none"),
-        ("mlp", "mlp", "p6_hela", "none"),
-        ("mlp", "resid_tx", "p6_k562", "matching"),
-        (None, "resid_tx", "p6_k562", "matching"),
-        ("mlp", "resid_tx", "p6_hela", "none"),
-        ("seqconv_tx", "resid_tx", "p6_k562", "none"),
-        ("mlp", "resid_chx", "p6_k562", "matching"),
-        (None, "resid_chx", "p6_k562", "matching"),
-        ("mlp", "resid_chx", "p6_hela", "none"),
-        ("resid_tx", "resid_chx", "p6_k562", "none"),
-        ("resid_chx", "resid_chx", "p6_k562", "all"),
+        ("rnacond_fc2d", "p6_rnacond_k562", "all"),
+        ("rnacond_fc2d", "p6_rnacond_hela", "none"),
+        ("rnacond_fc2", "p6_rnacond_k562", "none"),
+        (None, "p6_rnacond_k562", "none"),
     ],
 )
 def test_init_source_reuses_head_only_for_same_arm_and_kind(
-    tmp_path, source_kind, kind, source_head, reuse
+    tmp_path, source_kind, source_head, reuse
 ):
     best = _fake_run(tmp_path, source_head, source_kind)
-    init = train.init_source(best, "p6_k562", kind)
+    init = train.init_source(best, "p6_rnacond_k562", "rnacond_fc2d")
     assert init["reuse_head"] == reuse
     assert init["path"] == str(best)
-    assert init["source_kind"] == (source_kind or "mlp")
+    assert init["source_kind"] == source_kind
 
 
 def test_init_source_requires_checkpoint_dir(tmp_path):
     with pytest.raises(ValueError, match="no checkpoint/"):
-        train.init_source(tmp_path, "p6_k562", "mlp")
+        train.init_source(tmp_path, "p6_rnacond_k562", "rnacond_fc2d")
 
 
 def test_cli_two_stage_defaults_are_off():
-    args = train.build_parser().parse_args(["--arm", "shared"])
+    args = train.build_parser().parse_args(["--arm", "rnacond:HeLa"])
     assert args.init_from is None
     assert args.freeze_backbone_steps == 0
 
@@ -389,8 +387,7 @@ def test_cli_two_stage_defaults_are_off():
     ],
 )
 def test_cli_rejects_bad_two_stage_options(tmp_path, monkeypatch, bad):
-    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), *bad])
+    monkeypatch.setattr("sys.argv", [*ARGV, "--out", str(tmp_path / "r"), *bad])
     with pytest.raises(SystemExit) as exc:
         train.main()
     assert exc.value.code != 0
@@ -407,126 +404,17 @@ def test_init_source_refuses_unfinished_run(tmp_path, best):
         run["best"] = None
     (src.parent / "run.json").write_text(json.dumps(run))
     with pytest.raises(ValueError, match="not a finished run"):
-        train.init_source(src, "p6_k562", "mlp")
+        train.init_source(src, "p6_rnacond_k562", "rnacond_fc2d")
 
 
 def test_init_source_refuses_missing_run_json(tmp_path):
     src = _fake_run(tmp_path)
     (src.parent / "run.json").unlink()
     with pytest.raises(ValueError, match="no run.json"):
-        train.init_source(src, "p6_k562", "mlp")
+        train.init_source(src, "p6_rnacond_k562", "rnacond_fc2d")
 
 
-def test_cli_seqconv_tx_needs_gtf(tmp_path, monkeypatch):
-    monkeypatch.delenv("TISIAGO_GTF", raising=False)
-    args = train.build_parser().parse_args(["--arm", "shared", "--gtf", "a.gtf"])
-    assert args.gtf == "a.gtf"
-    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), "--head", "seqconv_tx"])
-    with pytest.raises(SystemExit) as exc:
-        train.main()
-    assert exc.value.code != 0
-    assert not (tmp_path / "r").exists()
-
-
-def test_cli_mod_learning_rate_parses_and_defaults_to_none():
-    args = train.build_parser().parse_args(["--arm", "shared"])
-    assert args.mod_learning_rate is None
-    args = train.build_parser().parse_args(
-        ["--arm", "shared", "--head", "resid_chx", "--mod-learning-rate", "1e-3"]
-    )
-    assert args.mod_learning_rate == 1e-3
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        ["--head", "mlp", "--mod-learning-rate", "1e-3"],
-        ["--head", "seqconv_tx", "--mod-learning-rate", "1e-3"],
-        ["--head", "resid_chx", "--mod-learning-rate", "-1e-3"],
-    ],
-)
-def test_cli_rejects_mod_learning_rate_without_mod_head(tmp_path, monkeypatch, bad):
-    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-    monkeypatch.setattr("sys.argv", [*argv, "--gtf", "a.gtf", "--out", str(tmp_path / "r"), *bad])
-    with pytest.raises(SystemExit) as exc:
-        train.main()
-    assert exc.value.code != 0
-    assert not (tmp_path / "r").exists()
-
-
-def test_cli_mod_libraries_and_scale_parse_with_none_defaults():
-    args = train.build_parser().parse_args(["--arm", "shared"])
-    assert args.mod_libraries is None and args.mod_scale_tis is None
-    args = train.build_parser().parse_args(
-        ["--arm", "shared", "--mod-libraries", "chx,tis", "--mod-scale-tis", "3"]
-    )
-    assert args.mod_libraries == "chx,tis" and args.mod_scale_tis == 3.0
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        ["--head", "mlp", "--mod-libraries", "chx"],
-        ["--head", "resid_tx", "--mod-libraries", "chx,tis"],
-        ["--head", "resid_tx", "--mod-scale-tis", "3"],
-        ["--head", "resid_chx", "--mod-libraries", "chx,harr"],
-        ["--head", "resid_chx", "--mod-libraries", "chx,chx"],
-        ["--head", "resid_chx", "--mod-libraries", ""],
-        ["--head", "resid_chx", "--mod-libraries", "chx,tis", "--mod-scale-tis", "0"],
-        ["--head", "resid_chx", "--mod-scale-tis", "3"],
-    ],
-)
-def test_cli_rejects_bad_mod_libraries(tmp_path, monkeypatch, bad):
-    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-    monkeypatch.setattr("sys.argv", [*argv, "--gtf", "a.gtf", "--out", str(tmp_path / "r"), *bad])
-    with pytest.raises(SystemExit) as exc:
-        train.main()
-    assert exc.value.code != 0
-    assert not (tmp_path / "r").exists()
-
-
-def test_mod_libraries_parse():
-    assert train.mod_libraries_of(None) == ("chx",)
-    assert train.mod_libraries_of("chx,tis") == ("chx", "tis")
-    assert train.mod_libraries_of(" tis , chx ") == ("tis", "chx")
-    for bad in ("", "chx,", "chx,chx", "chx,harr"):
-        with pytest.raises(ValueError, match="mod-libraries"):
-            train.mod_libraries_of(bad)
-
-
-def test_channel_config_frame_stays_chx_and_records_modulation():
-    pytest.importorskip("alphagenome_ft")
-    from tisiago.tracks.model import MOD_SCALE
-    from tisiago.tracks.targets import channel_layout, library_channels
-
-    layout = channel_layout(["HeLa", "K562"])
-    chx = library_channels(layout, "chx")
-    cfg = train.channel_config("resid_chx", layout, ("chx", "tis"), 3.0)
-    assert cfg["frame_channels"] == list(chx)
-    assert cfg["mod_libraries"] == ["chx", "tis"]
-    assert cfg["mod_channels"] == [0, 1, 2, 3, 6, 7, 8, 9]
-    assert cfg["mod_scales"] == [
-        3.0 if layout[c][1] == "tis" else MOD_SCALE for c in cfg["mod_channels"]
-    ]
-    assert cfg["mod_scale_tis"] == 3.0
-    old = train.channel_config("resid_chx", layout, ("chx",), MOD_SCALE)
-    assert old["frame_channels"] == old["mod_channels"] == list(chx)
-    assert old["mod_scales"] == [MOD_SCALE] * 4
-    plain = train.channel_config("mlp", layout, ("chx",), MOD_SCALE)
-    assert plain == {"frame_channels": list(chx)}
-
-
-def test_cli_resid_chx_needs_gtf(tmp_path, monkeypatch):
-    monkeypatch.delenv("TISIAGO_GTF", raising=False)
-    argv = ["train", "--arm", "condition:HeLa", "--checkpoint", "x", "--genome", "y"]
-    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), "--head", "resid_chx"])
-    with pytest.raises(SystemExit) as exc:
-        train.main()
-    assert exc.value.code != 0
-
-
-# --- rnacond: one model across cell lines, one cell-line group held out ---
+# --- one model across cell lines, one cell-line group held out ---
 
 
 def test_parse_rnacond_arm_holds_out_a_group():
@@ -547,31 +435,13 @@ def test_parse_rnacond_arm_holds_out_a_group():
     for bad in ("rnacond:", "rnacond:RPE1_Que", "rnacond:hela", "condition:HeLa", "shared"):
         with pytest.raises(ValueError):
             train.parse_rnacond_arm(bad)
-    assert train.is_rnacond_arm("rnacond:K562") and not train.is_rnacond_arm("shared")
 
 
-def test_parse_arm_refuses_rnacond_arms():
-    """Old callers (6-channel layouts) must not silently take an rnacond arm."""
-    with pytest.raises(ValueError, match="rnacond"):
-        parse_arm("rnacond:HeLa")
-
-
-def test_arm_fields_old_arms_unchanged():
-    fields = train.arm_fields("condition:K562", "mlp")
-    assert fields == {
-        "head_name": "p6_k562",
-        "conditions": ["K562"],
-        "num_tracks": 6,
-        "frame_channels": [2, 3],
-    }
-    assert train.arm_fields("shared", "mlp")["num_tracks"] == 36
-
-
-def test_arm_fields_rnacond_round_trip_through_run_json(tmp_path):
+def test_arm_fields_round_trip_through_run_json(tmp_path):
     from tisiago.tracks.checkpoint import write_json_atomic
     from tisiago.tracks.rna_features import RNA_FEATURE_NAMES, RNA_WIDTHS
 
-    fields = train.arm_fields("rnacond:RPE1", "rnacond")
+    fields = train.arm_fields("rnacond:RPE1")
     assert fields["head_name"] == "p6_rnacond_rpe1"
     assert fields["conditions"] == fields["train_conditions"] == ["HeLa", "K562", "U2OS"]
     assert fields["heldout_group"] == "RPE1"
@@ -587,7 +457,7 @@ def test_arm_fields_rnacond_round_trip_through_run_json(tmp_path):
         "box_widths": list(RNA_WIDTHS),
     }
     write_json_atomic(
-        {"args": {"arm": "rnacond:RPE1", "head": "rnacond"}, **fields}, tmp_path / "run.json"
+        {"args": {"arm": "rnacond:RPE1", "head": "rnacond_fc2d"}, **fields}, tmp_path / "run.json"
     )
     (tmp_path / "best").mkdir()
     loaded = json.loads((tmp_path / "run.json").read_text())
@@ -600,32 +470,12 @@ def test_arm_fields_rnacond_round_trip_through_run_json(tmp_path):
         train.check_rnacond_run(bad, "rnacond:RPE1")
 
 
-@pytest.mark.parametrize(
-    ("arm", "head"),
-    [("rnacond:HeLa", "mlp"), ("rnacond:HeLa", "seqconv_tx"), ("condition:HeLa", "rnacond")],
-)
-def test_cli_rnacond_arm_and_head_go_together(tmp_path, monkeypatch, arm, head):
-    argv = ["train", "--arm", arm, "--checkpoint", "x", "--genome", "y", "--gtf", "a.gtf"]
-    monkeypatch.setattr("sys.argv", [*argv, "--out", str(tmp_path / "r"), "--head", head])
-    with pytest.raises(SystemExit) as exc:
-        train.main()
-    assert exc.value.code != 0
-    assert not (tmp_path / "r").exists()
-
-
-def test_cli_accepts_rnacond_arm():
-    args = train.build_parser().parse_args(["--arm", "rnacond:U2OS", "--head", "rnacond"])
-    assert (args.arm, args.head) == ("rnacond:U2OS", "rnacond")
-    assert train.default_out("rnacond:U2OS", True) == Path("data/tracks/runs/rnacond_u2os")
-
-
-def test_rnacond_eval_windows_default_per_condition():
-    assert train.RNACOND_EVAL_WINDOWS == 20
-    assert train.build_parser().parse_args(["--arm", "shared"]).eval_windows is None
-    assert train.eval_windows_of(None, rnacond=False) == 100
-    assert train.eval_windows_of(None, rnacond=True) == 20
-    assert train.eval_windows_of(7, rnacond=True) == 7
-    assert train.eval_windows_of(7, rnacond=False) == 7
+def test_arm_fields_match_the_reference_run_json():
+    """The fields the §15-16 genomic K562 run recorded in its run.json."""
+    fields = train.arm_fields("rnacond:K562")
+    assert fields["head_name"] == "p6_rnacond_k562"
+    assert fields["num_tracks"] == 4 and fields["frame_channels"] == [2, 3]
+    assert fields["train_conditions"] == ["HeLa", "U2OS", "RPE1_Async", "RPE1_Que", "RPE1_Sen"]
 
 
 def test_rnacond_data_fields_record_depth_scales(tmp_path):
@@ -661,14 +511,11 @@ def test_selection_window_indices_evenly_spaced_and_deterministic():
 def test_local_loss_flags_and_channels():
     from tisiago.tracks.train_genomic import build_parser, local_channels_of
 
-    args = build_parser().parse_args(["--arm", "rnacond:K562", "--head", "rnacond_f"])
+    args = build_parser().parse_args(["--arm", "rnacond:K562"])
     assert args.local_weight == 0.0 and args.local_block == 1024
-    args = build_parser().parse_args(
-        ["--arm", "rnacond:K562", "--head", "rnacond_foc", "--local-weight", "5"]
-    )
+    args = build_parser().parse_args(["--arm", "rnacond:K562", "--local-weight", "5"])
     assert args.local_weight == 5.0
     assert local_channels_of("rnacond:K562") == (0, 1)
-    assert local_channels_of("condition:K562") == (0, 1)
     assert local_channels_of("rnacond:K562", ("tis", "chx")) == (0, 1, 2, 3)
     assert local_channels_of("rnacond:K562", ("chx",)) == (2, 3)
     assert args.local_libraries == "tis"
@@ -676,7 +523,14 @@ def test_local_loss_flags_and_channels():
         local_channels_of("rnacond:K562", ("rna",))
     assert args.local2_weight == 0.0 and args.local2_block == 32
     assert args.local2_libraries == "tis"
-    args = build_parser().parse_args(
-        ["--arm", "rnacond:K562", "--head", "rnacond_fc2d", "--local2-weight", "300"]
-    )
+    args = build_parser().parse_args(["--arm", "rnacond:K562", "--local2-weight", "300"])
     assert args.local2_weight == 300.0 and args.head == "rnacond_fc2d"
+
+
+def test_reference_args_file_parses():
+    """configs/tracks/genomic_fc2d.args is a valid argument list for this CLI."""
+    path = Path(__file__).resolve().parents[1] / "configs/tracks/genomic_fc2d.args"
+    args = train.build_parser().parse_args(["--arm", "rnacond:K562", *path.read_text().split()])
+    assert args.head == "rnacond_fc2d"
+    assert (args.local_weight, args.local_block, args.local_libraries) == (100.0, 1024, "tis,chx")
+    assert (args.local2_weight, args.local2_block, args.local2_libraries) == (300.0, 32, "tis")

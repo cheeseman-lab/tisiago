@@ -11,7 +11,8 @@
 #
 # Usage (from the repo root):
 #   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_tracks_predict.sh \
-#       --checkpoint data/tracks/runs/ar_resid_chx_w200_30k/best --arm condition:K562 --split val
+#       --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-K562.s0/best \
+#       --arm rnacond:K562 --condition K562 --split val
 
 set -euo pipefail
 

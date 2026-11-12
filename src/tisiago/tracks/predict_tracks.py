@@ -2,9 +2,8 @@
 
 Usage::
 
-    python -m tisiago.tracks.predict_tracks --checkpoint data/tracks/runs/<run>/best \
-        --arm condition:K562 --split val
-    python -m tisiago.tracks.predict_tracks --checkpoint data/tracks/runs/rnacond_k562/best \
+    python -m tisiago.tracks.predict_tracks \
+        --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-K562.s0/best \
         --arm rnacond:K562 --condition K562 --split val --mode float
 
 Writes ``<out>/<C>/{tis,chx}_rep{1,2}.{plus,minus}.bw`` (default ``<out>`` =
@@ -54,7 +53,7 @@ import pyBigWig
 
 from tisiago.tracks.data import iterate, rna_depth_scale
 from tisiago.tracks.psite import RIBOTISH_MINUS_SHIFT
-from tisiago.tracks.targets import STRAND_FILES, channel_layout, rnacond_layout
+from tisiago.tracks.targets import STRAND_FILES, rnacond_layout
 from tisiago.tracks.track_io import track_prefix
 from tisiago.tracks.windows import merge_spans
 
@@ -242,7 +241,6 @@ def predict_condition(
     tracks_dir: str | Path,
     genes: pd.DataFrame | None = None,
     condition: str,
-    conditions: Sequence[str] = (),
     out_dir: str | Path,
     mode: str = "sample",
     seed: int = 0,
@@ -250,23 +248,20 @@ def predict_condition(
     mask_unexpressed: bool = False,
     match_depth: bool = False,
     source: str = "model",
-    transcripts=None,
     prefetch: int = 4,
     meta: dict | None = None,
-    rna_conditioned: bool = False,
     float_dir: str | Path | None = None,
 ) -> dict:
     """Write ``condition``'s predicted per-replicate TIS/CHX bigWigs; return the manifest.
 
-    ``predict_fn(batch)`` maps an ``iterate`` batch to ``(1, S, C)`` pooled predictions in
-    :func:`channel_layout` order of ``conditions`` (canonical P-sites). ``mask_unexpressed``
+    ``predict_fn(batch)`` maps an ``iterate`` batch (carrying ``condition``'s RNA) to
+    ``(1, S, C)`` pooled predictions in :func:`tisiago.tracks.targets.rnacond_layout` order
+    (canonical P-sites). ``mask_unexpressed``
     zeroes positions outside the loss mask (unexpressed genes) before scaling. ``match_depth``
     rescales each library's pooled prediction so its total over the written region equals the
     real pooled total there (one factor per library; the whole prediction is held in memory).
     ``source="real-resample"`` replaces the model by the real pooled tracks as the expectation
     (the same-pipeline noise ceiling); ``predict_fn``, ``fasta``, ``genes`` are then unused.
-    ``rna_conditioned`` (``rnacond`` models): batches carry ``condition``'s RNA and predictions
-    are in :func:`tisiago.tracks.targets.rnacond_layout` order; ``conditions`` is unused.
     ``source="float-resample"`` takes the expectation from ``float_dir``'s pooled float
     bigWigs (``<C>/{tis,chx}_pooled.{plus,minus}.bw``, Ribo-TISH convention, never re-shifted
     on reading) and otherwise behaves like ``real-resample``.
@@ -282,18 +277,11 @@ def predict_condition(
     model = source == "model"
     channel = {}
     if model:
-        if rna_conditioned:
-            conditions = (condition,)
-            layout = rnacond_layout(condition)
-        else:
-            layout = channel_layout(conditions)
         channel = {
             (lib, s): i
-            for i, (c, lib, s) in enumerate(layout)
-            if c == condition and lib in LIBRARIES
+            for i, (_, lib, s) in enumerate(rnacond_layout(condition))
+            if lib in LIBRARIES
         }
-        if not channel:
-            raise ValueError(f"{condition} is not among {tuple(conditions)}")
     pooled_only = mode == "float"
     sizes = chrom_sizes_of(f"{track_prefix(tracks_dir, condition, 'tis', 1)}.plus.bw")
     order = {chrom: i for i, (chrom, _) in enumerate(sizes)}
@@ -353,14 +341,12 @@ def predict_condition(
             windows,
             fasta=fasta,
             tracks_dir=tracks_dir,
-            conditions=conditions,
+            conditions=(condition,),
             genes=genes,
             seed=0,
             augment_examples=False,
             loop=False,
             prefetch=prefetch,
-            transcripts=transcripts,
-            rna_conditioned=rna_conditioned,
         )
         try:
             for i, batch in enumerate(batches):
@@ -459,8 +445,8 @@ def predict_condition(
         "copies": copies,
         "mask_unexpressed": mask_unexpressed,
         "match_depth": match_depth,
-        "rna_conditioned": rna_conditioned,
-        "rna_depth_scale": rna_depth_scale(tracks_dir, condition) if rna_conditioned else None,
+        "rna_conditioned": model,
+        "rna_depth_scale": rna_depth_scale(tracks_dir, condition) if model else None,
         "depth_factors": factors if match_depth else None,
         "unscaled_expected_totals": unscaled,
         "stitching": "nearest_centre",
@@ -488,14 +474,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--checkpoint", type=Path, help="run's best/ or last/ (required for --source model)"
     )
-    ap.add_argument(
-        "--arm",
-        help="'shared', 'condition:<C>' or 'rnacond:<group>' (required for --source model)",
-    )
-    ap.add_argument(
-        "--condition",
-        help="condition to write (default: the arm's only one; required for rnacond arms)",
-    )
+    ap.add_argument("--arm", help="'rnacond:<held-out group>' (required for --source model)")
+    ap.add_argument("--condition", help="condition to write (required)")
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
     ap.add_argument("--windows-dir", type=Path, help="default: run.json, else data/tracks/windows")
@@ -530,7 +510,6 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--mask-unexpressed", action="store_true")
     ap.add_argument("--max-windows", type=int, default=None, help="first N windows (smoke)")
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
-    ap.add_argument("--gtf", default=os.environ.get("TISIAGO_GTF"))
     ap.add_argument("--base-checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
     ap.add_argument("--head", default=None, help="head kind; default: run.json")
     ap.add_argument("--prefetch", type=int, default=4)
@@ -547,31 +526,20 @@ def main() -> None:
     model = args.source == "model"
     if model and not (args.checkpoint and args.arm):
         ap.error("--checkpoint and --arm are required for --source model")
-    if not model and not (args.condition or args.arm):
-        ap.error(f"--source {args.source} needs --condition (or --arm)")
     if args.source == "float-resample" and not args.float_dir:
         ap.error("--source float-resample needs --float-dir")
     from tisiago.tracks.samples import CONDITIONS
-    from tisiago.tracks.train_genomic import is_rnacond_arm, parse_arm, parse_rnacond_arm
+    from tisiago.tracks.train_genomic import parse_rnacond_arm
 
-    conditions: tuple[str, ...] = ()
-    rnacond = bool(args.arm) and is_rnacond_arm(args.arm)
     trained: tuple[str, ...] = ()
     if args.arm:
         try:
-            if rnacond:
-                _, _, trained = parse_rnacond_arm(args.arm)
-            else:
-                _, conditions = parse_arm(args.arm)
+            _, _, trained = parse_rnacond_arm(args.arm)
         except ValueError as exc:
             ap.error(str(exc))
-    if rnacond:
-        if args.condition not in CONDITIONS:
-            ap.error(f"rnacond arms need --condition, one of {CONDITIONS}")
-        conditions = (args.condition,)
-    condition = args.condition or (conditions[0] if len(conditions) == 1 else None)
-    if condition is None or (conditions and condition not in conditions):
-        ap.error(f"--condition must be one of {conditions}" if conditions else "--condition needed")
+    if args.condition not in CONDITIONS:
+        ap.error(f"--condition must be one of {CONDITIONS}")
+    condition = args.condition
     if model:
         for flag in ("genome", "base_checkpoint"):
             if not getattr(args, flag):
@@ -610,7 +578,7 @@ def main() -> None:
         "windows_dir": str(windows_dir),
         "tracks_dir": str(tracks_dir),
     }
-    if rnacond:
+    if args.arm:
         meta["heldout"] = condition not in trained
         if args.checkpoint:
             from tisiago.tracks.evaluate import check_rna_scales
@@ -621,13 +589,13 @@ def main() -> None:
                 ap.error(str(exc))
     kwargs = {}
     if model:
-        from tisiago.tracks.evaluate import head_kind_of, load_predict_fn, load_transcripts
+        from tisiago.tracks.evaluate import head_kind_of, load_predict_fn
 
         expression = args.expression or _run_arg(
             args.checkpoint, "expression", "data/tracks/expression/expression.parquet"
         )
         genes = pd.read_parquet(expression).reset_index(drop=True)
-        genes = genes[genes.condition.isin(conditions)].reset_index(drop=True)
+        genes = genes[genes.condition == condition].reset_index(drop=True)
         head_kind = args.head or head_kind_of(args.checkpoint)
         kwargs = dict(
             predict_fn=load_predict_fn(
@@ -635,9 +603,6 @@ def main() -> None:
             ),
             fasta=args.genome,
             genes=genes,
-            conditions=conditions,
-            transcripts=load_transcripts(head_kind, args.gtf),
-            rna_conditioned=rnacond,
         )
         meta |= {"head": head_kind, "expression": str(expression)}
     manifest = predict_condition(

@@ -22,17 +22,17 @@
 Tests: CPU suite (`tisiago` env) and JAX suite (`agft` env, on a CPU node) green; the JAX suite matched the
 pre-cleanup tag before the rename (the only errors are pysam imports missing in `agft`, identical in both).
 
-## 2. Deliberately not done (debt)
+## 2. Debt and deliberate choices
 
-- **Per-condition arms** (`shared`, `condition:<C>`) still live in `train_genomic`, `tracks.evaluate`,
-  `predict_tracks`, `periodicity`, and `model` keeps the explored head kinds (`mlp` ... `rnacond_fc2`). They are
-  woven through ~40 tests and the live code paths; remove after Phase 1 has re-trained the reference recipe on GPU,
-  so numeric identity can be checked rather than assumed.
+- **Per-condition arms and explored head kinds: removed after review (2026-11-12).** The only genomic arm is
+  `rnacond:<line>` and the only registered head is `rnacond_fc2d`; `tx_features`, `orf_features` and the
+  periodicity CLI went with them. `rnacond_fc2d` parameters (48 leaves), forward output and gradients were checked
+  byte-identical against the archive tag on CPU. Phase 1 still re-trains on GPU before anything is compared.
 - **Registered head names** inside checkpoints stay `p6_rnacond_<line>`: renaming them breaks loading of existing
   checkpoints. Internal identifier only.
 - **CLI flags** keep `--arm rnacond:<line>`; the run-ID axes (`stage`, `chx`, `cond`, `holdout`) are encoded in
   `--out` names for now.
-- `txcache` defaults still name an old run (`ar_rnacond_k562_v2`); always pass `--name` / `--checkpoint`.
+- `txcache` has no default run: pass `--name` (or `--cache`) and `--checkpoint`.
 
 ## 3. Tomorrow (Phase 0, then Phase 1)
 

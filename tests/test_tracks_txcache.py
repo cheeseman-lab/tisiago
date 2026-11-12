@@ -428,7 +428,7 @@ def test_test_cache_build_reuses_pca_and_writes_val_like_shards(tmp_path, tracks
             "build", "--test", "--i-am-final", "--cache", str(cache), "--pca-from", str(train),
             "--windows-dir", str(windows), "--tracks-dir", str(tracks), "--gtf",
             str(_gtf(tmp_path)), "--genome", str(genome), "--base-checkpoint", "x",
-            "--arm", "rnacond:K562", "--head", "rnacond", "--calls-run", "",
+            "--arm", "rnacond:K562", "--head", "rnacond_fc2d", "--calls-run", "",
             "--checkpoint", str(tmp_path / "ckpt"),
             "--expression", str(tmp_path / "genes.parquet"),
         ]

@@ -3,30 +3,25 @@
 Usage::
 
     python -m tisiago.tracks.evaluate --ceiling-only --split val
-    python -m tisiago.tracks.evaluate --checkpoint data/tracks/runs/shared/best --arm shared \
-        --split val
-    python -m tisiago.tracks.evaluate --checkpoint data/tracks/runs/shared/best --arm shared \
-        --split test --i-am-final
-    python -m tisiago.tracks.evaluate --checkpoint data/tracks/runs/rnacond_hela/best \
+    python -m tisiago.tracks.evaluate \
+        --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0/best \
         --arm rnacond:HeLa --split val --condition HeLa,K562
 
-Writes one row per channel to ``data/tracks/eval/<arm>_<split>.tsv`` (model prediction vs pooled
-targets), ``data/tracks/eval/ceiling_<split>.tsv`` (replicate 1 observed; the profile prediction is
-replicate 2 smoothed by a centred 5-bp boxcar plus 1e-3 per position, gene totals and CHX frame
-use raw replicate 2) and ``data/tracks/eval/uniform_<split>.tsv`` (a flat prediction of the pooled
-targets: the KL floor). Metrics: mean masked ``profile_kl`` over windows (NaN windows skipped
-and counted); gene-level ``log_pearson`` over the channel's expressed same-strand genes, each
-gene totalled once in the window that contains it whose centre is nearest the gene centre (genes
-never fully inside a window are excluded and counted); and, for CHX channels, the frame-0
-fraction over MANE CDS of genes expressed in the channel's condition, assigned to windows the
-same way (canonical P-sites, no shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a
-truncated reference never stands in for the full one; a reused reference must match the
-``ceiling_version``, window count and tracks directory.
-
-An ``rnacond:<group>`` checkpoint is evaluated on any condition (held out or not) by feeding
-that condition's RNA: one ``<arm>_<condition>_<split>.tsv`` per ``--condition`` (default: all
-six), rows for its TIS/CHX channels in the same format plus ``heldout``, ``rna_depth_scale``
-and ``rna_total`` (the RNA input's normalisation; checked against the run's ``run.json``).
+A checkpoint is evaluated on any condition (held out or not) by feeding that condition's RNA: one
+``data/tracks/eval/<arm>_<condition>_<split>.tsv`` per ``--condition`` (default: all six), one row
+per TIS/CHX channel (model prediction vs pooled targets) plus ``heldout``, ``rna_depth_scale`` and
+``rna_total`` (the RNA input's normalisation; checked against the run's ``run.json``). References:
+``data/tracks/eval/ceiling_<split>.tsv`` (replicate 1 observed; the profile prediction is replicate
+2 smoothed by a centred 5-bp boxcar plus 1e-3 per position, gene totals and CHX frame use raw
+replicate 2) and ``data/tracks/eval/uniform_<split>.tsv`` (a flat prediction of the pooled targets:
+the KL floor). Metrics: mean masked ``profile_kl`` over windows (NaN windows skipped and counted);
+gene-level ``log_pearson`` over the channel's expressed same-strand genes, each gene totalled once
+in the window that contains it whose centre is nearest the gene centre (genes never fully inside a
+window are excluded and counted); and, for CHX channels, the frame-0 fraction over MANE CDS of genes
+expressed in the channel's condition, assigned to windows the same way (canonical P-sites, no
+shift). ``--max-windows`` runs write ``*_max<N>.tsv`` so a truncated reference never stands in for
+the full one; a reused reference must match the ``ceiling_version``, window count and tracks
+directory.
 """
 
 from __future__ import annotations
@@ -44,18 +39,13 @@ import numpy as np
 import pandas as pd
 
 from tisiago.tracks.data import RNA_REFERENCE_DEPTH, TrackReader, iterate, rna_total
-from tisiago.tracks.head_kinds import CHX_KINDS, HEAD_CHOICES, RNA_KINDS, TRANSCRIPT_KINDS
+from tisiago.tracks.head_kinds import DEFAULT_HEAD, HEAD_CHOICES
 from tisiago.tracks.masking import expression_mask
 from tisiago.tracks.metrics import gene_totals, log_pearson, profile_kl
 from tisiago.tracks.qc import _frame_counts
 from tisiago.tracks.samples import CONDITIONS
 from tisiago.tracks.targets import channel_layout, rnacond_layout
-from tisiago.tracks.train_genomic import (
-    check_rnacond_run,
-    is_rnacond_arm,
-    parse_arm,
-    parse_rnacond_arm,
-)
+from tisiago.tracks.train_genomic import check_rnacond_run, parse_rnacond_arm
 
 EXCLUDED = -1
 OUTSIDE = -2
@@ -336,51 +326,24 @@ def load_predict_fn(
     arm: str,
     *,
     base_checkpoint: str | Path,
-    head_kind: str = "mlp",
+    head_kind: str = DEFAULT_HEAD,
     device=None,
 ) -> Callable[[dict], np.ndarray]:
     """``predict(batch) -> (1, S, C)`` from a ``save_checkpoint(save_full_model=True)`` dir.
 
-    A ``resid_chx`` head is rebuilt with the channels of the run's ``mod_libraries`` and
-    ``mod_scale_tis`` (as ``train.py`` derives them; runs without them: CHX, ``MOD_SCALE``),
-    checked against ``mod_channels`` / ``mod_scales`` in the run's ``run.json`` when recorded.
+    The run's ``run.json`` (when present) must agree with ``arm``.
     """
     import jax.numpy as jnp
 
-    from tisiago.tracks.model import MOD_SCALE, load_finetuned, make_predict, resid_chx_spec
+    from tisiago.tracks.model import load_finetuned, make_predict
 
-    rnacond = is_rnacond_arm(arm)
-    if rnacond != (head_kind in RNA_KINDS):
-        raise ValueError(f"arm {arm} and head kind {head_kind}: rnacond arms need rnacond heads")
-    if rnacond:
-        head, _, conditions = parse_rnacond_arm(arm)
-        layout = rnacond_layout(conditions[0])
-        path = Path(checkpoint).parent / "run.json"
-        if path.exists():
-            check_rnacond_run(json.loads(path.read_text()), arm)
-    else:
-        head, conditions = parse_arm(arm)
-        layout = channel_layout(conditions)
-    mod_channels = mod_scales = None
-    if head_kind in CHX_KINDS:
-        path = Path(checkpoint).parent / "run.json"
-        run = json.loads(path.read_text()) if path.exists() else {}
-        mod_channels, mod_scales = resid_chx_spec(
-            layout, run.get("mod_libraries") or ("chx",), run.get("mod_scale_tis", MOD_SCALE)
-        )
-        for key, value in (("mod_channels", mod_channels), ("mod_scales", mod_scales)):
-            recorded = run.get(key)
-            if recorded is not None and tuple(recorded) != value:
-                raise ValueError(f"{path} records {key}={recorded}, but arm {arm} gives {value}")
+    head, _, conditions = parse_rnacond_arm(arm)
+    layout = rnacond_layout(conditions[0])
+    path = Path(checkpoint).parent / "run.json"
+    if path.exists():
+        check_rnacond_run(json.loads(path.read_text()), arm)
     model = load_finetuned(
-        str(checkpoint),
-        str(base_checkpoint),
-        head,
-        len(layout),
-        head_kind,
-        device=device,
-        mod_channels=mod_channels,
-        mod_scales=mod_scales,
+        str(checkpoint), str(base_checkpoint), head, len(layout), head_kind, device=device
     )
     predict = make_predict(model, head)
     params, state = model._params, model._state
@@ -399,29 +362,20 @@ def evaluate_checkpoint(
     cds_genes: Sequence[str] = (),
     predict_fn: Callable[[dict], np.ndarray] | None = None,
     base_checkpoint: str | Path | None = None,
-    head_kind: str = "mlp",
+    head_kind: str = DEFAULT_HEAD,
     prefetch: int = 4,
-    transcripts=None,
     condition: str | None = None,
 ) -> pd.DataFrame:
-    """Per-channel metrics of the arm's predictions against pooled targets.
+    """Per-channel metrics of the arm's predictions on ``condition`` against pooled targets.
 
     ``predict_fn(batch)`` maps an ``iterate`` batch to ``(1, S, C)`` predictions; when omitted
-    it is loaded from ``checkpoint`` with :func:`load_predict_fn`. ``transcripts`` (see
-    :func:`load_transcripts`) adds the ``seqconv_tx`` input channels. ``rnacond`` arms need
-    ``condition`` (any of :data:`CONDITIONS`): its RNA is the input, its TIS/CHX the targets.
+    it is loaded from ``checkpoint`` with :func:`load_predict_fn`. ``condition`` (any of
+    :data:`CONDITIONS`): its RNA is the input, its TIS/CHX the targets.
     """
-    rnacond = is_rnacond_arm(arm)
-    if rnacond:
-        parse_rnacond_arm(arm)
-        if condition not in CONDITIONS:
-            raise ValueError(f"{arm} needs a condition from {CONDITIONS}, not {condition!r}")
-        conditions, layout = (condition,), rnacond_layout(condition)
-    else:
-        if condition is not None:
-            raise ValueError(f"condition is only for rnacond arms, not {arm}")
-        _, conditions = parse_arm(arm)
-        layout = channel_layout(conditions)
+    parse_rnacond_arm(arm)
+    if condition not in CONDITIONS:
+        raise ValueError(f"{arm} needs a condition from {CONDITIONS}, not {condition!r}")
+    conditions, layout = (condition,), rnacond_layout(condition)
     if predict_fn is None:
         predict_fn = load_predict_fn(
             checkpoint, arm, base_checkpoint=base_checkpoint, head_kind=head_kind
@@ -439,8 +393,6 @@ def evaluate_checkpoint(
         augment_examples=False,
         loop=False,
         prefetch=prefetch,
-        transcripts=transcripts,
-        rna_conditioned=rnacond,
     )
     try:
         for i, batch in enumerate(batches):
@@ -449,10 +401,9 @@ def evaluate_checkpoint(
     finally:
         batches.close()
     table = metrics.table()
-    if rnacond:
-        total = rna_total(tracks_dir, condition)
-        table["rna_depth_scale"] = RNA_REFERENCE_DEPTH / total
-        table["rna_total"] = total
+    total = rna_total(tracks_dir, condition)
+    table["rna_depth_scale"] = RNA_REFERENCE_DEPTH / total
+    table["rna_total"] = total
     return table
 
 
@@ -481,7 +432,7 @@ def output_paths(
     """``{"model": <arm>_<split>.tsv, "ceiling"|"uniform": <kind>_<split>.tsv}`` in ``out_dir``.
 
     With ``max_windows`` both names gain ``_max<N>`` so truncated runs never take the full names.
-    A ``condition`` (rnacond arms) is added to the model name: ``<arm>_<condition>_<split>``.
+    A ``condition`` is added to the model name: ``<arm>_<condition>_<split>``.
     """
     out_dir = Path(out_dir)
     suffix = f"{split}_max{max_windows}" if max_windows is not None else split
@@ -499,19 +450,8 @@ def run_args(checkpoint: Path) -> dict:
 
 
 def head_kind_of(checkpoint: Path) -> str:
-    """Head kind recorded in the run's ``run.json``; else mlp."""
-    return run_args(checkpoint).get("head") or "mlp"
-
-
-def load_transcripts(head_kind: str, gtf: str | Path | None):
-    """``TranscriptFeatures`` from ``gtf`` for a :data:`TRANSCRIPT_KINDS` head, else ``None``."""
-    if head_kind not in TRANSCRIPT_KINDS:
-        return None
-    if not gtf:
-        raise ValueError(f"head kind {head_kind} needs --gtf (or TISIAGO_GTF)")
-    from tisiago.tracks.tx_features import TranscriptFeatures
-
-    return TranscriptFeatures.from_gtf(gtf)
+    """Head kind recorded in the run's ``run.json``; else the default head."""
+    return run_args(checkpoint).get("head") or DEFAULT_HEAD
 
 
 def tracks_dir_of(checkpoint: Path | None) -> Path:
@@ -549,11 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--checkpoint", type=Path, help="run's best/ or last/ directory")
-    ap.add_argument("--arm", help="'shared', 'condition:<C>' or 'rnacond:<held-out group>'")
+    ap.add_argument("--arm", help="'rnacond:<held-out cell-line group>'")
     ap.add_argument(
-        "--condition",
-        default=None,
-        help="rnacond arms: comma list of conditions to evaluate (default: all six)",
+        "--condition", default=None, help="comma list of conditions to evaluate (default: all six)"
     )
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
@@ -589,18 +527,17 @@ def main() -> None:
     args = ap.parse_args()
     if args.split == "test" and not args.i_am_final:
         ap.error("--split test reads the held-out chromosomes; pass --i-am-final to confirm")
-    rnacond = args.arm is not None and is_rnacond_arm(args.arm)
     if not args.ceiling_only:
         if args.arm is None or args.checkpoint is None:
             ap.error("--arm and --checkpoint are required unless --ceiling-only")
         try:
-            parse_rnacond_arm(args.arm) if rnacond else parse_arm(args.arm)
+            parse_rnacond_arm(args.arm)
         except ValueError as exc:
             ap.error(str(exc))
-    if args.condition is not None and not (rnacond and not args.ceiling_only):
-        ap.error("--condition is only for rnacond arms")
+    if args.condition is not None and args.ceiling_only:
+        ap.error("--condition needs a model (drop --ceiling-only)")
     conditions: list[str | None] = [None]
-    if rnacond:
+    if not args.ceiling_only:
         conditions = args.condition.split(",") if args.condition else list(CONDITIONS)
         unknown = sorted(set(conditions) - set(CONDITIONS))
         if unknown or len(set(conditions)) != len(conditions):
@@ -648,18 +585,15 @@ def main() -> None:
     if args.ceiling_only:
         return
 
-    if rnacond:
-        try:
-            check_rna_scales(args.checkpoint, tracks_dir, conditions)
-        except ValueError as exc:
-            ap.error(str(exc))
-    t0 = time.time()
+    try:
+        check_rna_scales(args.checkpoint, tracks_dir, conditions)
+    except ValueError as exc:
+        ap.error(str(exc))
     head_kind = args.head or head_kind_of(args.checkpoint)
-    transcripts = load_transcripts(head_kind, args.gtf)
     predict_fn = load_predict_fn(
         args.checkpoint, args.arm, base_checkpoint=args.base_checkpoint, head_kind=head_kind
     )
-    trained = set(parse_rnacond_arm(args.arm)[2]) if rnacond else set()
+    trained = set(parse_rnacond_arm(args.arm)[2])
     for condition in conditions:
         t0 = time.time()
         table = evaluate_checkpoint(
@@ -673,12 +607,10 @@ def main() -> None:
             cds_genes=cds_genes,
             predict_fn=predict_fn,
             prefetch=args.prefetch,
-            transcripts=transcripts,
             condition=condition,
         )
         table = table.assign(source="model", arm=args.arm, checkpoint=str(args.checkpoint), **meta)
-        if rnacond:
-            table["heldout"] = condition not in trained
+        table["heldout"] = condition not in trained
         path = models[condition]["model"]
         write_tsv(table, path)
         print(f"model {time.time() - t0:.0f}s -> {path}", flush=True)

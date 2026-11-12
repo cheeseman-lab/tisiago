@@ -46,7 +46,7 @@ or synthetic-BAM Jaccard (guardrails only).
 src/tisiago/
   tracks/      samples, psite, track_io, targets, data, augment, masking, rna_features, expression,
                windows, qc                                  data: BAMs -> P-site tracks -> windows
-               model, loss, head_kinds, checkpoint, orf_features, tx_features
+               model (registered head: rnacond_fc2d), loss, head_kinds, checkpoint
                train_genomic     stage 1: genomic windows, genome-space head (--arm rnacond:<line>)
                txcache, cache_seq  transcript-space embedding cache (+ mRNA sequence)
                fastloop          head/loss/structure screening on the cache (~4 min/config)
@@ -63,9 +63,8 @@ configs/   tracks/ (reference recipe), tracks/fastloop/, tis_alphagenome_*.yaml,
 docs/      PLAN, PRINCIPLES, INFERENCE_AND_EVALUATION, DATA_CONTRACT, WORKPLAN, specs/
 ```
 
-Known debt: `train_genomic`, `evaluate`, `predict_tracks` and `periodicity` still carry the retired
-per-condition arms (`shared`, `condition:<C>`) and `model` carries unused head kinds; remove once Phase 1
-has re-baselined the reference recipe on GPU (docs/WORKPLAN.md).
+Checkpoints register their head as `p6_rnacond_<line>`; keep that name so existing checkpoints load. The
+per-condition arms and explored head kinds are gone (tag `archive/pre-cleanup-2026-11-12` has them).
 
 ## Environments
 

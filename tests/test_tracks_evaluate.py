@@ -24,7 +24,7 @@ from tisiago.tracks.evaluate import (
 from tisiago.tracks.masking import expression_mask
 from tisiago.tracks.metrics import profile_kl
 from tisiago.tracks.qc import _frame_counts
-from tisiago.tracks.targets import channel_layout
+from tisiago.tracks.targets import channel_layout, rnacond_layout
 from tisiago.tracks.track_io import track_prefix, write_bigwigs
 
 SIZE = 200
@@ -166,15 +166,16 @@ def world(tmp_path):
 
 
 def test_evaluate_checkpoint_perfect_fake_model(world):
-    layout = channel_layout(["HeLa"])
+    layout = rnacond_layout("HeLa")
 
     def oracle(batch):
         return batch["targets"]
 
     table = evaluate_checkpoint(
         None,
-        "condition:HeLa",
+        "rnacond:K562",
         WINDOWS,
+        condition="HeLa",
         fasta=world["fasta"],
         tracks_dir=world["tracks_dir"],
         genes=world["genes"],
@@ -201,8 +202,9 @@ def test_evaluate_checkpoint_flat_model_is_worse(world):
 
     table = evaluate_checkpoint(
         None,
-        "condition:HeLa",
+        "rnacond:K562",
         WINDOWS,
+        condition="HeLa",
         fasta=world["fasta"],
         tracks_dir=world["tracks_dir"],
         genes=world["genes"],
@@ -216,7 +218,7 @@ def test_evaluate_checkpoint_flat_model_is_worse(world):
 
 
 def test_test_split_refuses_without_final_flag(tmp_path, monkeypatch, capsys):
-    argv = ["evaluate", "--arm", "shared", "--checkpoint", str(tmp_path), "--split", "test"]
+    argv = ["evaluate", "--arm", "rnacond:HeLa", "--checkpoint", str(tmp_path), "--split", "test"]
     monkeypatch.setattr(sys, "argv", [*argv, "--out-dir", str(tmp_path / "eval")])
     with pytest.raises(SystemExit) as exc:
         evaluate.main()
@@ -228,13 +230,13 @@ def test_test_split_refuses_without_final_flag(tmp_path, monkeypatch, capsys):
 def test_cli_refuses_to_overwrite_existing_output(tmp_path, monkeypatch):
     out = tmp_path / "eval"
     out.mkdir()
-    (out / "condition_hela_val.tsv").write_text("x\n")
-    argv = ["evaluate", "--arm", "condition:HeLa", "--checkpoint", str(tmp_path)]
+    (out / "rnacond_k562_hela_val.tsv").write_text("x\n")
+    argv = ["evaluate", "--arm", "rnacond:K562", "--checkpoint", str(tmp_path)]
     monkeypatch.setattr(sys, "argv", [*argv, "--split", "val", "--out-dir", str(out)])
     with pytest.raises(SystemExit) as exc:
         evaluate.main()
     assert exc.value.code != 0
-    assert (out / "condition_hela_val.tsv").read_text() == "x\n"
+    assert (out / "rnacond_k562_hela_val.tsv").read_text() == "x\n"
 
 
 def test_ceiling_only_refuses_existing_ceiling(tmp_path, monkeypatch):
@@ -251,8 +253,8 @@ def test_ceiling_only_refuses_existing_ceiling(tmp_path, monkeypatch):
 
 
 def test_output_paths():
-    out = evaluate.output_paths("data/tracks/eval", "condition:RPE1_Que", "val")
-    assert str(out["model"]) == "data/tracks/eval/condition_rpe1_que_val.tsv"
+    out = evaluate.output_paths("data/tracks/eval", "rnacond:RPE1", "val")
+    assert str(out["model"]) == "data/tracks/eval/rnacond_rpe1_val.tsv"
     assert str(out["ceiling"]) == "data/tracks/eval/ceiling_val.tsv"
 
 
@@ -268,111 +270,42 @@ def test_load_predict_fn_rebuilds_model_and_restores_checkpoint(monkeypatch, tmp
     class FakeModel:
         _params, _state = "params", "state"
 
-    def fake_load_finetuned(
-        checkpoint, base, head, num_tracks, kind, device=None, mod_channels=None, mod_scales=None
-    ):
+    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, device=None):
         calls["load"] = (checkpoint, base, head, num_tracks, kind)
         calls["device"] = device
-        calls["mod_channels"] = mod_channels
-        calls["mod_scales"] = mod_scales
         return FakeModel()
 
     def fake_make_predict(model, head):
         calls["head"] = head
-        return lambda params, state, seq: np.zeros((1, seq.shape[1], 6)) + (params == "params")
+        return lambda params, state, seq: np.zeros((1, seq.shape[1], 4)) + (params == "params")
 
     monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
     monkeypatch.setattr(model_mod, "make_predict", fake_make_predict)
     predict = evaluate.load_predict_fn(
-        tmp_path, "condition:HeLa", base_checkpoint="weights", head_kind="conv", device="cpu0"
+        tmp_path / "best",
+        "rnacond:HeLa",
+        base_checkpoint="weights",
+        head_kind="rnacond_fc2d",
+        device="cpu0",
     )
-    assert calls["load"] == (str(tmp_path), "weights", "p6_hela", 6, "conv")
-    assert calls["mod_channels"] is None
-    assert calls["mod_scales"] is None
+    assert calls["load"] == (
+        str(tmp_path / "best"),
+        "weights",
+        "p6_rnacond_hela",
+        4,
+        "rnacond_fc2d",
+    )
     assert calls["device"] == "cpu0"
-    assert calls["head"] == "p6_hela"
-    out = predict({"sequences": np.zeros((1, 8, 4), np.float32)})
-    assert out.shape == (1, 8, 6) and (out == 1).all()
-
-
-def test_load_predict_fn_passes_chx_channels_for_resid_chx(monkeypatch, tmp_path):
-    pytest.importorskip("alphagenome_ft")
-    model_mod = pytest.importorskip("tisiago.tracks.model")
-    from tisiago.tracks.targets import channel_layout, library_channels
-
-    calls = {}
-
-    class FakeModel:
-        _params, _state = "params", "state"
-
-    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, **kwargs):
-        calls.update(kwargs)
-        return FakeModel()
-
-    monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
-    monkeypatch.setattr(model_mod, "make_predict", lambda model, head: None)
-    evaluate.load_predict_fn(
-        tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
-    )
-    want = library_channels(channel_layout(["K562"]), "chx")
-    assert calls["mod_channels"] == want and len(want) == 2
-    assert calls["mod_scales"] == (model_mod.MOD_SCALE,) * 2
-    (tmp_path / "run.json").write_text(json.dumps({"mod_channels": [0, 1]}))
-    with pytest.raises(ValueError, match="mod_channels"):
-        evaluate.load_predict_fn(
-            tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
-        )
-    (tmp_path / "run.json").write_text(json.dumps({"mod_channels": list(want)}))
-    evaluate.load_predict_fn(
-        tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
-    )
-
-
-def test_load_predict_fn_rebuilds_mod_libraries_from_run_json(monkeypatch, tmp_path):
-    pytest.importorskip("alphagenome_ft")
-    model_mod = pytest.importorskip("tisiago.tracks.model")
-    calls = {}
-
-    class FakeModel:
-        _params, _state = "params", "state"
-
-    def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, **kwargs):
-        calls.update(kwargs)
-        return FakeModel()
-
-    monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
-    monkeypatch.setattr(model_mod, "make_predict", lambda model, head: None)
-    run = {"mod_libraries": ["chx", "tis"], "mod_scale_tis": 3.0}
-    (tmp_path / "run.json").write_text(json.dumps(run))
-
-    def load():
-        evaluate.load_predict_fn(
-            tmp_path / "best", "condition:K562", base_checkpoint="w", head_kind="resid_chx"
-        )
-
-    load()
-    scale = model_mod.MOD_SCALE
-    assert calls["mod_channels"] == (0, 1, 2, 3)
-    assert calls["mod_scales"] == (3.0, 3.0, scale, scale)
-    recorded = {**run, "mod_channels": [0, 1, 2, 3], "mod_scales": [3.0, 3.0, scale, scale]}
-    (tmp_path / "run.json").write_text(json.dumps(recorded))
-    load()
-    (tmp_path / "run.json").write_text(json.dumps({**recorded, "mod_scales": [scale] * 4}))
-    with pytest.raises(ValueError, match="mod_scales"):
-        load()
-    (tmp_path / "run.json").write_text(json.dumps({**recorded, "mod_channels": [2, 3]}))
-    with pytest.raises(ValueError, match="mod_channels"):
-        load()
-    (tmp_path / "run.json").write_text(json.dumps({"mod_libraries": ["chx", "harr"]}))
-    with pytest.raises(ValueError, match="mod_libraries"):
-        load()
+    assert calls["head"] == "p6_rnacond_hela"
+    out = predict({"sequences": np.zeros((1, 8, 6), np.float32)})
+    assert out.shape == (1, 8, 4) and (out == 1).all()
 
 
 def test_head_kind_read_from_run_json(tmp_path):
     (tmp_path / "best").mkdir()
-    assert evaluate.head_kind_of(tmp_path / "best") == "mlp"
-    (tmp_path / "run.json").write_text('{"args": {"head": "conv"}}')
-    assert evaluate.head_kind_of(tmp_path / "best") == "conv"
+    assert evaluate.head_kind_of(tmp_path / "best") == "rnacond_fc2d"
+    (tmp_path / "run.json").write_text('{"args": {"head": "rnacond_fc2"}}')
+    assert evaluate.head_kind_of(tmp_path / "best") == "rnacond_fc2"
 
 
 def test_frame0_only_counts_cds_of_expressed_genes(world):
@@ -380,8 +313,9 @@ def test_frame0_only_counts_cds_of_expressed_genes(world):
     # predicted and observed frame-0 for the + channel.
     table = evaluate_checkpoint(
         None,
-        "condition:HeLa",
+        "rnacond:K562",
         WINDOWS,
+        condition="HeLa",
         fasta=world["fasta"],
         tracks_dir=world["tracks_dir"],
         genes=world["genes"],
@@ -476,13 +410,13 @@ def test_reused_ceiling_must_match_window_count(cli_world, capsys):
     full = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
     assert set(full.windows) == {3}
     full.assign(windows=2).to_csv(out / "ceiling_val.tsv", sep="\t", index=False)
-    model = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    model = ["--arm", "rnacond:K562", "--checkpoint", str(cli_world["root"] / "best")]
     fakes = ["--genome", "g.fa", "--gtf", "g.gtf", "--base-checkpoint", "w"]
     with pytest.raises(SystemExit) as exc:
         cli_world["run"](*model, *fakes, "--tracks-dir", str(cli_world["tracks"]))
     assert exc.value.code != 0
     assert "computed on [2] windows, not 3" in capsys.readouterr().err
-    assert not (out / "condition_hela_val.tsv").exists()
+    assert not (out / "rnacond_k562_hela_val.tsv").exists()
     # --overwrite recomputes it
     cli_world["run"]("--ceiling-only", "--overwrite", "--tracks-dir", str(cli_world["tracks"]))
     assert set(pd.read_csv(out / "ceiling_val.tsv", sep="\t").windows) == {3}
@@ -490,7 +424,7 @@ def test_reused_ceiling_must_match_window_count(cli_world, capsys):
 
 def test_reused_ceiling_must_match_tracks_dir(cli_world, capsys):
     cli_world["run"]("--ceiling-only", "--tracks-dir", str(cli_world["tracks"]))
-    model = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    model = ["--arm", "rnacond:K562", "--checkpoint", str(cli_world["root"] / "best")]
     fakes = ["--genome", "g.fa", "--gtf", "g.gtf", "--base-checkpoint", "w"]
     with pytest.raises(SystemExit):
         cli_world["run"](*model, *fakes, "--tracks-dir", str(cli_world["root"] / "other"))
@@ -553,13 +487,13 @@ def test_old_or_unversioned_ceiling_is_refused(cli_world, capsys, version):
         table = table.assign(ceiling_version=version)
     table.to_csv(out / "ceiling_val.tsv", sep="\t", index=False)
     # a model run would reuse it
-    model = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
+    model = ["--arm", "rnacond:K562", "--checkpoint", str(cli_world["root"] / "best")]
     fakes = ["--genome", "g.fa", "--base-checkpoint", "w"]
     with pytest.raises(SystemExit) as exc:
         cli_world["run"](*model, *fakes, *tracks)
     assert exc.value.code != 0
     assert "ceiling_version" in capsys.readouterr().err
-    assert not (out / "condition_hela_val.tsv").exists()
+    assert not (out / "rnacond_k562_hela_val.tsv").exists()
     # a ceiling-only run that only needs to add the uniform reference also refuses the old one
     (out / "uniform_val.tsv").unlink()
     with pytest.raises(SystemExit):
@@ -591,43 +525,6 @@ def test_ceiling_frame0_pred_uses_raw_rep2_not_smoothed(tmp_path):
     assert chx.frame0_cds == 1
     assert chx.frame0_pred == pytest.approx(30 / 31)
     assert chx.frame0_obs == pytest.approx(30 / 31)
-
-
-def test_evaluate_checkpoint_passes_transcript_features(world):
-    from tisiago.tracks.tx_features import Transcript, TranscriptFeatures
-
-    transcripts = TranscriptFeatures([Transcript("T", "G", "chr7", "+", ((10, 60), (80, 120)))])
-    widths = []
-
-    def oracle(batch):
-        widths.append(batch["sequences"].shape[-1])
-        assert batch["sequences"][0, 10:60, 4 + 9].all()
-        return batch["targets"]
-
-    evaluate_checkpoint(
-        None,
-        "condition:HeLa",
-        WINDOWS.iloc[:1],
-        fasta=world["fasta"],
-        tracks_dir=world["tracks_dir"],
-        genes=world["genes"],
-        predict_fn=oracle,
-        transcripts=transcripts,
-    )
-    assert widths == [24]
-
-
-def test_load_transcripts_only_for_transcript_heads(tmp_path):
-    gtf = tmp_path / "g.gtf"
-    gtf.write_text(
-        'chr7\tH\texon\t11\t60\t.\t+\t.\tgene_id "G"; transcript_id "T"; tag "MANE_Select";\n'
-    )
-    assert evaluate.load_transcripts("mlp", None) is None
-    assert evaluate.load_transcripts("seqconv", gtf) is None
-    with pytest.raises(ValueError, match="gtf"):
-        evaluate.load_transcripts("seqconv_tx", None)
-    loaded = evaluate.load_transcripts("seqconv_tx", gtf)
-    assert [t.transcript_id for t in loaded.overlapping("chr7", 0, 100)] == ["T"]
 
 
 # --- rnacond: one model, evaluated on any condition by feeding that condition's RNA ---
@@ -680,19 +577,8 @@ def test_evaluate_checkpoint_rnacond_on_held_out_condition(rna_world):
     ]
     assert np.allclose(table.profile_kl, 0.0, atol=1e-9)
     assert np.allclose(table.log_pearson[table.strand == "+"], 1.0)
-    # same row format as an old-arm table, so the existing metrics and readers apply
-    old = evaluate_checkpoint(
-        None,
-        "condition:HeLa",
-        WINDOWS,
-        fasta=rna_world["fasta"],
-        tracks_dir=rna_world["tracks_dir"],
-        genes=rna_world["genes"],
-        cds=rna_world["cds"],
-        cds_genes=rna_world["cds_genes"],
-        predict_fn=lambda batch: batch["targets"],
-    )
-    assert list(table.columns) == [*old.columns, "rna_depth_scale", "rna_total"]
+    # the reference row format plus the RNA normalisation, so the same readers apply
+    assert list(table.columns)[-2:] == ["rna_depth_scale", "rna_total"]
     # an in-distribution condition of the same fold uses its own RNA and targets
     seen = []
     hela = evaluate_checkpoint(
@@ -719,7 +605,7 @@ def test_evaluate_checkpoint_rnacond_needs_one_known_condition(rna_world):
         evaluate_checkpoint(None, "rnacond:K562", WINDOWS, **kwargs)
     with pytest.raises(ValueError, match="condition"):
         evaluate_checkpoint(None, "rnacond:K562", WINDOWS, condition="Nope", **kwargs)
-    with pytest.raises(ValueError, match="condition"):
+    with pytest.raises(ValueError, match="arm"):
         evaluate_checkpoint(None, "condition:HeLa", WINDOWS, condition="HeLa", **kwargs)
 
 
@@ -736,7 +622,7 @@ def test_evaluate_rnacond_with_a_tiny_model(rna_world):
         return Embeddings(embeddings_1bp=hk.Linear(8, name="fb")(dna_sequence))
 
     head = "p6_test_rnacond_eval"
-    register_track_head(head, 4, kind="rnacond")
+    register_track_head(head, 4, kind="rnacond_fc2d")
     forward = make_sequence_forward([head], detach_backbone=True, backbone=backbone)
     org = jnp.zeros((1,), jnp.int32)
     params, state = forward.init(jax.random.PRNGKey(0), jnp.zeros((1, 100, 6)), org)
@@ -773,22 +659,20 @@ def test_load_predict_fn_rnacond(monkeypatch, tmp_path):
         _params, _state = "params", "state"
 
     def fake_load_finetuned(checkpoint, base, head, num_tracks, kind, **kwargs):
-        calls["load"] = (head, num_tracks, kind, kwargs.get("mod_channels"))
+        calls["load"] = (head, num_tracks, kind)
         return FakeModel()
 
     monkeypatch.setattr(model_mod, "load_finetuned", fake_load_finetuned)
     monkeypatch.setattr(model_mod, "make_predict", lambda model, head: None)
 
-    def load(arm="rnacond:HeLa", kind="rnacond"):
+    def load(arm="rnacond:HeLa", kind="rnacond_fc2d"):
         evaluate.load_predict_fn(tmp_path / "best", arm, base_checkpoint="w", head_kind=kind)
 
     load()
-    assert calls["load"] == ("p6_rnacond_hela", 4, "rnacond", None)
+    assert calls["load"] == ("p6_rnacond_hela", 4, "rnacond_fc2d")
     with pytest.raises(ValueError, match="rnacond"):
-        load(kind="mlp")
-    with pytest.raises(ValueError, match="rnacond"):
-        load(arm="condition:HeLa", kind="rnacond")
-    run = {"args": {"arm": "rnacond:HeLa"}, **train.arm_fields("rnacond:HeLa", "rnacond")}
+        load(arm="condition:HeLa")
+    run = {"args": {"arm": "rnacond:HeLa"}, **train.arm_fields("rnacond:HeLa")}
     (tmp_path / "run.json").write_text(json.dumps(run))
     load()
     with pytest.raises(ValueError, match="heldout_group"):
@@ -810,7 +694,7 @@ def test_cli_rnacond_writes_one_table_per_condition(cli_world, monkeypatch, caps
     Fasta(str(fasta)).close()
     loaded = []
 
-    def fake_load(checkpoint, arm, *, base_checkpoint, head_kind="mlp", device=None):
+    def fake_load(checkpoint, arm, *, base_checkpoint, head_kind="rnacond_fc2d", device=None):
         loaded.append((arm, head_kind))
         return lambda batch: batch["targets"]
 
@@ -818,9 +702,9 @@ def test_cli_rnacond_writes_one_table_per_condition(cli_world, monkeypatch, caps
     tracks = ["--tracks-dir", str(cli_world["tracks"])]
     cli_world["run"]("--ceiling-only", *tracks)
     model = ["--arm", "rnacond:RPE1", "--checkpoint", str(cli_world["root"] / "best")]
-    fakes = ["--genome", str(fasta), "--base-checkpoint", "w", "--head", "rnacond"]
+    fakes = ["--genome", str(fasta), "--base-checkpoint", "w", "--head", "rnacond_fc2d"]
     cli_world["run"](*model, *fakes, *tracks, "--condition", "RPE1_Sen,HeLa")
-    assert loaded == [("rnacond:RPE1", "rnacond")]  # the model is loaded once
+    assert loaded == [("rnacond:RPE1", "rnacond_fc2d")]  # the model is loaded once
     out = cli_world["out"]
     ceiling = pd.read_csv(out / "ceiling_val.tsv", sep="\t")
     for condition, heldout in (("RPE1_Sen", True), ("HeLa", False)):
@@ -831,13 +715,16 @@ def test_cli_rnacond_writes_one_table_per_condition(cli_world, monkeypatch, caps
         extra = {"arm", "checkpoint", "heldout", "rna_depth_scale", "rna_total"}
         assert set(ceiling.columns) >= set(table.columns) - extra
         assert table.rna_depth_scale.notna().all()
-    # refuses to overwrite, and an unknown condition or a --condition on an old arm
+    # refuses to overwrite, an unknown condition, a retired arm and --condition without a model
     for extra in (["--condition", "HeLa"], ["--condition", "Nope"]):
         with pytest.raises(SystemExit):
             cli_world["run"](*model, *fakes, *tracks, *extra)
+    assert "--condition" in capsys.readouterr().err
     old = ["--arm", "condition:HeLa", "--checkpoint", str(cli_world["root"] / "best")]
     with pytest.raises(SystemExit):
         cli_world["run"](*old, *fakes, *tracks, "--condition", "HeLa")
+    with pytest.raises(SystemExit):
+        cli_world["run"]("--ceiling-only", *tracks, "--condition", "HeLa")
     assert "--condition" in capsys.readouterr().err
 
 

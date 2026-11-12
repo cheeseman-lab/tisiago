@@ -10,9 +10,9 @@
 #SBATCH --error=logs/%x_%j.err
 #
 # Usage (from the repo root):
-#   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_tracks_train_genomic.sh --arm condition:HeLa \
-#       --steps 20000 --eval-every 1000 --eval-windows 100 \
-#       --out data/tracks/runs/hela
+#   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_tracks_train_genomic.sh \
+#       --arm rnacond:HeLa $(cat configs/tracks/genomic_fc2d.args) \
+#       --out data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0
 
 set -euo pipefail
 

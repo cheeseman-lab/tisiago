@@ -11,10 +11,12 @@
 #
 # Usage (from the repo root):
 #   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_tracks_evaluate.sh \
-#       --checkpoint data/tracks/runs/shared/best --arm shared --split val
+#       --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0/best \
+#       --arm rnacond:HeLa --split val
 #   # held-out chromosomes, only for the final numbers:
 #   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_tracks_evaluate.sh \
-#       --checkpoint data/tracks/runs/shared/best --arm shared --split test --i-am-final
+#       --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0/best \
+#       --arm rnacond:HeLa --split test --i-am-final
 #   # replicate ceiling only (CPU; drop the GPU request):
 #   sbatch --partition=20 --gres=none scripts/run_tracks_evaluate.sh --ceiling-only --split val
 

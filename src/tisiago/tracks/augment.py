@@ -9,7 +9,7 @@ def reverse_complement(onehot, targets, mask, pairs):
     """Reverse-complement a window; swap each (plus, minus) channel pair.
 
     ``onehot`` columns past the first 4 are two stranded feature blocks (plus, then minus, e.g.
-    ``tx_features``): they are reversed and the blocks swapped.
+    the RNA plus/minus channels): they are reversed and the blocks swapped.
     """
     order = np.arange(targets.shape[1])
     for plus, minus in pairs:

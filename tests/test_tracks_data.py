@@ -7,8 +7,8 @@ import pandas as pd
 import pytest
 from pyfaidx import Fasta
 
-from tisiago.tracks.data import augment, iterate, make_example, one_hot
-from tisiago.tracks.targets import channel_layout, strand_pairs
+from tisiago.tracks.data import augment, iterate, make_rnacond_example, one_hot
+from tisiago.tracks.targets import rnacond_layout, strand_pairs
 from tisiago.tracks.track_io import track_prefix, write_bigwigs
 
 SIZES = [("chr1", 64)]
@@ -63,6 +63,13 @@ def kwargs(w):
     return {k: w[k] for k in ("fasta", "tracks_dir", "conditions", "genes")}
 
 
+def example(w, start=0, end=32):
+    return make_rnacond_example(w["fasta"], w["tracks_dir"], "HeLa", w["genes"], "chr1", start, end)
+
+
+PAIRS = strand_pairs(rnacond_layout("HeLa"))
+
+
 def test_one_hot_rows():
     x = one_hot("ACGTN")
     assert x.dtype == np.float32 and x.shape == (5, 4)
@@ -71,23 +78,23 @@ def test_one_hot_rows():
 
 
 def test_make_example_shapes_and_values(world):
-    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32)
-    assert ex["sequences"].shape == (32, 4)
-    assert ex["targets"].shape == (32, 6)
-    assert ex["mask"].shape == (32, 6)
+    ex = example(world)
+    assert ex["sequences"].shape == (32, 6)
+    assert ex["targets"].shape == (32, 4)
+    assert ex["mask"].shape == (32, 4)
     assert ex["targets"][10, 0] == 4
-    assert ex["sequences"][0].tolist() == [1, 0, 0, 0]
+    assert ex["sequences"][0, :4].tolist() == [1, 0, 0, 0]
 
 
 def test_make_example_pads_outside_chromosome(world):
-    ex = make_example(**kwargs(world), chrom="chr1", start=-4, end=4)
+    ex = example(world, -4, 4)
     assert ex["sequences"][:4].sum() == 0
-    assert ex["sequences"][4].tolist() == [1, 0, 0, 0]
+    assert ex["sequences"][4, :4].tolist() == [1, 0, 0, 0]
 
 
 def test_augment_reverse_complement_swaps_strand(world):
-    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32)
-    pairs = strand_pairs(channel_layout(world["conditions"]))
+    ex = example(world)
+    pairs = PAIRS
     out = augment(ex, FixedRng(0.0, 0), pairs)
     assert out["targets"][31 - 10, 1] == 4
     assert out["targets"][10, 0] == 0
@@ -96,9 +103,8 @@ def test_augment_reverse_complement_swaps_strand(world):
 
 
 def test_augment_no_rc_shift_only(world):
-    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32)
-    pairs = strand_pairs(channel_layout(world["conditions"]))
-    out = augment(ex, FixedRng(0.9, 3), pairs)
+    ex = example(world)
+    out = augment(ex, FixedRng(0.9, 3), PAIRS)
     assert out["targets"][13, 0] == 4
     assert not out["mask"][:3].any()
 
@@ -109,63 +115,15 @@ def test_iterate_once_yields_each_window(world):
     )
     assert len(batches) == 3
     assert set(batches[0]) == {"sequences", "targets", "mask"}
-    assert batches[0]["sequences"].shape == (1, 32, 4)
-    assert batches[0]["targets"].shape == (1, 32, 6)
+    assert batches[0]["sequences"].shape == (1, 32, 6)
+    assert batches[0]["targets"].shape == (1, 32, 4)
     assert batches[0]["targets"][0, 10, 0] == 4
 
 
 def test_iterate_loops_and_augments(world):
     it = iterate(world["windows"], **kwargs(world), seed=1, augment_examples=True)
     batches = [next(it) for _ in range(7)]
-    assert all(b["sequences"].shape == (1, 32, 4) for b in batches)
-
-
-def _transcripts():
-    from tisiago.tracks.tx_features import Transcript, TranscriptFeatures
-
-    plus = Transcript("TP", "GP", "chr1", "+", ((2, 12), (20, 40)))
-    minus = Transcript("TM", "GM", "chr1", "-", ((30, 60),))
-    return TranscriptFeatures([plus, minus], cap=50)
-
-
-def test_make_example_with_transcript_features(world):
-    transcripts = _transcripts()
-    base = make_example(**kwargs(world), chrom="chr1", start=0, end=32)
-    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32, transcripts=transcripts)
-    assert ex["sequences"].shape == (32, 24) and ex["sequences"].dtype == np.float32
-    np.testing.assert_array_equal(ex["sequences"][:, :4], base["sequences"])
-    np.testing.assert_array_equal(ex["targets"], base["targets"])
-    seq = Fasta(world["fasta"], as_raw=True)
-    np.testing.assert_array_equal(ex["sequences"][:, 4:], transcripts.window(seq, "chr1", 0, 32))
-    assert ex["sequences"][2:12, 13].all() and not ex["sequences"][12:20, 13].any()
-
-
-def test_augment_moves_transcript_features_with_the_sequence(world):
-    from tisiago.tracks.augment import reverse_complement, shift
-
-    ex = make_example(**kwargs(world), chrom="chr1", start=0, end=32, transcripts=_transcripts())
-    pairs = strand_pairs(channel_layout(world["conditions"]))
-    out = augment(ex, FixedRng(0.0, 2), pairs)
-    rc = reverse_complement(ex["sequences"], ex["targets"], ex["mask"], pairs)
-    expected = shift(*rc, 2)[0]
-    np.testing.assert_array_equal(out["sequences"], expected)
-    # plus-strand exonic block moved to the minus block, positions mirrored and shifted
-    assert out["sequences"][31 - 2 + 2, 4 + 19] == 1.0
-    assert out["sequences"][31 - 2 + 2, 4 + 9] == 0.0
-
-
-def test_iterate_passes_transcripts(world):
-    batches = list(
-        iterate(
-            world["windows"],
-            **kwargs(world),
-            seed=0,
-            augment_examples=True,
-            loop=False,
-            transcripts=_transcripts(),
-        )
-    )
-    assert all(b["sequences"].shape == (1, 32, 24) for b in batches)
+    assert all(b["sequences"].shape == (1, 32, 6) for b in batches)
 
 
 def test_iterate_worker_error_raised_in_consumer(world, tmp_path):
@@ -190,7 +148,7 @@ def test_track_reader_matches_load_targets(world):
 
 def test_iterate_multi_worker_loop_and_error(world, tmp_path):
     it = iterate(world["windows"], **kwargs(world), seed=0, augment_examples=True, workers=2)
-    assert all(next(it)["targets"].shape == (1, 32, 6) for _ in range(9))
+    assert all(next(it)["targets"].shape == (1, 32, 4) for _ in range(9))
     it.close()
     (tmp_path / "tracks" / "HeLa" / "chx_reppooled.minus.bw").unlink()
     it = iterate(world["windows"], **kwargs(world), seed=0, augment_examples=False, workers=2)
@@ -255,18 +213,14 @@ def test_make_rnacond_example_channels(rna_world):
     from tisiago.tracks.masking import expression_mask
     from tisiago.tracks.targets import load_targets, rnacond_layout
 
-    base = make_example(
-        rna_world["fasta"], rna_world["tracks_dir"], ["K562"], rna_world["genes"], "chr1", 0, 32
-    )
     ex = _rna_example(rna_world, "K562")
     assert ex["sequences"].shape == (32, 6) and ex["sequences"].dtype == np.float32
-    np.testing.assert_array_equal(ex["sequences"][:, :4], base["sequences"])
+    np.testing.assert_array_equal(ex["sequences"][:, :4], one_hot(SEQ[:32]))
     rna = _raw(ex["sequences"][:, 4:], "K562")
     assert rna[20, 0] == 7.0 and rna[:, 0].sum() == 7.0
     assert rna[25, 1] == 8.0 and rna[:, 1].sum() == 8.0
     # targets: TIS+, TIS-, CHX+, CHX- of K562 only, canonical minus P-sites
     assert ex["targets"].shape == (32, 4) and ex["mask"].shape == (32, 4)
-    np.testing.assert_array_equal(ex["targets"], base["targets"][:, :4])
     np.testing.assert_array_equal(
         ex["targets"], load_targets(rna_world["tracks_dir"], ["K562"], "chr1", 0, 32)[:, :4]
     )
@@ -314,7 +268,6 @@ def test_iterate_rnacond_pairs_in_order(rna_world):
             seed=0,
             augment_examples=False,
             loop=False,
-            rna_conditioned=True,
         )
     )
     assert len(batches) == 6
@@ -340,7 +293,6 @@ def test_iterate_rnacond_loop_shuffles_every_pair_once_per_epoch(rna_world):
         seed=3,
         augment_examples=False,
         workers=1,
-        rna_conditioned=True,
     )
     pairs = []
     for _ in range(12):
@@ -354,22 +306,17 @@ def test_iterate_rnacond_loop_shuffles_every_pair_once_per_epoch(rna_world):
     assert pairs[:6] != pairs[6:]  # reshuffled per epoch
 
 
-def test_iterate_rnacond_augments_and_rejects_transcripts(rna_world):
+def test_iterate_rnacond_augments(rna_world):
     kw = dict(
         fasta=rna_world["fasta"],
         tracks_dir=rna_world["tracks_dir"],
         conditions=["HeLa"],
         genes=rna_world["genes"],
         seed=0,
-        rna_conditioned=True,
     )
     it = iterate(rna_world["windows"], augment_examples=True, **kw)
     assert all(next(it)["sequences"].shape == (1, 32, 6) for _ in range(5))
     it.close()
-    with pytest.raises(ValueError, match="transcripts"):
-        next(
-            iterate(rna_world["windows"], augment_examples=False, transcripts=_transcripts(), **kw)
-        )
 
 
 def test_iterate_rnacond_held_out_condition_never_read(rna_world, tmp_path):
@@ -386,7 +333,6 @@ def test_iterate_rnacond_held_out_condition_never_read(rna_world, tmp_path):
             seed=0,
             augment_examples=False,
             loop=False,
-            rna_conditioned=True,
         )
     )
     assert len(batches) == 3

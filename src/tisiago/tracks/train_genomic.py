@@ -6,20 +6,16 @@ Usage (reference recipe, one fold; arguments in ``configs/tracks/genomic_fc2d.ar
         $(cat configs/tracks/genomic_fc2d.args) \
         --out data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0
 
-The ``shared`` and ``condition:<C>`` arms are the retired per-condition models, kept until the
-reference recipe is re-baselined on GPU (docs/WORKPLAN.md).
+``--arm rnacond:<group>`` trains one model on every condition outside the held-out cell-line
+group (``samples.CELL_LINE_GROUPS``): examples are (window, condition) pairs, the condition's
+pooled RNA (scaled to a 5e7-read library by its genome-wide pooled RNA reads) is an input and its
+TIS/CHX tracks the 4 targets.
 
-Model selection reads only ``val.parquet`` (chr7); the held-out test split is never loaded.
-``--head seqconv_tx`` adds spliced MANE transcript features (``--gtf``) to the input.
-``best/`` is selected on ``val_profile_kl``; ``val_frame`` (the codon-phase block KL on CHX
-channels) and the per-component train losses are logged, not selected on. ``--init-from`` starts
-from a finished run's parameters (``init_from`` in ``run.json``).
-
-``--arm rnacond:<group>`` (with ``--head rnacond``) trains one model on every condition outside
-the held-out cell-line group (``samples.CELL_LINE_GROUPS``): examples are (window, condition)
-pairs, the condition's pooled RNA (scaled to a 5e7-read library by its genome-wide pooled RNA
-reads) is an input and its TIS/CHX tracks the 4 targets. Model selection uses ``--eval-windows``
-(default 20) evenly spaced val windows of each training condition only.
+Model selection reads only ``val.parquet`` (chr7): ``--eval-windows`` (default 20) evenly spaced
+val windows of each training condition; the held-out test split is never loaded. ``best/`` is
+selected on ``val_profile_kl``; ``val_frame`` (the codon-phase block KL on CHX channels) and the
+per-component train losses are logged, not selected on. ``--init-from`` starts from a finished
+run's parameters (``init_from`` in ``run.json``).
 """
 
 from __future__ import annotations
@@ -39,15 +35,9 @@ from pathlib import Path
 import numpy as np
 
 from tisiago.tracks.checkpoint import finite_or_none, write_json_atomic
-from tisiago.tracks.head_kinds import (
-    CHX_KINDS,
-    HEAD_CHOICES,
-    MOD_KINDS,
-    RNA_KINDS,
-    TRANSCRIPT_KINDS,
-)
+from tisiago.tracks.head_kinds import DEFAULT_HEAD, HEAD_CHOICES
 from tisiago.tracks.metrics import profile_kl
-from tisiago.tracks.samples import CELL_LINE_GROUPS, CONDITIONS, LIBRARIES
+from tisiago.tracks.samples import CELL_LINE_GROUPS, CONDITIONS
 
 TRAIN_WINDOWS = "train.parquet"
 VAL_WINDOWS = "val.parquet"
@@ -57,13 +47,7 @@ RUN_RECORDS = ("log.jsonl", "run.json", "best", "last")
 
 
 RNACOND = "rnacond"
-EVAL_WINDOWS = 100
-RNACOND_EVAL_WINDOWS = 20
-
-
-def is_rnacond_arm(arm: str) -> bool:
-    """True for ``"rnacond:<group>"`` arms (valid or not)."""
-    return arm.partition(":")[0] == RNACOND
+EVAL_WINDOWS = 20
 
 
 def parse_rnacond_arm(arm: str) -> tuple[str, str, tuple[str, ...]]:
@@ -75,89 +59,22 @@ def parse_rnacond_arm(arm: str) -> tuple[str, str, tuple[str, ...]]:
     return f"p6_rnacond_{group.lower()}", group, tuple(c for c in CONDITIONS if c not in held)
 
 
-def parse_arm(arm: str) -> tuple[str, tuple[str, ...]]:
-    """``"shared"`` or ``"condition:<C>"`` -> ``(head name, conditions)``.
-
-    ``rnacond`` arms are refused: they have no per-condition channel layout (see
-    :func:`parse_rnacond_arm`).
-    """
-    if arm == "shared":
-        return "p6_shared", tuple(CONDITIONS)
-    if is_rnacond_arm(arm):
-        raise ValueError(f"{arm!r} is an rnacond arm; this command does not support it")
-    kind, _, condition = arm.partition(":")
-    if kind != "condition" or condition not in CONDITIONS:
-        raise ValueError(f"arm must be 'shared' or 'condition:<one of {CONDITIONS}>', not {arm!r}")
-    return f"p6_{condition.lower()}", (condition,)
-
-
-def mod_libraries_of(value: str | None) -> tuple[str, ...]:
-    """``--mod-libraries`` comma list -> library names (``None``: ``("chx",)``)."""
-    if value is None:
-        return ("chx",)
-    libraries = tuple(name.strip() for name in value.split(","))
-    if not all(libraries) or len(set(libraries)) != len(libraries):
-        raise ValueError(f"--mod-libraries must be a comma list of unique names, not {value!r}")
-    if not set(libraries) <= set(LIBRARIES):
-        raise ValueError(f"--mod-libraries must name libraries in {LIBRARIES}, not {value!r}")
-    return libraries
-
-
-def channel_config(head_kind: str, layout, mod_libraries, mod_scale_tis: float) -> dict:
-    """run.json channel fields: CHX ``frame_channels``; for ``resid_chx`` the modulation too."""
-    from tisiago.tracks.targets import library_channels
-
-    out = {"frame_channels": list(library_channels(layout, "chx"))}
-    if head_kind in CHX_KINDS:
-        from tisiago.tracks.model import resid_chx_spec
-
-        channels, scales = resid_chx_spec(layout, mod_libraries, mod_scale_tis)
-        out |= {
-            "mod_libraries": list(mod_libraries),
-            "mod_scale_tis": float(mod_scale_tis),
-            "mod_channels": list(channels),
-            "mod_scales": list(scales),
-        }
-    return out
-
-
 def local_channels_of(arm: str, libraries=("tis",)) -> tuple[int, ...]:
     """Channel indices of ``libraries`` in ``arm``'s output layout (local-multinomial channels)."""
-    from tisiago.tracks.targets import channel_layout, modulated_channels, rnacond_layout
+    from tisiago.tracks.targets import modulated_channels, rnacond_layout
 
-    if is_rnacond_arm(arm):
-        layout = rnacond_layout(parse_rnacond_arm(arm)[2][0])
-    else:
-        layout = channel_layout(parse_arm(arm)[1])
-    return modulated_channels(layout, libraries)
+    return modulated_channels(rnacond_layout(parse_rnacond_arm(arm)[2][0]), libraries)
 
 
-def arm_fields(
-    arm: str, head_kind: str, mod_libraries=("chx",), mod_scale_tis: float | None = None
-) -> dict:
-    """run.json fields of ``arm``: head name, conditions, ``num_tracks``, channel config.
+def arm_fields(arm: str) -> dict:
+    """run.json fields of ``arm``.
 
-    ``mod_scale_tis`` (``resid_chx``) defaults to ``MOD_SCALE``. ``rnacond`` arms add the
-    held-out group and conditions, the training conditions, the output ``channel_layout``
-    (library, strand) and the ``rna_input`` description.
+    Head name, conditions, ``num_tracks``, CHX ``frame_channels``, the held-out group and
+    conditions, the training conditions, the output ``channel_layout`` (library, strand) and the
+    ``rna_input`` description.
     """
-    from tisiago.tracks.targets import channel_layout, rnacond_layout
-
-    if mod_scale_tis is None and head_kind in CHX_KINDS:
-        from tisiago.tracks.model import MOD_SCALE
-
-        mod_scale_tis = MOD_SCALE
-
-    if not is_rnacond_arm(arm):
-        head, conditions = parse_arm(arm)
-        layout = channel_layout(conditions)
-        return {
-            "head_name": head,
-            "conditions": list(conditions),
-            "num_tracks": len(layout),
-            **channel_config(head_kind, layout, mod_libraries, mod_scale_tis),
-        }
     from tisiago.tracks.rna_features import RNA_FEATURE_NAMES, RNA_WIDTHS
+    from tisiago.tracks.targets import library_channels, rnacond_layout
 
     head, group, conditions = parse_rnacond_arm(arm)
     layout = rnacond_layout(conditions[0])
@@ -165,7 +82,7 @@ def arm_fields(
         "head_name": head,
         "conditions": list(conditions),
         "num_tracks": len(layout),
-        **channel_config(head_kind, layout, mod_libraries, mod_scale_tis),
+        "frame_channels": list(library_channels(layout, "chx")),
         "heldout_group": group,
         "heldout_conditions": list(CELL_LINE_GROUPS[group]),
         "train_conditions": list(conditions),
@@ -178,13 +95,6 @@ def arm_fields(
             "box_widths": list(RNA_WIDTHS),
         },
     }
-
-
-def eval_windows_of(value: int | None, rnacond: bool) -> int:
-    """``--eval-windows``: per condition for rnacond arms (default 20), else 100 windows."""
-    if value is not None:
-        return value
-    return RNACOND_EVAL_WINDOWS if rnacond else EVAL_WINDOWS
 
 
 def selection_window_indices(n: int, k: int) -> list[int]:
@@ -215,7 +125,7 @@ def rnacond_data_fields(arm: str, tracks_dir: str | Path) -> dict:
 
 def check_rnacond_run(run: dict, arm: str) -> None:
     """Raise ``ValueError`` if a run.json's recorded rnacond fields disagree with ``arm``."""
-    expected = arm_fields(arm, RNACOND)
+    expected = arm_fields(arm)
     for key in ("heldout_group", "train_conditions", "channel_layout", "head_name"):
         if key in run and run[key] != expected[key]:
             raise ValueError(f"run.json records {key}={run[key]}, but {arm} gives {expected[key]}")
@@ -316,9 +226,8 @@ def init_source(init_from: Path, head: str, kind: str) -> dict:
     The source must be a finished run: its ``run.json`` exists and records a non-null ``best``
     (``best/`` is rewritten at every improving eval while a run is still training). The source
     head is reused (``reuse_head`` ``"all"``) only when that ``run.json`` records the same head
-    name (arm) and head kind. An ``mlp`` source into ``resid_tx`` / ``resid_chx`` of the same
-    arm reuses ``"matching"`` leaves (the shared base branch; ``mod_*`` stay fresh). Otherwise
-    (``"none"``) the new head starts fresh and only the backbone is copied.
+    name (arm) and head kind; otherwise (``"none"``) the new head starts fresh and only the
+    backbone is copied.
     """
     init_from = Path(init_from)
     if not (init_from / "checkpoint").is_dir():
@@ -332,14 +241,9 @@ def init_source(init_from: Path, head: str, kind: str) -> dict:
             f"{init_from.parent} is not a finished run (run.json has no best); its best/ is an "
             "intermediate checkpoint — wait for the run to finish"
         )
-    source_kind = source.get("args", {}).get("head") or "mlp"
+    source_kind = source.get("args", {}).get("head")
     source_head = source.get("head_name")
-    reuse_head = "none"
-    if source_head == head:
-        if source_kind == kind:
-            reuse_head = "all"
-        elif source_kind == "mlp" and kind in MOD_KINDS:
-            reuse_head = "matching"
+    reuse_head = "all" if source_head == head and source_kind == kind else "none"
     return {
         "path": str(init_from),
         "source_head": source_head,
@@ -435,17 +339,14 @@ def git_commit() -> str | None:
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser; defaults are the original genomic-stage configuration (backbone fine-tuning)."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
-    ap.add_argument(
-        "--arm", required=True, help="'shared', 'condition:<C>' or 'rnacond:<held-out group>'"
-    )
+    ap.add_argument("--arm", required=True, help="'rnacond:<held-out cell-line group>'")
     ap.add_argument("--steps", type=int, default=20_000)
     ap.add_argument("--eval-every", type=int, default=1_000)
     ap.add_argument(
         "--eval-windows",
         type=int,
-        default=None,
-        help=f"val windows for selection (default {EVAL_WINDOWS}; rnacond arms: per training "
-        f"condition, default {RNACOND_EVAL_WINDOWS})",
+        default=EVAL_WINDOWS,
+        help="evenly spaced val windows per training condition for selection",
     )
     ap.add_argument(
         "--out", type=Path, default=None, help="default data/tracks/runs/<arm>[_frozen]"
@@ -460,32 +361,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--checkpoint", default=os.environ.get("ALPHAGENOME_WEIGHTS_PATH"))
     ap.add_argument("--genome", default=os.environ.get("TISIAGO_GENOME"))
-    ap.add_argument(
-        "--gtf",
-        default=os.environ.get("TISIAGO_GTF"),
-        help="MANE_Select GTF (transcript features of --head seqconv_tx)",
-    )
-    ap.add_argument("--head", choices=HEAD_CHOICES, default="mlp")
+    ap.add_argument("--head", choices=HEAD_CHOICES, default=DEFAULT_HEAD)
     ap.add_argument("--learning-rate", type=float, default=1e-3)
     ap.add_argument("--backbone-learning-rate", type=float, default=1e-4)
-    ap.add_argument(
-        "--mod-learning-rate",
-        type=float,
-        default=None,
-        help="learning rate of the resid_tx / resid_chx mod_* branch (default: --learning-rate)",
-    )
-    ap.add_argument(
-        "--mod-libraries",
-        default=None,
-        help="resid_chx: comma list of libraries the modulation applies to (default: chx)",
-    )
-    ap.add_argument(
-        "--mod-scale-tis",
-        type=float,
-        default=None,
-        help="resid_chx: modulation bound of the TIS channels (needs tis in --mod-libraries; "
-        "default 1.5 = MOD_SCALE)",
-    )
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--warmup-steps", type=int, default=300)
     ap.add_argument("--clip-norm", type=float, default=1.0)
@@ -558,34 +436,10 @@ def main() -> None:
         ap.error("--checkpoint is required (or set ALPHAGENOME_WEIGHTS_PATH)")
     if not args.genome:
         ap.error("--genome is required (or set TISIAGO_GENOME)")
-    rnacond = is_rnacond_arm(args.arm)
     try:
-        if rnacond:
-            head, _, conditions = parse_rnacond_arm(args.arm)
-        else:
-            head, conditions = parse_arm(args.arm)
+        head, _, conditions = parse_rnacond_arm(args.arm)
     except ValueError as exc:
         ap.error(str(exc))
-    if rnacond != (args.head in RNA_KINDS):
-        ap.error("--arm rnacond:<group> and --head rnacond go together")
-    args.eval_windows = eval_windows_of(args.eval_windows, rnacond)
-    if args.head in TRANSCRIPT_KINDS and not args.gtf:
-        ap.error(f"--head {args.head} needs --gtf (or set TISIAGO_GTF)")
-    if args.mod_learning_rate is not None and args.head not in MOD_KINDS:
-        ap.error(f"--mod-learning-rate needs --head in {sorted(MOD_KINDS)}")
-    if args.mod_learning_rate is not None and args.mod_learning_rate < 0:
-        ap.error("--mod-learning-rate must be >= 0")
-    explicit_mod = args.mod_libraries is not None or args.mod_scale_tis is not None
-    if explicit_mod and args.head not in CHX_KINDS:
-        ap.error(f"--mod-libraries / --mod-scale-tis need --head in {sorted(CHX_KINDS)}")
-    try:
-        mod_libraries = mod_libraries_of(args.mod_libraries)
-    except ValueError as exc:
-        ap.error(str(exc))
-    if args.mod_scale_tis is not None and "tis" not in mod_libraries:
-        ap.error("--mod-scale-tis needs tis in --mod-libraries")
-    if args.mod_scale_tis is not None and not 0 < args.mod_scale_tis < math.inf:
-        ap.error("--mod-scale-tis must be positive and finite")
     if args.frame_weight < 0 or args.frame_block < 1:
         ap.error("--frame-weight must be >= 0 and --frame-block >= 1")
     if args.local_weight < 0 or args.local_block < 1:
@@ -625,7 +479,6 @@ def main() -> None:
 
     from tisiago.tracks.data import iterate
     from tisiago.tracks.model import (
-        MOD_SCALE,
         load_model,
         make_predict,
         make_train_step,
@@ -634,30 +487,24 @@ def main() -> None:
 
     train_windows = pd.read_parquet(args.windows_dir / TRAIN_WINDOWS)
     val_all = pd.read_parquet(args.windows_dir / VAL_WINDOWS)
-    if rnacond:
-        val_index = selection_window_indices(len(val_all), args.eval_windows)
-        val_windows = val_all.iloc[val_index].reset_index(drop=True)
-    else:
-        val_windows = val_all.iloc[: args.eval_windows]
+    val_index = selection_window_indices(len(val_all), args.eval_windows)
+    val_windows = val_all.iloc[val_index].reset_index(drop=True)
     expression = pd.read_parquet(args.expression)
     genes = expression[expression.condition.isin(conditions)].reset_index(drop=True)
-    mod_scale_tis = MOD_SCALE if args.mod_scale_tis is None else args.mod_scale_tis
-    fields = arm_fields(args.arm, args.head, mod_libraries, mod_scale_tis)
+    fields = arm_fields(args.arm)
     num_tracks = fields["num_tracks"]
-    channels = {k: fields[k] for k in ("mod_channels", "mod_scales") if k in fields}
     frame_channels = tuple(fields["frame_channels"])
     local_channels = local_channels_of(args.arm, local_libraries) if args.local_weight else ()
     local2_channels = local_channels_of(args.arm, local2_libraries) if args.local2_weight else ()
     run = {
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "git_commit": git_commit(),
-        "mod_learning_rate": args.mod_learning_rate,
         **fields,
-        **(rnacond_data_fields(args.arm, args.tracks_dir) if rnacond else {}),
+        **rnacond_data_fields(args.arm, args.tracks_dir),
         "train_windows": len(train_windows),
         "val_windows": len(val_windows),
-        "val_examples": len(val_windows) * (len(conditions) if rnacond else 1),
-        **({"val_window_indices": val_index} if rnacond else {}),
+        "val_examples": len(val_windows) * len(conditions),
+        "val_window_indices": val_index,
         **({"local_channels": list(local_channels)} if args.local_weight else {}),
         **({"local2_channels": list(local2_channels)} if args.local2_weight else {}),
         "jax_devices": [str(d) for d in jax.devices()],
@@ -667,13 +514,7 @@ def main() -> None:
     write_json_atomic(run, out / "run.json")
     print(json.dumps(run, indent=2), flush=True)
 
-    register_track_head(
-        head,
-        num_tracks,
-        kind=args.head,
-        mod_channels=channels.get("mod_channels"),
-        mod_scales=channels.get("mod_scales"),
-    )
+    register_track_head(head, num_tracks, kind=args.head)
     t0 = time.time()
     model = load_model(args.checkpoint, head, detach_backbone=not args.train_backbone)
     print(f"model load {time.time() - t0:.1f}s", flush=True)
@@ -697,7 +538,6 @@ def main() -> None:
         frame_channels=frame_channels,
         frame_block=args.frame_block,
         freeze_backbone_steps=args.freeze_backbone_steps,
-        mod_learning_rate=args.mod_learning_rate,
         local_weight=args.local_weight,
         local_channels=local_channels,
         local_block=args.local_block,
@@ -713,14 +553,7 @@ def main() -> None:
         tracks_dir=args.tracks_dir,
         conditions=conditions,
         genes=genes,
-        rna_conditioned=rnacond,
     )
-    if args.head in TRANSCRIPT_KINDS:
-        from tisiago.tracks.tx_features import TranscriptFeatures
-
-        t0 = time.time()
-        data_kwargs["transcripts"] = TranscriptFeatures.from_gtf(args.gtf)
-        print(f"transcript models {time.time() - t0:.1f}s", flush=True)
 
     def eval_fn(params) -> dict:
         t = time.time()
