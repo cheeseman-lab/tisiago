@@ -66,25 +66,27 @@ pre-cleanup tag before the rename (the only errors are pysam imports missing in 
 9. iPSC / CM have no replicates — excluded from truth?
 10. M2 shares: derived here from replicate TIS tracks or supplied; per gene or per transcript?
 
-## 4. Disk inventory (nothing deleted)
+## 4. Disk (superseded data deleted 2026-11-12, about 3 TB)
 
-| Path | Size | Status |
+Deleted: everything this section listed as superseded — the round-trip and fast-loop runs, `scan_store_allsplits`,
+`scan_parts`, `parts`, all Evo2 TXP folders, the Evo2 arrays in the mixed stores, the tree-head predictions and
+`.venv/evo2-next`. Not recoverable; the code that made them is in the archive tags.
+
+What remains:
+
+| Path | Size | Holds |
 |---|---|---|
-| `data/p6/runs` | 715G | pre-cleanup checkpoints; keep `ar_rnacond_*_fc2d_l2w300` (stage-1 warm starts of §15-16); rest superseded |
-| `data/p6/txtrain` | 303G | §15-17 stage-2 runs; keep `sbflux_*` (reference) |
-| `data/p6/txcache` | 224G | `fc2d_*` caches for the reference; rebuilt on clean data |
-| `data/p6/roundtrip*` | 33G | synthetic-BAM round trip — superseded |
-| `data/p6/fastloop` | 13G | fast-loop runs — superseded |
-| `data/scan_parts_allsplits` | 1.8T | dense scan shards, AG + Evo2 keys — Evo2 keys superseded |
-| `data/scan_store_allsplits` | 361G | dense scan store — superseded by Regime A stores |
-| `data/dense_exp_store` | 292G | baseline experiment store (AG + Evo2 keys) — Evo2 arrays superseded |
-| `data/dense_txp_parts`, `data/txp_parts`, `data/*txp_representation` | 108G | Evo2 TXP — superseded |
-| `data/scan_parts` | 50G | earlier scan shards — superseded |
-| `data/store` | 25G | curated store (AG + Evo2) — Evo2 arrays superseded |
-| `data/parts` | 15G | curated extraction shards — superseded |
-| `data/preds_*.npz`, `data/head_comparison.tsv` | 230M | tree-head comparison — superseded |
-| `.venv/evo2-next` | 6.2G | Evo2 env — superseded |
+| `data/p6/runs` | 81G | `ar_rnacond_{hela,k562,rpe1,u2os}_fc2d_l2w300` (stage-1 warm starts of the reference) and their `_s1` seeds; 85 other checkpoints deleted |
+| `data/p6/txtrain` | 93G | `sbflux_*` (the 12 reference runs) and their exports; results `.tsv` files; other stage-2 runs deleted |
+| `data/p6/txcache` | 224G | `fc2d_*` caches for the reference; `ar_rnacond_k562_v2` cache |
+| `data/scan_parts_allsplits` | 299G | AG 16 kb / 131 kb dense scan shards (Evo2 shards deleted) |
+| `data/dense_exp_store` | 27G | baseline experiment store, AG + one-hot (Evo2 deleted) |
+| `data/store` | 1.2G | curated store, AG + one-hot (Evo2 deleted) |
+| `data/archive/` | small | run logs of the baseline autoresearch loops (§ archive tags above) |
 | `$TISIAGO_DENSE_STORE` (`.../tisiago_store/dense_ag7`) | not sized | SSD baseline store; AG keys reusable until clean labels change rows |
 
-Clean labels change the manifest, so every store and cache above is rebuilt in Phase 1; the inventory is for a
-deletion decision, not a dependency.
+Not reviewed, left in place: `data/p6flux`, `data/p6nc`, `data/p6nclater`, `data/p6sharp`, `data/p6utr5`,
+`data/scan_parts_ag`, `data/scan_store_ag` and the other `data/p6/` subfolders (`windows`, `expression`, `eval`, ...).
+
+Clean labels change the manifest, so every store and cache above is rebuilt in Phase 1; what remains is kept for
+reference, not as a dependency.
