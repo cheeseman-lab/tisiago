@@ -2,7 +2,7 @@
 
 The full dense scan store is 62.7M rows × big keys on NFS — re-reading it per experiment
 costs ~30 min. This gathers a *fixed experiment subset* of rows once and writes them in the
-same per-key ``.npy`` layout as the curated store, so `dense_caller`/autoresearch load it
+same per-key ``.npy`` layout as the curated store, so the baseline evaluation loads it
 instantly and can sweep feature subsets, heads, and (down-)sampled imbalance freely.
 
 Row set (cognate = AUG + near_cognate; non-cognate stays an eval-only grounding control):
@@ -10,8 +10,7 @@ Row set (cognate = AUG + near_cognate; non-cognate stays an eval-only grounding 
   * val:   all cognate (calibration + val-metric climbing)
   * test:  all cognate (recall metric) + a non-cognate sample (grounding)
 
-Re-indexed ``row_idx`` 0..M-1. Evo2 keys can be appended for the SAME rows once its scan
-store is assembled (pass ``--keys evo2/...`` against the same ``--out-store``).
+Re-indexed ``row_idx`` 0..M-1.
 """
 
 from __future__ import annotations

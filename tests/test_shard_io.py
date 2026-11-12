@@ -19,7 +19,7 @@ def test_map_rows_masks_out_of_range_and_unwanted():
 
 
 def test_iter_shards_yields_members_without_row_idx(tmp_path):
-    k = "evo2::W8k::blocks.28.mlp.l3::off0"
+    k = "alphagenome_jax::L16k::decoder_1bp::off0"
     _write_shard(tmp_path / "s0.npz", np.array([2, 5]), k, np.ones((2, 4), np.float16))
     out = list(iter_shards(tmp_path, "s*.npz"))
     assert len(out) == 1

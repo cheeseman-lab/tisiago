@@ -219,10 +219,9 @@ def fit_calibrated_head(
     }
 
 
-# default feature set = the FINDINGS headline (AlphaGenome 16k + Evo2 blk28).
 DEFAULT_KEYS = [
     "alphagenome_jax/L16k/decoder_1bp/off0.npy",
-    "evo2/W8k/blocks.28.mlp.l3/off0.npy",
+    "alphagenome_jax/L131k/decoder_1bp/off0.npy",
 ]
 TRAIN_SUBSAMPLE = 60000
 
@@ -242,7 +241,7 @@ def main() -> None:
         "--keys",
         nargs="+",
         default=DEFAULT_KEYS,
-        help="Feature .npy keys to concatenate (default: AG16k + Evo2 blk28).",
+        help="Feature .npy keys to concatenate (default: AG 16k + 131k).",
     )
     ap.add_argument(
         "--budget",

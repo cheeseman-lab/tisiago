@@ -18,21 +18,18 @@
 #   sbatch --array=0-19%3 --partition="$TISIAGO_AG_PARTITION" \
 #       scripts/run_tis_scan.sh TILE_SPEC CONFIG N_SHARDS [MANIFEST] [OUT_DIR]
 #
-#   TILE_SPEC : ag16k | ag131k | evo2_8k | evo2_8k_s4k | evo2_4k
-#               (headline set = ag16k + evo2_8k; latter two are speed ablations)
+#   TILE_SPEC : ag16k | ag131k
 #   N_SHARDS  : must equal the array size
 # Environments and TISIAGO_GENOME come from .env (see scripts/_common.sh);
 # PYTHON_BIN overrides the per-backend default.
 #
 # MEMORY: extraction preallocates one fp16 matrix per requested key and fills it
 # batch-wise. Peak host RAM is therefore close to final shard size plus model/manifest
-# overhead; the blk28-only config (4 keys) is the production Evo2 configuration.
+# overhead.
 #
-# Scope / size: the scan store is large — ~89 GB at 5632 dims (fp16) for test+val,
-# ~57 GB for test only. Calibration uses the CURATED val, so the scan only needs
+# Scope / size: the scan store is large (fp16, one row per enumerated codon). Calibration uses the CURATED val, so the scan only needs
 # TEST transcripts; regenerate test-only with
 #   python -m tisiago.enumerate_codons --splits test --out data/scan_manifest.parquet
-# and/or restrict to the headline specs (ag16k + evo2_8k) to bound the footprint.
 
 set -euo pipefail
 
@@ -48,14 +45,9 @@ OUT_DIR="${5:-$REPO_ROOT/data/scan_parts}"
 
 GENOME="${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 
-if [[ "$TILE_SPEC" == ag* ]]; then
-    DEFAULT_PYTHON="$TISIAGO_AG_PYTHON"
-else
-    DEFAULT_PYTHON="$TISIAGO_EVO_PYTHON"
-fi
-PYTHON="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+PYTHON="${PYTHON_BIN:-$TISIAGO_AG_PYTHON}"
 [[ -x "$PYTHON" ]] || {
-    echo "Python not found at $PYTHON; check TISIAGO_AG_PYTHON/TISIAGO_EVO_PYTHON in .env" >&2
+    echo "Python not found at $PYTHON; check TISIAGO_AG_PYTHON in .env" >&2
     exit 2
 }
 "$PYTHON" -c "import gruyerenome, pyfaidx" || {

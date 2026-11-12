@@ -16,7 +16,7 @@ Layout::
       embeddings/
         alphagenome_jax/L16k/decoder_1bp/off0.npy        # [N, 1536] fp16
         alphagenome_jax/L131k/decoder_1bp/off0.npy
-        evo2/W8k/blocks.28.mlp.l3/off6.npy               # [N, 4096] fp16
+        onehot/kozakW20.npy
         ...
 
 Run in any env with numpy + pandas + pyyaml.

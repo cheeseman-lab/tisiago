@@ -8,8 +8,8 @@
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #
-# Matched multi-seed comparison on diverse dense training negatives and the
-# held-out cognate test distribution. Requires both W8k and TXP arrays in STORE.
+# Multi-seed baseline evaluation (AlphaGenome + one-hot floor) on diverse dense training
+# negatives and the held-out cognate test distribution.
 #
 # Usage: sbatch scripts/run_tis_dense_representation_eval.sh \
 #   [STORE] [OUT_DIR] [SEEDS] [TRAIN_NEGATIVES] [BOOTSTRAP]
@@ -22,7 +22,7 @@ SELF="${BASH_SOURCE[0]}"
     | sed -n 's/^ *Command=\([^ ]*\).*/\1/p' | head -1)"
 source "$(cd "$(dirname "$SELF")" && pwd)/_common.sh"
 STORE="${1:-$REPO_ROOT/data/dense_exp_store}"
-OUT_DIR="${2:-$REPO_ROOT/data/dense_txp_representation}"
+OUT_DIR="${2:-$REPO_ROOT/data/baseline_eval}"
 SEEDS="${3:-0,1,2,3,4}"
 TRAIN_NEGATIVES="${4:-500000}"
 BOOTSTRAP="${5:-1000}"
@@ -36,7 +36,7 @@ cd "$REPO_ROOT"
 "$PYTHON" -m tisiago.representation_eval \
     --store "$STORE" \
     --out-dir "$OUT_DIR" \
-    --arms ag_w8k ag_txp \
+    --arms baseline.ag floor.kozak20 floor.codon12 \
     --seeds "$SEEDS" \
     --train-negatives "$TRAIN_NEGATIVES" \
     --bootstrap "$BOOTSTRAP" \

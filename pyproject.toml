@@ -21,7 +21,7 @@ dependencies = [
     "tqdm>=4.66.0",
 ]
 
-# Extraction stage runs in the GPU envs (alphagenome / evo2). It additionally needs
+# Extraction stage runs in the alphagenome GPU env. It additionally needs
 # gruyerenome (installed from its own checkout because backend extras are hardware-specific)
 # plus pyfaidx for genomic window fetch. See README.md for the uv commands.
 [project.optional-dependencies]

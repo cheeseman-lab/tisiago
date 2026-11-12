@@ -1,11 +1,8 @@
-from types import SimpleNamespace
-
 from tisiago.tiling import (
     MODEL_SPECS,
     Tile,
     TileMember,
     candidate_tile,
-    group_into_tiles,
     tile_position_requests,
 )
 
@@ -17,23 +14,6 @@ def test_all_model_specs_keep_requested_offsets_inside_window():
                 _, offset = candidate_tile(a_plus, strand, spec)
                 assert offset >= 0
                 assert offset + max(spec["offsets"]) < spec["window"]
-
-
-def test_evo2_s4k_ablation_uses_about_half_as_many_tiles():
-    candidates = [
-        SimpleNamespace(
-            row_idx=i,
-            chrom="chr1",
-            gstart=i * 3,
-            strand="+",
-            codon="ATG",
-        )
-        for i in range(20_000)
-    ]
-    baseline = group_into_tiles(candidates, MODEL_SPECS["evo2_8k"])
-    fast = group_into_tiles(candidates, MODEL_SPECS["evo2_8k_s4k"])
-    ratio = len(baseline) / len(fast)
-    assert 1.8 < ratio < 2.2
 
 
 def test_dense_offset_requests_reuse_overlapping_hidden_states():

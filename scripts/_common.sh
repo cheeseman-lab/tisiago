@@ -24,10 +24,9 @@ if [[ -f "$REPO_ROOT/.env" ]]; then
     done < "$REPO_ROOT/.env"
 fi
 
-: "${TISIAGO_EVO_PYTHON:=$REPO_ROOT/.venv/evo2-next/bin/python}"
 : "${TISIAGO_AG_PYTHON:=$(command -v python)}"
 : "${TISIAGO_CPU_PYTHON:=$(command -v python)}"
-export TISIAGO_EVO_PYTHON TISIAGO_AG_PYTHON TISIAGO_CPU_PYTHON
+export TISIAGO_AG_PYTHON TISIAGO_CPU_PYTHON
 : "${TISIAGO_AGFT_PYTHON:=$REPO_ROOT/.venv/agft/bin/python}"
 : "${TISIAGO_AGFT_PARTITION:=nvidia-A6000-20}"
 export TISIAGO_AGFT_PYTHON TISIAGO_AGFT_PARTITION

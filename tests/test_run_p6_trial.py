@@ -221,8 +221,9 @@ def test_outside_job_in_other_partition_does_not_gate(fake):
     proc, calls, _ = fake("t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=f"{A6} {A6}")
     assert proc.returncode == 0, proc.stderr
     assert partition(calls[0]) == A6 and dependency(calls[0]) == "singleton"
-    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=squeue,
-                          P6_TRIAL_LANES=f"{A6} {A6}")
+    proc, calls, _ = fake(
+        "--queue", "t1", "--steps", "10", squeue=squeue, P6_TRIAL_LANES=f"{A6} {A6}"
+    )
     assert dependency(calls[0]) == "singleton"
 
 
@@ -250,8 +251,14 @@ def test_queue_distributes_outside_jobs_over_lanes_of_partition(fake):
 
 
 def test_all_gpu_calls_use_lane_partition(fake):
-    proc, calls, _ = fake("--queue", "t1", "--steps", "10", squeue=f"800|{lane_name(0)}|{A6}|g\n"
-                          f"801|{lane_name(1)}|{A6}|g\n", P6_TRIAL_LANES=LANES3)
+    proc, calls, _ = fake(
+        "--queue",
+        "t1",
+        "--steps",
+        "10",
+        squeue=f"800|{lane_name(0)}|{A6}|g\n801|{lane_name(1)}|{A6}|g\n",
+        P6_TRIAL_LANES=LANES3,
+    )
     assert partition(calls[0]) == L40 and partition(calls[1]) == L40
 
 

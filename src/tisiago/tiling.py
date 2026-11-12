@@ -7,12 +7,8 @@ That freedom lets nearby candidates in a transcript share one forward pass.
 
 Strategy — **grid snap**: snap each candidate's A position to a coarse grid so
 candidates within ``step`` bp collapse onto the same tile, while the grid spacing
-guarantees the candidate lands comfortably off the window edges:
-
-* ``centered`` (AlphaGenome, bidirectional): tile centred on the grid point;
-  candidate offset ∈ [W/4, 3W/4].
-* ``left_heavy`` (Evo-2, causal): candidate placed ~60-70% through the tile so it
-  carries generous real upstream context (the half the causal receptive field sees).
+guarantees the candidate lands comfortably off the window edges: the tile is centred on
+the grid point (AlphaGenome is bidirectional), so the candidate offset ∈ [W/4, 3W/4].
 
 Coordinates are plus-strand genomic; minus-strand tiles are reverse-complemented at
 fetch time, so the within-tile offset is computed in the fed (5'→3') orientation.
@@ -22,8 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Model tile specs. window/step in bp; offsets applied on top of each candidate
-# (Evo-2 grabs downstream Kozak/frame positions its causality hides at the codon).
+# Model tile specs. window/step in bp; offsets applied on top of each candidate.
 MODEL_SPECS: dict[str, dict] = {
     "ag16k": {
         "backend": "alphagenome_jax",
@@ -40,36 +35,6 @@ MODEL_SPECS: dict[str, dict] = {
         "step": 65536,
         "offsets": [0],
         "length_tag": "L131k",
-    },
-    "evo2_8k": {
-        "backend": "evo2",
-        "window": 8192,
-        "placement": "left_heavy",
-        "step": 2048,
-        "up_anchor": 5120,
-        "offsets": [0, 3, 6, 9],
-        "length_tag": "W8k",
-    },
-    # Frozen-inference ablations. Their distinct length tags prevent accidental
-    # mixing with the established W8k/S2k feature distribution. Retrain the small
-    # downstream head before comparing either variant.
-    "evo2_8k_s4k": {
-        "backend": "evo2",
-        "window": 8192,
-        "placement": "left_heavy",
-        "step": 4096,
-        "up_anchor": 5120,
-        "offsets": [0, 3, 6, 9],
-        "length_tag": "W8kS4k",
-    },
-    "evo2_4k": {
-        "backend": "evo2",
-        "window": 4096,
-        "placement": "left_heavy",
-        "step": 2048,
-        "up_anchor": 3000,
-        "offsets": [0, 3, 6, 9],
-        "length_tag": "W4k",
     },
 }
 
@@ -113,11 +78,9 @@ def candidate_tile(a_plus: int, strand: str, spec: dict) -> tuple[int, int]:
     """
     w, step = spec["window"], spec["step"]
     snap = round(a_plus / step) * step
-    if spec["placement"] == "centered":
-        tile_start = snap - w // 2 if strand == "+" else snap - w // 2
-    else:  # left_heavy: candidate sits ~up_anchor into the fed sequence
-        up = spec["up_anchor"]
-        tile_start = (snap - up) if strand == "+" else (snap - (w - up))
+    if spec["placement"] != "centered":
+        raise ValueError(f"unsupported placement {spec['placement']!r}")
+    tile_start = snap - w // 2
     offset = (a_plus - tile_start) if strand == "+" else (tile_start + w - 1 - a_plus)
     return tile_start, offset
 

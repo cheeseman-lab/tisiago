@@ -16,7 +16,7 @@
 #   sbatch --array=0-19%3 --partition="$TISIAGO_AG_PARTITION" \
 #       scripts/run_tis_extract.sh TILE_SPEC CONFIG N_SHARDS [MANIFEST] [OUT_DIR]
 #
-#   TILE_SPEC : ag16k | ag131k | evo2_8k | evo2_8k_s4k | evo2_4k
+#   TILE_SPEC : ag16k | ag131k
 #   N_SHARDS  : must equal the array size (e.g. 20 for --array=0-19)
 # Environments and TISIAGO_GENOME come from .env (see scripts/_common.sh);
 # PYTHON_BIN overrides the per-backend default.
@@ -35,14 +35,9 @@ OUT_DIR="${5:-$REPO_ROOT/data/parts}"
 
 GENOME="${TISIAGO_GENOME:?Set TISIAGO_GENOME to an indexed reference FASTA}"
 
-if [[ "$TILE_SPEC" == ag* ]]; then
-    DEFAULT_PYTHON="$TISIAGO_AG_PYTHON"
-else
-    DEFAULT_PYTHON="$TISIAGO_EVO_PYTHON"
-fi
-PYTHON="${PYTHON_BIN:-$DEFAULT_PYTHON}"
+PYTHON="${PYTHON_BIN:-$TISIAGO_AG_PYTHON}"
 [[ -x "$PYTHON" ]] || {
-    echo "Python not found at $PYTHON; check TISIAGO_AG_PYTHON/TISIAGO_EVO_PYTHON in .env" >&2
+    echo "Python not found at $PYTHON; check TISIAGO_AG_PYTHON in .env" >&2
     exit 2
 }
 "$PYTHON" -c "import gruyerenome, pyfaidx" || {

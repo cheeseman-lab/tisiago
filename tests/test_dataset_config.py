@@ -12,7 +12,7 @@ def test_load_dataset_config_parses_required_fields(tmp_path):
                 "name": "dense_v1",
                 "parts_dir": "data/scan_parts_allsplits",
                 "out_store": "/ssd/tisiago_store/dense",
-                "keys": ["evo2/W8k/blocks.28.mlp.l3/off0.npy"],
+                "keys": ["alphagenome_jax/L16k/decoder_1bp/off0.npy"],
                 "neg_cap": 1000000,
                 "noncog_sample": 1000000,
                 "seed": 0,
@@ -22,7 +22,7 @@ def test_load_dataset_config_parses_required_fields(tmp_path):
     cfg = load_dataset_config(p)
     assert isinstance(cfg, DatasetConfig)
     assert cfg.name == "dense_v1" and cfg.neg_cap == 1_000_000
-    assert cfg.keys == ["evo2/W8k/blocks.28.mlp.l3/off0.npy"]
+    assert cfg.keys == ["alphagenome_jax/L16k/decoder_1bp/off0.npy"]
 
 
 def test_load_dataset_config_expands_environment_paths(tmp_path, monkeypatch):

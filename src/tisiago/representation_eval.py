@@ -1,4 +1,4 @@
-"""Multi-seed, leakage-free comparison of W8k and transcript Evo2 features."""
+"""Multi-seed, leakage-free evaluation of the frozen AlphaGenome baseline and the one-hot floor."""
 
 from __future__ import annotations
 
@@ -21,19 +21,15 @@ from tisiago.manifest import split_grouped_indices, unique_site_indices
 AG16 = "alphagenome_jax/L16k/decoder_1bp/off0.npy"
 AG131 = "alphagenome_jax/L131k/decoder_1bp/off0.npy"
 KOZAK = "onehot/kozakW20.npy"
-
-
-def _evo_keys(length_tag: str) -> list[str]:
-    """Return the four offset keys for one Evo2 representation."""
-    return [f"evo2/{length_tag}/blocks.28.mlp.l3/off{offset}.npy" for offset in (0, 3, 6, 9)]
+CODON12 = "onehot/codon12.npy"
 
 
 REPRESENTATIONS = {
-    "w8k": _evo_keys("W8k"),
-    "txp": _evo_keys("TXP"),
-    "ag_w8k": [AG16, AG131, *_evo_keys("W8k"), KOZAK],
-    "ag_txp": [AG16, AG131, *_evo_keys("TXP"), KOZAK],
+    "baseline.ag": [AG16, AG131, KOZAK],
+    "floor.kozak20": [KOZAK],
+    "floor.codon12": [CODON12],
 }
+FLOOR = "floor.kozak20"
 
 
 def sample_training_rows(
@@ -159,7 +155,7 @@ def _bootstrap(
     n_bootstrap: int,
     seed: int = 20260909,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Transcript-bootstrap arm estimates and paired TXP-minus-W8k differences."""
+    """Transcript-bootstrap arm estimates and paired arm-minus-floor differences."""
     groups = [
         np.asarray(indices, dtype=np.int64)
         for indices in pd.Series(np.arange(len(labels)))
@@ -226,8 +222,9 @@ def _bootstrap(
                 }
             )
     paired_rows = []
-    for reference, candidate in (("w8k", "txp"), ("ag_w8k", "ag_txp")):
-        if reference not in metrics or candidate not in metrics:
+    reference = FLOOR
+    for candidate in metrics:
+        if reference not in metrics or candidate == reference:
             continue
         for name in metrics[reference]:
             difference = np.asarray(metrics[candidate][name]) - np.asarray(metrics[reference][name])
@@ -274,7 +271,7 @@ def main() -> None:
             "validation retain their manifest-defined candidate populations."
         ),
     )
-    parser.add_argument("--out-dir", default="runs/txp_representation")
+    parser.add_argument("--out-dir", default="runs/baseline")
     args = parser.parse_args()
 
     seeds = [int(seed) for seed in args.seeds.split(",")]
@@ -466,7 +463,7 @@ def main() -> None:
     print(f"\n{metrics_frame.to_string(index=False)}")
     print(f"\nbootstrap intervals\n{intervals.to_string(index=False)}")
     if len(paired):
-        print(f"\npaired TXP differences\n{paired.to_string(index=False)}")
+        print(f"\npaired differences vs {FLOOR}\n{paired.to_string(index=False)}")
     print(f"\nwrote results and head artifacts to {output_dir}")
 
 

@@ -9,8 +9,7 @@ scatters all shards into the row-aligned vector store.
 Sharding is by transcript (stable crc32 hash) so a transcript's candidates stay
 together and tile sharing is preserved within a shard.
 
-Run in the backend's env (``alphagenome`` for ag*, ``gruyerenome``/evo2 env for
-evo2_8k). Needs ``pyfaidx`` for genomic fetch::
+Run in the ``alphagenome`` env. Needs ``pyfaidx`` for genomic fetch::
 
     python scripts/tis/extract_candidates.py \
         --manifest data/tis/manifest.parquet --tile-spec ag16k \
@@ -36,10 +35,7 @@ from tisiago.tiling import MODEL_SPECS, group_into_tiles, tile_position_requests
 def _expected_keys(spec: dict, cfg) -> set[str]:
     """Return the exact archive members produced by one model configuration."""
     ltag = spec["length_tag"]
-    if spec["backend"].startswith("alphagenome"):
-        layers = ["decoder_1bp"]
-    else:
-        layers = list(getattr(cfg, "evo2_layers", None) or ["blocks.28.mlp.l3"])
+    layers = ["decoder_1bp"]
     return {
         f"{spec['backend']}::{ltag}::{layer}::off{offset}"
         for layer in layers
