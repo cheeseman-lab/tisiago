@@ -1,0 +1,1 @@
+--head rnacond_fc2d --steps 30000 --eval-every 1000 --eval-windows 20 --learning-rate 1e-3 --backbone-learning-rate 1e-4 --weight-decay 1e-4 --warmup-steps 300 --clip-norm 1.0 --frame-weight 0 --local-weight 100 --local-block 1024 --local-libraries tis,chx --local2-weight 300 --local2-block 32 --local2-libraries tis

@@ -3,7 +3,7 @@ import pandas as pd
 import yaml
 
 from scripts.build_store import build_store
-from tisiago.dataset_config import DatasetConfig
+from tisiago.baseline.dataset_config import DatasetConfig
 
 
 def test_build_store_gathers_to_compact_with_provenance(tmp_path):

@@ -19,10 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-try:  # the only tracks-package import in truth/ and evaluation/; repoint here after the rename
-    from tisiago.tracks.psite import RIBOTISH_MINUS_SHIFT
-except ImportError:
-    from tisiago.seq2func.psite import RIBOTISH_MINUS_SHIFT
+from tisiago.tracks.psite import RIBOTISH_MINUS_SHIFT
 
 MAX_OFFSET = 5
 MIN_STARTS = 20

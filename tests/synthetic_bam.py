@@ -12,7 +12,7 @@ from pathlib import Path
 import pyBigWig
 import pysam
 
-from tisiago.seq2func.tracks import read_bigwig_counts
+from tisiago.tracks.track_io import read_bigwig_counts
 
 READ_LENGTH = 2
 READ_OFFSET = 1

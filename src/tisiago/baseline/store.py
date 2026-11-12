@@ -1,0 +1,175 @@
+"""Assemble per-shard extraction partials into a row-aligned vector store.
+
+Reads every ``*.npz`` partial written by ``extract_candidates.py`` and scatters
+its candidate vectors into global ``[N, D]`` float16 arrays, one ``.npy`` per
+``backend × length × layer × offset``, row-aligned to ``manifest.row_idx`` (so
+row ``i`` is the candidate with ``row_idx == i``).
+
+A head experiment is then: load a few ``.npy``, ``np.concatenate`` on axis 1,
+filter rows by the manifest ``split`` column. No GPU.
+
+Layout::
+
+    store/
+      manifest.parquet
+      config.yaml
+      embeddings/
+        alphagenome_jax/L16k/decoder_1bp/off0.npy        # [N, 1536] fp16
+        alphagenome_jax/L131k/decoder_1bp/off0.npy
+        onehot/kozakW20.npy
+        ...
+
+Run in any env with numpy + pandas + pyyaml.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import tempfile
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+DENSE_MONOLITH_THRESHOLD = 10_000_000  # candidate stores are ≪ this; dense scans are ≫
+
+
+def atomic_save_array(path: Path, values: np.ndarray) -> None:
+    """Write a NumPy array beside its destination, then atomically replace it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, delete=False
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            np.save(temporary, values)
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def atomic_write_yaml(path: Path, value: dict) -> None:
+    """Atomically write YAML provenance."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    )
+    temporary_path = Path(temporary.name)
+    try:
+        with temporary:
+            yaml.safe_dump(value, temporary, default_flow_style=False, sort_keys=False)
+        os.replace(temporary_path, path)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+def warn_if_dense_monolith(n_rows: int) -> None:
+    """Steer genome-scale assembly to the streaming/gather paths (decision doc A2)."""
+    if n_rows >= DENSE_MONOLITH_THRESHOLD:
+        warnings.warn(
+            f"Assembling a {n_rows:,}-row monolith is retired for dense scans — use "
+            "scripts/build_store.py (compact gather) or tisiago.baseline.scan_score "
+            "(streaming eval).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+
+def main() -> None:
+    """Assemble extraction shards into a row-aligned feature store."""
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("--manifest", required=True)
+    ap.add_argument("--parts-dir", required=True, help="Directory of *.npz shard partials.")
+    ap.add_argument("--store-dir", required=True)
+    ap.add_argument(
+        "--glob",
+        default="*.npz",
+        help=(
+            "Which partials to assemble (e.g. 'ag16k_shard*.npz' for one spec). "
+            "Lets you assemble a subset/one key at a time to bound RAM."
+        ),
+    )
+    args = ap.parse_args()
+
+    manifest = pd.read_parquet(args.manifest)
+    n = len(manifest)
+    warn_if_dense_monolith(n)
+    if not (manifest.row_idx.values == np.arange(n)).all():
+        raise ValueError("manifest row_idx must be 0..N-1 contiguous")
+
+    parts = sorted(Path(args.parts_dir).glob(args.glob))
+    if not parts:
+        raise SystemExit(f"No partials matching {args.glob!r} in {args.parts_dir}")
+    print(f"Found {len(parts)} shard partials matching {args.glob!r}")
+
+    store = Path(args.store_dir)
+    emb_root = store / "embeddings"
+    emb_root.mkdir(parents=True, exist_ok=True)
+
+    # key -> memmapped/in-RAM (N, D) accumulator, and per-key coverage count
+    arrays: dict[str, np.ndarray] = {}
+    covered: dict[str, np.ndarray] = {}
+
+    for p in parts:
+        z = np.load(p)
+        rows = z["row_idx"]
+        for key in z.files:
+            if key == "row_idx":
+                continue
+            mat = z[key]
+            if key not in arrays:
+                arrays[key] = np.zeros((n, mat.shape[1]), dtype=np.float16)
+                covered[key] = np.zeros(n, dtype=bool)
+            arrays[key][rows] = mat
+            covered[key][rows] = True
+
+    provenance = {"n_candidates": int(n), "n_shards": len(parts), "keys": {}}
+    for key, mat in arrays.items():
+        backend, ltag, layer, off = key.split("::")
+        out_path = emb_root / backend / ltag / layer / f"{off}.npy"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_save_array(out_path, mat)
+        cov = int(covered[key].sum())
+        provenance["keys"][key] = {
+            "path": str(out_path.relative_to(store)),
+            "dim": int(mat.shape[1]),
+            "covered": cov,
+        }
+        flag = "" if cov == n else f"  !! only {cov}/{n} covered"
+        print(
+            f"  {key:48s} -> {out_path.relative_to(store)}  "
+            f"dim={mat.shape[1]} covered={cov}/{n}{flag}"
+        )
+
+    manifest_path = store / "manifest.parquet"
+    temporary_manifest = manifest_path.with_name(f".{manifest_path.name}.tmp")
+    try:
+        manifest.to_parquet(temporary_manifest, index=False)
+        os.replace(temporary_manifest, manifest_path)
+    except BaseException:
+        temporary_manifest.unlink(missing_ok=True)
+        raise
+    cfg_path = store / "config.yaml"
+    if cfg_path.exists():  # merge keys from prior per-spec runs into the same store
+        prior = yaml.safe_load(cfg_path.read_text()) or {}
+        merged = {**prior.get("keys", {}), **provenance["keys"]}
+        provenance["keys"] = merged
+        provenance["n_shards"] = prior.get("n_shards", 0) + len(parts)
+    atomic_write_yaml(cfg_path, provenance)
+    print(f"Store assembled at {store} ({len(arrays)} feature arrays)")
+
+
+if __name__ == "__main__":
+    main()

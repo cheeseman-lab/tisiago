@@ -1,6 +1,6 @@
 """Kozak ±Wbp one-hot for a (large) scan manifest — vectorized by chromosome.
 
-Reproduces ``autoresearch/make_onehot.py:window_onehot`` EXACTLY (same strand/centering
+Reproduces ``tisiago.baseline.onehot.window_onehot`` EXACTLY (same strand/centering
 convention: ``a_plus = gstart if "+" else gstart-1``; symmetric plus-strand span; reverse-
 complement for minus; codon at window center) but groups rows by chromosome and uses numpy
 fancy-indexing instead of a per-row pyfaidx fetch, so it scales to ~63M positions in minutes.

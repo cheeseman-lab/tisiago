@@ -1,4 +1,4 @@
-"""Build a compact dense **experiment store** for autoresearch / fast head iteration.
+"""Build a compact dense **experiment store** for the baseline evaluation.
 
 The full dense scan store is 62.7M rows × big keys on NFS — re-reading it per experiment
 costs ~30 min. This gathers a *fixed experiment subset* of rows once and writes them in the

@@ -23,8 +23,10 @@ store/
 *.out
 *.err
 
-# autoresearch loop scratch
-autoresearch/.desc
+# pre-cleanup scratch (tracked history in tag archive/pre-cleanup-2026-11-12)
+autoresearch/
+.superpowers/
+.worktrees/
 
 # local experiment outputs
 runs_phase34/
