@@ -3,7 +3,7 @@ import pandas as pd
 import yaml
 
 from scripts.build_store import build_store
-from tisiago.dataset_config import DatasetConfig
+from tisiago.baseline.dataset_config import DatasetConfig
 
 
 def test_build_store_gathers_to_compact_with_provenance(tmp_path):
@@ -43,9 +43,7 @@ def test_build_store_two_segment_key(tmp_path):
     out = tmp_path / "store"
     out.mkdir()
     key = "onehot::kozakW20"
-    pd.DataFrame({"src_row_idx": [0, 1], "row_idx": [0, 1]}).to_parquet(
-        out / "manifest.parquet"
-    )
+    pd.DataFrame({"src_row_idx": [0, 1], "row_idx": [0, 1]}).to_parquet(out / "manifest.parquet")
     np.savez(
         parts / "a_shard0.npz",
         row_idx=np.array([0, 1]),

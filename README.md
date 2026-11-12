@@ -1,59 +1,77 @@
 # tisiago
 
-**TIS-prediction orchestrator** — the third repo in the fry-python-tools translation-initiation pipeline.
+**Translation-initiation site (TIS) prediction from sequence and a cell line's RNA-seq.**
+
+Given the RNA-seq of a cell line, predict where ribosomes initiate — base-resolution harringtonine
+(initiation) and cycloheximide (elongation) Ribo-seq tracks — and turn those tracks into start calls that
+hold up in a cell line the model never saw.
+
+| Line | What | Package |
+|---|---|---|
+| **tracks** | AlphaGenome fine-tuned on Ribo-seq, conditioned on the line's RNA-seq, held out one cell line at a time. The live model. | `tisiago.tracks` |
+| **calling** | Start calls from tracks: the caller-free score on the baseline's protocol, and (next) a native caller with a learned threshold. | `tisiago.calling` |
+| **truth** | The reproducible-start truth set from the label pipeline, tagged by codon class, region and pause. | `tisiago.truth` |
+| **baseline** | Frozen AlphaGenome embeddings + a logistic head, one label per codon. The comparator. | `tisiago.baseline` |
+| **floor** | One-hot codon / ±20 nt Kozak features + the same head. What every model must beat. | `tisiago.baseline` (arms `floor.*`) |
+
+Plan and status: [`docs/PLAN.md`](docs/PLAN.md). Results: [`FINDINGS.md`](FINDINGS.md). What transfers to a
+new recipe: [`docs/PRINCIPLES.md`](docs/PRINCIPLES.md). Evaluation rules:
+[`docs/INFERENCE_AND_EVALUATION.md`](docs/INFERENCE_AND_EVALUATION.md). What the label pipeline hands over:
+[`docs/DATA_CONTRACT.md`](docs/DATA_CONTRACT.md).
+
+## Upstream
 
 ```
-swissisoform  →  manifest.parquet  →  tisiago (input construction)  →  gruyerenome forward  →  tisiago (store + heads)
+label pipeline (Ribo-TISH fork)  ->  P-site tracks + reproducible starts  ->  tisiago
+swissisoform                     ->  candidate manifest (baseline only)  ->  tisiago
+gruyerenome                      ->  AlphaGenome forward passes (baseline extraction)
+alphagenome-ft                   ->  AlphaGenome fine-tuning (tracks)
 ```
-
-tisiago reads the candidate table that [swissisoform](https://github.com/cheeseman-lab/swissisoform)
-produces, constructs either genomic windows or exon-spliced transcript inputs, calls
-[gruyerenome](https://github.com/cheeseman-lab/gruyerenome) to extract per-candidate embeddings
-(AlphaGenome + Evo2), assembles a row-aligned vector store, and trains lightweight downstream
-heads to predict translation initiation — a track no genome foundation model is trained to emit.
 
 ## Install and verify
 
 ```bash
 conda create -n tisiago -c conda-forge python=3.11 uv pip -y
 eval "$(conda shell.bash hook)" && conda activate tisiago
-uv pip install -e ".[dev,extract]"
-python -m pytest
+uv pip install -e ".[dev,extract,tracks]"
+python -m pytest                     # CPU suite; JAX model tests skip here
 ```
 
-The `tisiago` conda env covers tests, store assembly, and head evaluation. GPU extraction uses
-the `alphagenome` conda env (tisiago + gruyerenome editable) and the locked Evo2 uv env built by
-`scripts/run_tis_evo2_env_setup.sh` (`.venv/evo2-next`, from `requirements-evo2.lock`).
-gruyerenome owns every foundation-model forward pass.
+| Stage | Environment |
+|---|---|
+| Baseline evaluation, truth, metrics (CPU) | conda `tisiago` |
+| Baseline extraction (GPU) | conda `alphagenome` (tisiago + gruyerenome editable, pyfaidx) |
+| Tracks training and prediction (GPU), JAX tests | uv `.venv/agft`, built by `scripts/run_tracks_env_setup.sh` from `requirements-agft.lock` |
 
-## Configure a run
+Site paths (genome, GTF, AlphaGenome weights, Ribo-seq data, per-stage Python, partitions) live in a
+gitignored `.env`; `.env.example` lists the keys. Every Slurm script sources `scripts/_common.sh`, which
+loads `.env` and writes logs to `logs/`. Submit from the repo root.
 
-Site paths (reference FASTA/GTF, AlphaGenome weights, HF cache, SSD store, per-stage Python,
-partitions) live in a gitignored `.env`; `.env.example` lists the keys. Every Slurm script
-sources `scripts/_common.sh`, which loads `.env` and writes logs to `logs/`. Submit from the
-repo root.
+## Run
+
+**tracks** — reference recipe `tracks.spliced.flux.pos`, per held-out line (`HeLa` shown), 3 seeds:
 
 ```bash
-set -a; source .env; set +a          # only needed for interactive python -m calls
-bash scripts/run_tis_pipeline.sh 20  # GPU extraction arrays -> dependent assembly
-python -m tisiago.eval --store data/store \
-    --keys alphagenome_jax/L16k/decoder_1bp/off0.npy evo2/W8k/blocks.28.mlp.l3/off0.npy
+sbatch --partition=20 --array=0-35%12 scripts/run_tracks_build_targets.sh   # P-site tracks from BAMs
+sbatch scripts/run_tracks_train_genomic.sh --arm rnacond:HeLa \
+    $(cat configs/tracks/genomic_fc2d.args) --out data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0
+sbatch scripts/run_tracks_txcache.sh build --name genomic_fc2d_hela \
+    --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0/best
+python -m tisiago.tracks.cache_seq --genome "$TISIAGO_GENOME" data/tracks/txcache/genomic_fc2d_hela
+sbatch scripts/run_tracks_train_spliced.sh --cache data/tracks/txcache/genomic_fc2d_hela \
+    --init data/tracks/runs/tracks.genomic.free.pos.ho-HeLa.s0/best --heldout HeLa \
+    --out data/tracks/runs/tracks.spliced.flux.pos.ho-HeLa.s0   # head: configs/tracks/spliced_flux_pos.yaml
+sbatch scripts/run_tracks_scorecard.sh ...                     # M3 guardrails
+sbatch scripts/run_calling_track_score.sh --split val          # caller-free start score
 ```
 
-See `CLAUDE.md` for the pipeline and store layout, and
-[`docs/INFERENCE_AND_EVALUATION.md`](docs/INFERENCE_AND_EVALUATION.md) for the leakage-free
-evaluation protocol, the exon-spliced Evo2 arm, and extraction speed ablations.
+Script headers give the full options; GPU partitions follow `.env`.
 
-## Result
+**baseline** — AlphaGenome extraction, store, multi-seed evaluation against the floors:
 
-On the curated 3:1 set, a linear head on AlphaGenome+Evo2 embeddings reaches 0.92 AUROC on
-held-out chromosomes (one-hot ±20 bp sequence floor: 0.75) and a 0.83 near-neighbour win-rate.
+```bash
+bash scripts/run_baseline_pipeline.sh 20
+sbatch scripts/run_baseline_evaluate.sh
+```
 
-At the **true genome-wide imbalance** (~230:1), the clean protocol (5 negative-subsample seeds,
-threshold chosen on validation, transcript-bootstrap CIs) gives the dense-trained 7-key ensemble
-**AUPRC 0.304 [0.288, 0.322]** and **recall 0.306 at 0.99 FP/transcript**. Recall is driven by
-AUG starts (0.58); near-cognate starts are largely missed (0.07). See [`FINDINGS.md`](FINDINGS.md)
-§10 and [`ROADMAP.md`](ROADMAP.md).
-
-Discrete calls for the held-out chromosomes: `sbatch --partition=20 scripts/run_tis_call_starts.sh`
-→ `data/calls/ag_w8k_test_calls.parquet`.
+Run IDs follow `tracks.<stage>.<chx>.<cond>.ho-<line>.s<seed>`; see `docs/PLAN.md` §1.

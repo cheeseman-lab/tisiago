@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tisiago.dataset_config import DatasetConfig, load_dataset_config, write_provenance
-from tisiago.shard_io import build_src_to_compact, iter_shards, map_rows
+from tisiago.baseline.dataset_config import DatasetConfig, load_dataset_config, write_provenance
+from tisiago.baseline.shard_io import build_src_to_compact, iter_shards, map_rows
 
 
 def build_store(cfg: DatasetConfig, git_sha: str) -> Path:

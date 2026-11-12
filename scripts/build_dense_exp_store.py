@@ -1,8 +1,8 @@
-"""Build a compact dense **experiment store** for autoresearch / fast head iteration.
+"""Build a compact dense **experiment store** for the baseline evaluation.
 
 The full dense scan store is 62.7M rows × big keys on NFS — re-reading it per experiment
 costs ~30 min. This gathers a *fixed experiment subset* of rows once and writes them in the
-same per-key ``.npy`` layout as the curated store, so `dense_caller`/autoresearch load it
+same per-key ``.npy`` layout as the curated store, so the baseline evaluation loads it
 instantly and can sweep feature subsets, heads, and (down-)sampled imbalance freely.
 
 Row set (cognate = AUG + near_cognate; non-cognate stays an eval-only grounding control):
@@ -10,8 +10,7 @@ Row set (cognate = AUG + near_cognate; non-cognate stays an eval-only grounding 
   * val:   all cognate (calibration + val-metric climbing)
   * test:  all cognate (recall metric) + a non-cognate sample (grounding)
 
-Re-indexed ``row_idx`` 0..M-1. Evo2 keys can be appended for the SAME rows once its scan
-store is assembled (pass ``--keys evo2/...`` against the same ``--out-store``).
+Re-indexed ``row_idx`` 0..M-1.
 """
 
 from __future__ import annotations
@@ -63,17 +62,25 @@ def main() -> None:
         tnc = np.where((sp == "test") & noncog)[0]
         if len(tnc) > args.noncog_sample:
             tnc = rng.choice(tnc, args.noncog_sample, replace=False)
-        rows = np.sort(np.concatenate([
-            np.where((sp == "train") & cog & (y == 1))[0], tn,
-            np.where((sp == "val") & cog)[0],
-            np.where((sp == "test") & cog)[0], tnc,
-        ]))
+        rows = np.sort(
+            np.concatenate(
+                [
+                    np.where((sp == "train") & cog & (y == 1))[0],
+                    tn,
+                    np.where((sp == "val") & cog)[0],
+                    np.where((sp == "test") & cog)[0],
+                    tnc,
+                ]
+            )
+        )
         em = m.iloc[rows].reset_index(drop=True).copy()
-        em["src_row_idx"] = rows            # provenance back to the full scan manifest
+        em["src_row_idx"] = rows  # provenance back to the full scan manifest
         em["row_idx"] = np.arange(len(em))  # 0..M-1 for the experiment store
         em.to_parquet(out / "manifest.parquet", index=False)
-        print(f"experiment rows: {len(rows):,}  splits={em.split.value_counts().to_dict()}",
-              flush=True)
+        print(
+            f"experiment rows: {len(rows):,}  splits={em.split.value_counts().to_dict()}",
+            flush=True,
+        )
 
     # SEQUENTIAL read: stream the whole source array in big blocks and keep the wanted rows.
     # `rows` is sorted, so masked extraction in source order matches the manifest order.

@@ -1,0 +1,14 @@
+# Dense AlphaGenome baseline substrate via the Regime-A shard gather (scripts/build_store.py).
+# Lists only the GPU-embedding keys that live in the shards. The Kozak one-hot is a
+# sequence-computed feature (never sharded); it is placed into the store from its validated
+# compact form separately. Row-aligned to the dense_exp_store manifest.
+name: dense_ag
+parts_dir: data/scan_parts_allsplits
+out_store: ${TISIAGO_DENSE_STORE}
+keys:
+  - alphagenome_jax/L16k/decoder_1bp/off0.npy
+  - alphagenome_jax/L131k/decoder_1bp/off0.npy
+shard_glob: '*_shard*.npz'  # ignore output .npz in the parts dir
+neg_cap: 1000000
+noncog_sample: 1000000
+seed: 0

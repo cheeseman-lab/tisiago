@@ -1,6 +1,6 @@
 """Kozak ±Wbp one-hot for a (large) scan manifest — vectorized by chromosome.
 
-Reproduces ``autoresearch/make_onehot.py:window_onehot`` EXACTLY (same strand/centering
+Reproduces ``tisiago.baseline.onehot.window_onehot`` EXACTLY (same strand/centering
 convention: ``a_plus = gstart if "+" else gstart-1``; symmetric plus-strand span; reverse-
 complement for minus; codon at window center) but groups rows by chromosome and uses numpy
 fancy-indexing instead of a per-row pyfaidx fetch, so it scales to ~63M positions in minutes.
@@ -80,8 +80,11 @@ def main() -> None:
         help="indexed reference FASTA (default: TISIAGO_GENOME)",
     )
     ap.add_argument("--half", type=int, default=20)
-    ap.add_argument("--validate", default=None,
-                    help="path to a reference kozak npy to assert bit-for-bit equality")
+    ap.add_argument(
+        "--validate",
+        default=None,
+        help="path to a reference kozak npy to assert bit-for-bit equality",
+    )
     args = ap.parse_args()
     if not args.genome:
         ap.error("--genome is required (or set TISIAGO_GENOME)")
