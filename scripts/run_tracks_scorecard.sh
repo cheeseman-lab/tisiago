@@ -12,7 +12,7 @@
 # source (default output <run>/predicted_<split>_float):
 #   sbatch --partition="$TISIAGO_CPU_PARTITION" scripts/run_tracks_scorecard.sh --split val \
 #       --heldout HeLa --out-dir data/tracks/scorecard/val_rnacond_hela \
-#       --source rnacond=data/tracks/runs/ar_rnacond_hela/predicted_{split}_float \
+#       --source tracks=data/tracks/runs/tracks.spliced.flux.pos.ho-HeLa.s0/predicted_{split}_float \
 #       --source base:HeLa=data/tracks/runs/ar_hela_base/predicted_{split}_float
 # Writes <out-dir>/scorecard.{tsv,md,json} and plots/ (tisiago.tracks.scorecard).
 

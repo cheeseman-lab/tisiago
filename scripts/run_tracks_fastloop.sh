@@ -12,7 +12,7 @@
 # Fast-loop configs on the transcript cache (tisiago.tracks.fastloop), one results row each.
 # Usage (from the repo root):
 #   sbatch --partition=nvidia-A100-20 scripts/run_tracks_fastloop.sh \
-#       configs/tracks/fastloop/ref_rnacond.yaml configs/tracks/fastloop/t3_foc_lw5.yaml \
+#       configs/tracks/spliced_flux_pos.yaml my_variant.yaml \
 #       [--results data/tracks/fastloop/results.tsv] [--runs-dir data/tracks/fastloop/runs]
 #   sbatch --partition=nvidia-A100-20 scripts/run_tracks_fastloop.sh --reference
 #   # final, once per fold: a saved head (--export-dir run) on a test cache (txcache --test)

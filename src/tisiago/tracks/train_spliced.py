@@ -2,8 +2,8 @@
 
 Usage::
 
-    python -m tisiago.tracks.train_spliced --cache data/tracks/txcache/fc2d_k562 \
-        --init data/tracks/runs/ar_rnacond_k562_fc2d_l2w300/best --heldout K562 \
+    python -m tisiago.tracks.train_spliced --cache data/tracks/txcache/genomic_fc2d_k562 \
+        --init data/tracks/runs/tracks.genomic.free.pos.ho-K562.s0/best --heldout K562 \
         --out data/tracks/txtrain/k562 --export-dir data/tracks/txtrain/export
     # smoke: --steps 50 --eval-every 50; resume: rerun the same command (``<out>/last``)
     python -m tisiago.tracks.train_spliced --predict data/tracks/txtrain/k562 \

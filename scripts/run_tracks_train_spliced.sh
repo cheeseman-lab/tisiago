@@ -12,7 +12,7 @@
 # AlphaGenome fine-tuned on spliced-transcript input + transcript-space head
 # (tisiago.tracks.train_spliced, stage ``spliced``). Usage (from the repo root):
 #   sbatch --partition=nvidia-A100-20 scripts/run_tracks_train_spliced.sh \
-#       --cache data/tracks/txcache/fc2d_k562 --init data/tracks/runs/ar_rnacond_k562_fc2d_l2w300/best \
+#       --cache data/tracks/txcache/genomic_fc2d_k562 --init data/tracks/runs/tracks.genomic.free.pos.ho-K562.s0/best \
 #       --heldout K562 --out data/tracks/txtrain/k562 --export-dir data/tracks/txtrain/export
 #   # A6000 / L40S: add --max-bucket 16384. Rerun the same command to resume from <out>/last.
 

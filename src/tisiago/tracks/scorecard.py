@@ -3,8 +3,7 @@
 Usage::
 
     python -m tisiago.tracks.scorecard --split val --heldout HeLa \
-        --source rnacond:HeLa=data/tracks/runs/ar_rnacond_hela/predicted_{split}_float \
-        --source base:HeLa=data/tracks/runs/ar_hela_base/predicted_{split}_float
+        --source tracks:HeLa=RUN/predicted_{split}_float  # RUN: the run directory
     python -m tisiago.tracks.scorecard --split test --i-am-final ...
 
 Each ``--source NAME:CONDITION=DIR`` (or ``NAME=DIR`` for every condition) is a
@@ -697,9 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--split", choices=tuple(SPLIT_FILES), default="val")
     ap.add_argument("--i-am-final", action="store_true", help="required for --split test")
-    ap.add_argument("--windows-dir", type=Path, default=Path("data/tracks/windows_new"))
+    ap.add_argument("--windows-dir", type=Path, default=Path("data/tracks/windows"))
     ap.add_argument(
-        "--expression", type=Path, default=Path("data/tracks/expression/expression.new.parquet")
+        "--expression", type=Path, default=Path("data/tracks/expression/expression.parquet")
     )
     ap.add_argument("--tracks-dir", type=Path, default=Path("data/tracks/tracks"))
     ap.add_argument("--gtf", default=os.environ.get("TISIAGO_GTF"), help="MANE_Select GTF")

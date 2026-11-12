@@ -2,10 +2,10 @@
 
 Usage::
 
-    python -m tisiago.tracks.txcache index --name ar_rnacond_k562_v2     # CPU, seconds
-    python -m tisiago.tracks.txcache tracks --name ar_rnacond_k562_v2    # CPU
-    python -m tisiago.tracks.txcache embed --name ar_rnacond_k562_v2 \
-        --checkpoint data/tracks/runs/ar_rnacond_k562_v2/best                 # GPU
+    python -m tisiago.tracks.txcache index --name genomic_fc2d_k562      # CPU, seconds
+    python -m tisiago.tracks.txcache tracks --name genomic_fc2d_k562     # CPU
+    python -m tisiago.tracks.txcache embed --name genomic_fc2d_k562 \
+        --checkpoint data/tracks/runs/tracks.genomic.free.pos.ho-K562.s0/best   # GPU
     python -m tisiago.tracks.txcache build ...                           # all three
     python -m tisiago.tracks.txcache build --test --i-am-final --name <x>_test \
         --pca-from data/tracks/txcache/<x> --checkpoint data/tracks/runs/<x>/best   # test cache
@@ -852,16 +852,16 @@ def build_parser() -> argparse.ArgumentParser:
     """CLI parser."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("stage", choices=("index", "tracks", "embed", "build", "size"))
-    ap.add_argument("--name", default="ar_rnacond_k562_v2")
+    ap.add_argument("--name", required=True, help="cache name, e.g. genomic_fc2d_k562")
     ap.add_argument("--cache", type=Path, help="default: data/tracks/txcache/<name>")
     ap.add_argument(
-        "--checkpoint", type=Path, default=Path("data/tracks/runs/ar_rnacond_k562_v2/best")
+        "--checkpoint", type=Path, default=None, help="stage-1 run best/ (embed, build)"
     )
     ap.add_argument("--arm", default=None, help="default: the run's run.json")
     ap.add_argument("--head", default=None, help="default: the run's run.json")
-    ap.add_argument("--windows-dir", type=Path, default=Path("data/tracks/windows_new"))
+    ap.add_argument("--windows-dir", type=Path, default=Path("data/tracks/windows"))
     ap.add_argument(
-        "--expression", type=Path, default=Path("data/tracks/expression/expression.new.parquet")
+        "--expression", type=Path, default=Path("data/tracks/expression/expression.parquet")
     )
     ap.add_argument("--tracks-dir", type=Path, default=Path("data/tracks/tracks"))
     ap.add_argument("--gtf", default=os.environ.get("TISIAGO_GTF"))
@@ -917,6 +917,8 @@ def main() -> None:
     if args.stage in ("index", "build") and not args.gtf:
         ap.error("--gtf is required (or set TISIAGO_GTF in .env)")
     if args.stage in ("embed", "build"):
+        if args.checkpoint is None:
+            ap.error("--checkpoint is required for embed / build")
         for flag in ("genome", "base_checkpoint"):
             if not getattr(args, flag):
                 ap.error(f"--{flag.replace('_', '-')} is required (or set it in .env)")

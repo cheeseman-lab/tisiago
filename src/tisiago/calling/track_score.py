@@ -755,7 +755,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--baseline-dir", type=Path, default=Path("data/dense_txp_representation"))
     ap.add_argument("--baseline-arm", default=BASELINE_ARM)
     ap.add_argument("--selections", type=Path, help="default: <baseline-dir>/row_selections.npz")
-    ap.add_argument("--windows-dir", type=Path, default=Path("data/tracks/windows_new"))
+    ap.add_argument("--windows-dir", type=Path, default=Path("data/tracks/windows"))
     ap.add_argument("--tracks-dir", type=Path, default=Path("data/tracks/tracks"))
     ap.add_argument(
         "--predicted",

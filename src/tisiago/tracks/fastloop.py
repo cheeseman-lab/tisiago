@@ -2,7 +2,7 @@
 
 Usage::
 
-    python -m tisiago.tracks.fastloop configs/tracks/fastloop/ref_rnacond.yaml [more.yaml ...]
+    python -m tisiago.tracks.fastloop configs/tracks/spliced_flux_pos.yaml [more.yaml ...]
     python -m tisiago.tracks.fastloop --reference      # score the checkpoint's own predictions
     python -m tisiago.tracks.fastloop --predict data/tracks/fastloop/export/<name> \
         --cache data/tracks/txcache/<x>_test --split test --i-am-final \
@@ -151,7 +151,7 @@ RNA_HEAD = 129
 DEFAULTS: dict = {
     "name": None,
     "seed": 0,
-    "cache": "data/tracks/txcache/ar_rnacond_k562_v2",
+    "cache": "data/tracks/txcache/genomic_fc2d_k562",
     "heldout": ["K562"],
     "train_conditions": None,
     "data": {

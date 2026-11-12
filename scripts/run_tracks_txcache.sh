@@ -20,7 +20,7 @@
 #   # final test cache (test windows only; PCA copied from the train cache, never refit)
 #   sbatch --partition=nvidia-A100-20 scripts/run_tracks_txcache.sh build --test --i-am-final \
 #       --name <x>_test --pca-from data/tracks/txcache/<x> --checkpoint data/tracks/runs/<x>/best
-# Defaults: --name ar_rnacond_k562_v2, --checkpoint data/tracks/runs/ar_rnacond_k562_v2/best.
+# --name is required; --checkpoint (the stage-1 run best/) is required for embed / build.
 
 set -euo pipefail
 
