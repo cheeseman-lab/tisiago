@@ -93,7 +93,7 @@ def _oracle(batch):
 
 def _psites(bam_path):
     pysam = pytest.importorskip("pysam")
-    from tisiago.seq2func.synthetic_bam import write_para
+    from tests.synthetic_bam import write_para
 
     para = bam_path.with_name(bam_path.name + ".para.py")
     write_para(para)
@@ -139,7 +139,7 @@ def test_oracle_expected_tracks_reproduce_real_replicates(world):
             assert dict(got_minus["chr7"]) == {31: 2.0, 76: 4.0, 200: 2.0}
             assert not got_plus["chr1"]
             pytest.importorskip("pysam")
-            from tisiago.seq2func.synthetic_bam import tracks_to_bam
+            from tests.synthetic_bam import tracks_to_bam
 
             bam = world["out"] / f"{library}_rep{rep}.bam"
             tracks_to_bam(f"{pred}.plus.bw", f"{pred}.minus.bw", bam)
@@ -345,7 +345,7 @@ def test_real_resample_expectation_is_real_pooled_split_by_fraction(world):
 
 def test_real_resample_minus_strand_roundtrips_through_psites(world):
     pytest.importorskip("pysam")
-    from tisiago.seq2func.synthetic_bam import tracks_to_bam
+    from tests.synthetic_bam import tracks_to_bam
 
     _write_reps(world["tracks"], {}, {"chr7": {100: 4}}, reps=(1, 2))
     _run(world, world["out"], None, mode="expected", source="real-resample")

@@ -10,7 +10,7 @@ Usage::
 Writes ``<out>/<C>/{tis,chx}_rep{1,2}.{plus,minus}.bw`` (default ``<out>`` =
 ``<run>/predicted_<split>``) with the chromosome sizes of the real tracks and the Ribo-TISH
 minus-strand convention (canonical minus P-site + ``RIBOTISH_MINUS_SHIFT``), so
-:func:`tisiago.seq2func.roundtrip.prepare_inputs` reads them like the real tracks.
+the scorecard and track scorer read them like the real tracks.
 
 The model predicts expected counts for the replicate-pooled target. Replicate ``r`` gets the
 pooled prediction times ``total_r / (total_1 + total_2)``, the library's share measured on the

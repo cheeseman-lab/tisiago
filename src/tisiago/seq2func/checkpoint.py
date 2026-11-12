@@ -7,6 +7,9 @@ mappings / sequences whose leaves expose ``.shape``.
 from __future__ import annotations
 
 import json
+import math
+import os
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -98,3 +101,21 @@ def init_leaves(
             lines.append(f"  shape {'/'.join(p)}: model {template[p]} vs saved {saved[p]}")
         raise ValueError("\n".join(lines))
     return load
+
+
+def finite_or_none(value: float) -> float | None:
+    """``value`` if finite, else ``None`` (serialised as JSON ``null``)."""
+    return value if math.isfinite(value) else None
+
+
+def write_json_atomic(payload: dict, out: Path) -> None:
+    """Write ``payload`` to ``out`` via a temp file in the same directory and ``os.replace``."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=out.parent, prefix=f".{out.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(payload, fh, indent=2, allow_nan=False)
+        os.replace(tmp, out)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise

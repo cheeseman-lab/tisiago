@@ -12,7 +12,6 @@
 # Usage (from the repo root):
 #   sbatch --partition="$TISIAGO_AGFT_PARTITION" scripts/run_p6_predict_tracks.sh \
 #       --checkpoint data/p6/runs/ar_resid_chx_w200_30k/best --arm condition:K562 --split val
-# Then the Ribo-TISH comparison (CPU): scripts/run_p6_predicted_calls.sh.
 
 set -euo pipefail
 

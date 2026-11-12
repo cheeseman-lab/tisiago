@@ -44,9 +44,9 @@ import numpy as np
 import pandas as pd
 
 from tisiago.seq2func.data import RNA_REFERENCE_DEPTH, TrackReader, iterate, rna_total
+from tisiago.seq2func.head_kinds import CHX_KINDS, HEAD_CHOICES, RNA_KINDS, TRANSCRIPT_KINDS
 from tisiago.seq2func.masking import expression_mask
 from tisiago.seq2func.metrics import gene_totals, log_pearson, profile_kl
-from tisiago.seq2func.overfit import CHX_KINDS, HEAD_CHOICES, RNA_KINDS, TRANSCRIPT_KINDS
 from tisiago.seq2func.qc import _frame_counts
 from tisiago.seq2func.samples import CONDITIONS
 from tisiago.seq2func.targets import channel_layout, rnacond_layout

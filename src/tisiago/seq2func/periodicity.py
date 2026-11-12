@@ -51,7 +51,7 @@ from tisiago.seq2func.evaluate import (
     tracks_dir_of,
     write_tsv,
 )
-from tisiago.seq2func.overfit import HEAD_CHOICES
+from tisiago.seq2func.head_kinds import HEAD_CHOICES
 from tisiago.seq2func.targets import channel_layout
 from tisiago.seq2func.train import parse_arm
 

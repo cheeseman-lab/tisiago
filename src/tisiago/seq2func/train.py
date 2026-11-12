@@ -39,16 +39,15 @@ from pathlib import Path
 
 import numpy as np
 
-from tisiago.seq2func.metrics import profile_kl
-from tisiago.seq2func.overfit import (
+from tisiago.seq2func.checkpoint import finite_or_none, write_json_atomic
+from tisiago.seq2func.head_kinds import (
     CHX_KINDS,
     HEAD_CHOICES,
     MOD_KINDS,
     RNA_KINDS,
     TRANSCRIPT_KINDS,
-    finite_or_none,
-    write_json_atomic,
 )
+from tisiago.seq2func.metrics import profile_kl
 from tisiago.seq2func.samples import CELL_LINE_GROUPS, CONDITIONS, LIBRARIES
 
 TRAIN_WINDOWS = "train.parquet"

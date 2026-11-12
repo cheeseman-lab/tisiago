@@ -568,7 +568,7 @@ def test_arm_fields_old_arms_unchanged():
 
 
 def test_arm_fields_rnacond_round_trip_through_run_json(tmp_path):
-    from tisiago.seq2func.overfit import write_json_atomic
+    from tisiago.seq2func.checkpoint import write_json_atomic
     from tisiago.seq2func.rna_features import RNA_FEATURE_NAMES, RNA_WIDTHS
 
     fields = train.arm_fields("rnacond:RPE1", "rnacond")

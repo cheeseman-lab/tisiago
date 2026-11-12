@@ -4,9 +4,9 @@ from collections import Counter
 
 import pysam
 
+from tests.synthetic_bam import tracks_to_bam, write_para
 from tisiago.seq2func.psite import psite
 from tisiago.seq2func.samples import parse_para
-from tisiago.seq2func.synthetic_bam import tracks_to_bam, write_para
 from tisiago.seq2func.tracks import write_bigwigs
 
 SIZES = [("chr1", 1_000)]

@@ -170,29 +170,8 @@ def test_make_optimizer_heads_only_freezes_backbone():
     assert float(jnp.abs(updates["head/h/~predict/hidden"]["w"]).mean()) > 0
 
 
-@pytest.mark.parametrize(
-    ("final", "expected"),
-    [(0.9, True), (1.0, True), (1.2, False), (float("nan"), False)],
-)
-def test_passes_profile(final, expected):
-    from tisiago.seq2func.overfit import passes_profile
-
-    assert passes_profile(final) is expected
-
-
-def test_fetch_onehot_pads_past_chromosome_end(tmp_path):
-    from tisiago.seq2func.overfit import fetch_onehot
-
-    fasta = tmp_path / "g.fa"
-    fasta.write_text(">c\nACGTacgt\n")
-    onehot = fetch_onehot(str(fasta), "c", -2, 10)
-    assert onehot.shape == (12, 4)
-    assert onehot[:2].sum() == 0 and onehot[-2:].sum() == 0
-    assert onehot[2:10].argmax(1).tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
-
-
 def test_write_json_atomic(tmp_path):
-    from tisiago.seq2func.overfit import write_json_atomic
+    from tisiago.seq2func.checkpoint import write_json_atomic
 
     out = tmp_path / "sub" / "x.json"
     write_json_atomic({"reduction": 0.95}, out)
@@ -200,46 +179,20 @@ def test_write_json_atomic(tmp_path):
     assert [p.name for p in out.parent.iterdir()] == ["x.json"]
 
 
-def test_targets_and_overfit_import_without_pysam():
+def test_targets_and_head_kinds_import_without_pysam():
     import subprocess
     import sys
 
     code = (
         "import sys; sys.modules['pysam'] = None; "
-        "import tisiago.seq2func.targets, tisiago.seq2func.overfit"
+        "import tisiago.seq2func.targets, tisiago.seq2func.head_kinds"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 
-def test_fetch_onehot_window_entirely_past_chromosome_end(tmp_path):
-    from tisiago.seq2func.overfit import fetch_onehot
-
-    fasta = tmp_path / "g.fa"
-    fasta.write_text(">c\nACGTacgt\n")
-    onehot = fetch_onehot(str(fasta), "c", 20, 26)
-    assert onehot.shape == (6, 4)
-    assert onehot.sum() == 0
-
-
-@pytest.mark.parametrize(
-    ("initial", "final", "expected"),
-    [
-        (float("nan"), 1.0, False),
-        (10.0, float("nan"), False),
-        (0.0, 0.0, False),
-        (10.0, 0.5, True),
-        (10.0, 5.0, False),
-    ],
-)
-def test_passes_gate(initial, final, expected):
-    from tisiago.seq2func.overfit import passes_gate
-
-    assert passes_gate(initial, final) is expected
-
-
 def test_write_json_atomic_rejects_nan(tmp_path):
-    from tisiago.seq2func.overfit import finite_or_none, write_json_atomic
+    from tisiago.seq2func.checkpoint import finite_or_none, write_json_atomic
 
     out = tmp_path / "x.json"
     write_json_atomic({"losses": [finite_or_none(float("nan")), finite_or_none(1.0)]}, out)
@@ -386,7 +339,7 @@ def _random_onehot(rng, batch, length):
 
 
 def test_seqconv_registered_and_choices_match():
-    from tisiago.seq2func import evaluate, overfit, periodicity, train
+    from tisiago.seq2func import evaluate, head_kinds, periodicity, train
     from tisiago.seq2func.model import HEAD_KINDS, SEQUENCE_KINDS, SeqConvTrackHead
 
     assert HEAD_KINDS["seqconv"] is SeqConvTrackHead
@@ -409,7 +362,7 @@ def test_seqconv_registered_and_choices_match():
     for parser in (train.build_parser(),):
         action = next(a for a in parser._actions if a.dest == "head")
         assert set(action.choices) == set(HEAD_KINDS)
-    for module in (evaluate, overfit, periodicity):
+    for module in (evaluate, head_kinds, periodicity):
         assert set(module.HEAD_CHOICES) == set(HEAD_KINDS)
 
 
@@ -935,7 +888,7 @@ def _chx_forward(kind, emb, seq=None, channels=(1, 3), scales=None):
 
 
 def test_resid_chx_registered_like_resid_tx():
-    from tisiago.seq2func import overfit
+    from tisiago.seq2func import head_kinds
     from tisiago.seq2func.model import (
         HEAD_KINDS,
         SEQUENCE_KINDS,
@@ -946,9 +899,9 @@ def test_resid_chx_registered_like_resid_tx():
     assert HEAD_KINDS["resid_chx"] is ResidChxTrackHead
     assert "resid_chx" in SEQUENCE_KINDS
     assert SEQUENCE_WIDTHS["resid_chx"] == SEQUENCE_WIDTHS["resid_tx"]
-    assert "resid_chx" in overfit.HEAD_CHOICES and "resid_chx" in overfit.TRANSCRIPT_KINDS
-    assert overfit.MOD_KINDS == {"resid_tx", "resid_chx"}
-    assert overfit.CHX_KINDS == {"resid_chx"}
+    assert "resid_chx" in head_kinds.HEAD_CHOICES and "resid_chx" in head_kinds.TRANSCRIPT_KINDS
+    assert head_kinds.MOD_KINDS == {"resid_tx", "resid_chx"}
+    assert head_kinds.CHX_KINDS == {"resid_chx"}
 
 
 def test_resid_chx_equals_mlp_at_init_and_modulates_only_chx_channels():
@@ -1630,11 +1583,11 @@ def _fact_forward(kind):
 
 @pytest.mark.parametrize("kind", FACT_KINDS)
 def test_fact_heads_registered_shapes_and_rna_use(kind):
-    from tisiago.seq2func import overfit
+    from tisiago.seq2func import head_kinds
     from tisiago.seq2func.model import SEQUENCE_WIDTHS
     from tisiago.seq2func.rna_features import NUM_ONESIDED_FEATURES, NUM_RNA_FEATURES
 
-    assert SEQUENCE_WIDTHS[kind] == 6 and kind in overfit.RNA_KINDS
+    assert SEQUENCE_WIDTHS[kind] == 6 and kind in head_kinds.RNA_KINDS
     register_track_head(f"p6_test_{kind}_reg", 4, kind=kind)
     fn = _fact_forward(kind)
     rng = np.random.default_rng(1)
@@ -1663,11 +1616,11 @@ def _fc2_setup():
 
 
 def test_fc2_registered_and_conv9_trunk_shapes():
-    from tisiago.seq2func import evaluate, overfit, periodicity
+    from tisiago.seq2func import evaluate, head_kinds, periodicity
     from tisiago.seq2func.model import SEQUENCE_WIDTHS
     from tisiago.seq2func.rna_features import NUM_ONESIDED_FEATURES, NUM_RNA_FEATURES
 
-    assert SEQUENCE_WIDTHS["rnacond_fc2"] == 6 and "rnacond_fc2" in overfit.RNA_KINDS
+    assert SEQUENCE_WIDTHS["rnacond_fc2"] == 6 and "rnacond_fc2" in head_kinds.RNA_KINDS
     assert "rnacond_fc2" in evaluate.HEAD_CHOICES and "rnacond_fc2" in periodicity.HEAD_CHOICES
     register_track_head("p6_test_fc2_reg", 4, kind="rnacond_fc2")
     fn, emb, seq, params = _fc2_setup()
@@ -1825,9 +1778,9 @@ def test_train_step_without_local_weight_matches_previous_loss():
 
 
 def test_fc2d_context_branch_only_feeds_tis():
-    from tisiago.seq2func import overfit
+    from tisiago.seq2func import head_kinds
 
-    assert "rnacond_fc2d" in overfit.RNACOND_FACT_KINDS
+    assert "rnacond_fc2d" in head_kinds.RNACOND_FACT_KINDS
     fn, emb, seq, params = _fc2_setup()
     fn_d = _fact_forward("rnacond_fc2d")
     pd = fn_d.init(jax.random.PRNGKey(0), emb, seq)
