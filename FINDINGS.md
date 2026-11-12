@@ -2,8 +2,9 @@
 
 > **Reading guide (2026-11-12).** Section numbers are stable; the names in their titles are historical.
 > Current names are in [`docs/PLAN.md`](docs/PLAN.md) §1. Code and paths cited below are as of the
-> tag `archive/pre-cleanup-2026-11-12` (`seq2func/` is now `src/tisiago/tracks/`; `autoresearch/` paths are preserved
-> in that tag). `.superpowers/sdd/` notes were never tracked in git and exist only in the local working copy.
+> tag `archive/pre-cleanup-2026-11-12` (`seq2func/` is now `src/tisiago/tracks/`). Every deleted path cited here —
+> `autoresearch/`, `head_xgb.py`, `efficiency_head.py`, `eval.py`, `docs/superpowers/` specs and plans — is preserved in
+> that tag. `.superpowers/sdd/` notes were never tracked in git and exist only in the local working copy.
 >
 > | § | Line (current name) | Status |
 > |---|---|---|
@@ -572,7 +573,9 @@ vs 0.50, recall 0.50 vs 0.49); val HeLa 0.268 vs 0.263. Test (seed 0): K562 step
 R 0.82) / step 1 0.34 (R 0.48, P 0.54, annotated R 0.73) / genomic 0.24-0.25 (R 0.31); HeLa 0.29 / 0.30. 5'UTR
 recall stays 0.04-0.19. U2OS/RPE1 Ribo-TISH did not run: Ribo-TISH's TIS-background grouping (`zbio/ribo.py`,
 `if s >= ctotal*parts[ip]`) leaves the last group limit `None` when one transcript holds >10% of the TIS reads, and
-`predict` then fails on the real tracks (fix: `while`); lives in the ribotish repo.
+`predict` then fails on the real tracks (fix: `while`); lives in the ribotish repo. *(Corrected 2026-11-11: the
+failure is confined to the chr7 synthetic-BAM path — the fork's real-BAM runs are unaffected — and a `while` does
+not fix it; see `docs/PRINCIPLES.md` §7 and the re-scope spec §9.)*
 
 **Reading.** The transcript-space head is the main gain over the genomic model (+5-15 points on tracks, Ribo-TISH
 0.25 -> 0.34 on test). Giving the backbone the spliced mRNA adds a smaller, consistent gain on fine-scale tracks
